@@ -25,17 +25,14 @@ services:
       BROWSER_PROXY_PASSWORD: ${BROWSER_PROXY_PASSWORD:-}
       BROWSER_PROXY_BYPASS: ${BROWSER_PROXY_BYPASS:-}
     volumes:
-      - .:/app
       - googleaisearch2api-data:/app/data
-      - /app/.venv
-    command: /bin/sh -lc "uv sync --frozen --no-dev && uv run googleaisearch2api"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 10s
 
 volumes:
   googleaisearch2api-data:

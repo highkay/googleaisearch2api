@@ -1,0 +1,13 @@
+services:
+  googleaisearch2api:
+    environment:
+      UV_PYTHON: /usr/bin/python3.12
+      UV_PYTHON_DOWNLOADS: never
+    volumes:
+      - .:/app
+      - googleaisearch2api-data:/app/data
+      - /app/.venv
+    command:
+      - /bin/sh
+      - -lc
+      - uv sync --frozen --no-dev --python /usr/bin/python3.12 && uv run --no-sync --python /usr/bin/python3.12 googleaisearch2api
