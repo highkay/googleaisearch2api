@@ -1,0 +1,41 @@
+services:
+  googleaisearch2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${APP_PORT:-9010}:8000"
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+      APP_DATA_DIR: /app/data
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-google-search}
+      API_TOKEN: ${API_TOKEN:-change-me-google-search}
+      BROWSER_HEADLESS: ${BROWSER_HEADLESS:-true}
+      BROWSER_USER_AGENT: ${BROWSER_USER_AGENT:-}
+      BROWSER_LOCALE: ${BROWSER_LOCALE:-en-US}
+      BROWSER_BASE_URL: ${BROWSER_BASE_URL:-https://www.google.com/search?udm=50&aep=11&hl=en}
+      BROWSER_TIMEOUT_MS: ${BROWSER_TIMEOUT_MS:-90000}
+      ANSWER_TIMEOUT_MS: ${ANSWER_TIMEOUT_MS:-45000}
+      BROWSER_WORKERS: ${BROWSER_WORKERS:-2}
+      REQUEST_QUEUE_SIZE: ${REQUEST_QUEUE_SIZE:-8}
+      BROWSER_PROXY_SERVER: ${BROWSER_PROXY_SERVER:-}
+      BROWSER_PROXY_USERNAME: ${BROWSER_PROXY_USERNAME:-}
+      BROWSER_PROXY_PASSWORD: ${BROWSER_PROXY_PASSWORD:-}
+      BROWSER_PROXY_BYPASS: ${BROWSER_PROXY_BYPASS:-}
+    volumes:
+      - .:/app
+      - googleaisearch2api-data:/app/data
+      - /app/.venv
+    command: /bin/sh -lc "uv sync --frozen --no-dev && uv run googleaisearch2api"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  googleaisearch2api-data:

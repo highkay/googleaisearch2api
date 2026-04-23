@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Google AI Search2API Console</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
+</head>
+<body>
+    <div class="backdrop"></div>
+    <main class="shell">
+        <section class="hero">
+            <div>
+                <p class="eyebrow">Google AI Search2API</p>
+                <h1>Browser-backed OpenAI compatibility, with the operator controls exposed.</h1>
+                <p class="hero-copy">
+                    This console reflects the verified runtime shape: the public API is HTTP, but the
+                    execution path is a live Patchright browser session against Google AI search.
+                </p>
+            </div>
+            <div class="hero-meta">
+                <div class="meta-card">
+                    <span>Current model</span>
+                    <strong>{{ config.default_model }}</strong>
+                </div>
+                <div class="meta-card">
+                    <span>Browser target</span>
+                    <strong>{{ config.browser_label }}</strong>
+                </div>
+                <div class="meta-card">
+                    <span>Proxy</span>
+                    <strong>{{ "Enabled" if config.proxy_enabled else "Disabled" }}</strong>
+                </div>
+                <div class="meta-card">
+                    <span>Pool</span>
+                    <strong>{{ pool_summary.worker_count }} workers / {{ pool_summary.queue_capacity }} queue</strong>
+                </div>
+            </div>
+        </section>
+
+        {% if status_message %}
+        <section class="flash">
+            {{ status_message }}
+        </section>
+        {% endif %}
+
+        <section class="stats-grid" id="stats-grid">
+            <article class="stat-card">
+                <span class="stat-label">Total requests</span>
+                <strong class="stat-value" data-stat="total_requests">{{ summary.total_requests }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Successful</span>
+                <strong class="stat-value" data-stat="successful_requests">{{ summary.successful_requests }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Failed</span>
+                <strong class="stat-value" data-stat="failed_requests">{{ summary.failed_requests }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Avg latency</span>
+                <strong class="stat-value" data-stat="average_latency_ms">
+                    {{ "%.0f ms"|format(summary.average_latency_ms) if summary.average_latency_ms is not none else "n/a" }}
+                </strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Busy workers</span>
+                <strong class="stat-value" data-stat="busy_workers">{{ pool_summary.busy_workers }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Queued</span>
+                <strong class="stat-value" data-stat="queued_requests">{{ pool_summary.queued_requests }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Pool health</span>
+                <strong class="stat-value" data-stat="workers_with_errors">{{ pool_summary.workers_with_errors }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Generation</span>
+                <strong class="stat-value" data-stat="generation">{{ pool_summary.generation }}</strong>
+            </article>
+        </section>
+
+        <section class="panel-grid">
+            <article class="panel">
+                <div class="panel-head">
+                    <h2>Runtime Config</h2>
+                    <p>Changes are persisted into SQLite and applied to the next browser run immediately.</p>
+                </div>
+                <form method="post" action="/console/settings" class="config-form">
+                    <label>
+                        <span>Model name</span>
+                        <input type="text" name="default_model" value="{{ config.default_model }}" required>
+                    </label>
+                    <label>
+                        <span>API token</span>
+                        <input type="text" name="api_token" value="{{ config.api_token }}" required>
+                    </label>
+                    <label class="wide">
+                        <span>User-Agent override</span>
+                        <input type="text" name="browser_user_agent" value="{{ config.browser_user_agent or '' }}" placeholder="Optional manual Chrome UA override">
+                    </label>
+                    <label>
+                        <span>Locale</span>
+                        <input type="text" name="browser_locale" value="{{ config.browser_locale }}" required>
+                    </label>
+                    <label class="wide">
+                        <span>Base URL</span>
+                        <input type="text" name="browser_base_url" value="{{ config.browser_base_url }}" required>
+                    </label>
+                    <label>
+                        <span>Browser timeout (ms)</span>
+                        <input type="number" name="browser_timeout_ms" value="{{ config.browser_timeout_ms }}" min="1000" required>
+                    </label>
+                    <label>
+                        <span>Answer timeout (ms)</span>
+                        <input type="number" name="answer_timeout_ms" value="{{ config.answer_timeout_ms }}" min="1000" required>
+                    </label>
+                    <label class="checkbox">
+                        <input type="checkbox" name="browser_headless" {% if config.browser_headless %}checked{% endif %}>
+                        <span>Run browser headless</span>
+                    </label>
+                    <label>
+                        <span>Proxy server</span>
+                        <input type="text" name="browser_proxy_server" value="{{ config.browser_proxy_server or '' }}" placeholder="http://127.0.0.1:7890">
+                    </label>
+                    <label>
+                        <span>Proxy username</span>
+                        <input type="text" name="browser_proxy_username" value="{{ config.browser_proxy_username or '' }}">
+                    </label>
+                    <label>
+                        <span>Proxy password</span>
+                        <input type="text" name="browser_proxy_password" value="{{ config.browser_proxy_password or '' }}">
+                    </label>
+                    <label>
+                        <span>Proxy bypass</span>
+                        <input type="text" name="browser_proxy_bypass" value="{{ config.browser_proxy_bypass or '' }}" placeholder="localhost,127.0.0.1">
+                    </label>
+                    <div class="actions wide">
+                        <button type="submit" class="primary">Save configuration</button>
+                    </div>
+                </form>
+            </article>
+
+            <article class="panel">
+                <div class="panel-head">
+                    <h2>Live Probe</h2>
+                    <p>Use the current browser settings to run a real Google AI query before changing business code.</p>
+                </div>
+                <form method="post" action="/console/actions/probe" class="probe-form">
+                    <label class="wide">
+                        <span>Probe prompt</span>
+                        <textarea name="probe_prompt" rows="6">What is the difference between Responses API and Chat Completions API? summarize in 3 points</textarea>
+                    </label>
+                    <div class="actions wide">
+                        <button type="submit" class="secondary">Run live probe</button>
+                    </div>
+                </form>
+                <div class="probe-note">
+                    <span class="note-label">Token mask</span>
+                    <strong>{{ config.masked_api_token }}</strong>
+                </div>
+            </article>
+        </section>
+
+        <section class="panel full">
+            <div class="panel-head">
+                <h2>Recent Requests</h2>
+                <p>Requests are persisted with prompt excerpt, status, latency, result preview and extracted citations.</p>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>When</th>
+                            <th>Endpoint</th>
+                            <th>Status</th>
+                            <th>Latency</th>
+                            <th>Prompt</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in recent_requests %}
+                        <tr>
+                            <td>{{ item.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+                            <td>{{ item.endpoint }}</td>
+                            <td><span class="status {{ item.status }}">{{ item.status }}</span></td>
+                            <td>{{ item.duration_ms if item.duration_ms is not none else "n/a" }}</td>
+                            <td>
+                                <div class="clip">{{ item.prompt_preview }}</div>
+                            </td>
+                            <td>
+                                {% if item.status == "ok" %}
+                                <div class="clip">{{ item.response_preview }}</div>
+                                {% if item.citations %}
+                                <div class="citation-list">
+                                    {% for citation in item.citations[:3] %}
+                                    <a href="{{ citation.url }}" target="_blank" rel="noreferrer">{{ citation.title }}</a>
+                                    {% endfor %}
+                                </div>
+                                {% endif %}
+                                {% else %}
+                                <div class="clip error-text">{{ item.error_message or "Unknown error" }}</div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" class="empty">No requests have been recorded yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+    <script src="{{ url_for('static', path='app.js') }}"></script>
+</body>
+</html>
