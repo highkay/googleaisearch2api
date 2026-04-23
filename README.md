@@ -169,3 +169,7 @@ uv run ruff check .
 uv run ruff format .
 uv run python scripts/probe_google_ai.py --prompt "What changed in OpenAI Responses API?"
 ```
+
+## 友链
+
+- [linux.do](https://linux.do/)
