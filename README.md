@@ -140,6 +140,10 @@ curl http://127.0.0.1:8000/v1/responses \
 - 当前 streaming 是在拿到完整答案后按 OpenAI SSE 形状回放，不是 Google 原生流式协议透传。
 - 代理支持已经接入浏览器启动参数，但代理能否连通取决于你自己的代理服务。
 
+## 友情链接
+
+- [Linux.do](https://linux.do)
+
 ## 常用命令
 
 ```bash
