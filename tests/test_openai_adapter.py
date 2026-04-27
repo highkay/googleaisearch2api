@@ -16,7 +16,7 @@ from googleaisearch2api.schemas import (
 def test_build_prompt_from_messages_keeps_system_and_transcript() -> None:
     prompt = build_prompt_from_messages(
         [
-            ChatMessage(role="system", content="Be concise."),
+            ChatMessage(role="developer", content="Be concise."),
             ChatMessage(role="user", content="First question"),
             ChatMessage(role="assistant", content="First answer"),
             ChatMessage(role="user", content="Second question"),
@@ -33,15 +33,20 @@ def test_build_prompt_from_responses_request_supports_structured_input() -> None
     payload = ResponsesRequest(
         input=[
             ResponseInputItem(
+                role="developer",
+                content=[ResponseInputPart(type="input_text", text="Use verified facts only.")],
+            ),
+            ResponseInputItem(
                 role="user",
                 content=[ResponseInputPart(type="input_text", text="Summarize the result")],
-            )
+            ),
         ],
         instructions="Use three bullet points.",
     )
 
     prompt = build_prompt_from_responses_request(payload)
     assert "Use three bullet points." in prompt
+    assert "Use verified facts only." in prompt
     assert "USER: Summarize the result" in prompt
 
 

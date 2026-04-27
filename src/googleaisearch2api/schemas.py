@@ -2,15 +2,24 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+CHAT_TEXT_PART_TYPES = {"text"}
+CHAT_ROLES = {"system", "developer", "user", "assistant"}
+RESPONSE_INPUT_PART_TYPES = {"input_text"}
+RESPONSE_INPUT_ROLES = {"system", "developer", "user", "assistant"}
 
 
-class Citation(BaseModel):
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Citation(StrictModel):
     title: str
     url: str
 
 
-class GoogleAiResult(BaseModel):
+class GoogleAiResult(StrictModel):
     answer_text: str
     citations: list[Citation] = Field(default_factory=list)
     final_url: str
@@ -18,7 +27,7 @@ class GoogleAiResult(BaseModel):
     body_excerpt: str = ""
 
 
-class RecentRequest(BaseModel):
+class RecentRequest(StrictModel):
     id: str
     endpoint: str
     status: str
@@ -34,7 +43,7 @@ class RecentRequest(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
 
 
-class DashboardSummary(BaseModel):
+class DashboardSummary(StrictModel):
     total_requests: int = 0
     successful_requests: int = 0
     failed_requests: int = 0
@@ -43,7 +52,7 @@ class DashboardSummary(BaseModel):
     last_success_at: datetime | None = None
 
 
-class RuntimePoolSummary(BaseModel):
+class RuntimePoolSummary(StrictModel):
     worker_count: int = 0
     busy_workers: int = 0
     idle_workers: int = 0
@@ -54,18 +63,36 @@ class RuntimePoolSummary(BaseModel):
     workers_with_errors: int = 0
 
 
-class ChatContentPart(BaseModel):
+class ChatContentPart(StrictModel):
     type: str = "text"
     text: str | None = None
 
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized not in CHAT_TEXT_PART_TYPES:
+            raise ValueError("Only text chat content parts are supported by the browser backend.")
+        return normalized
 
-class ChatMessage(BaseModel):
+
+class ChatMessage(StrictModel):
     role: str
     content: str | list[ChatContentPart]
     name: str | None = None
 
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized not in CHAT_ROLES:
+            raise ValueError(
+                "Only system, developer, user, and assistant chat roles are supported."
+            )
+        return normalized
 
-class ChatCompletionsRequest(BaseModel):
+
+class ChatCompletionsRequest(StrictModel):
     model: str | None = None
     messages: list[ChatMessage]
     stream: bool = False
@@ -74,17 +101,37 @@ class ChatCompletionsRequest(BaseModel):
     user: str | None = None
 
 
-class ResponseInputPart(BaseModel):
+class ResponseInputPart(StrictModel):
     type: str = "input_text"
     text: str | None = None
 
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized not in RESPONSE_INPUT_PART_TYPES:
+            raise ValueError(
+                "Only input_text response content parts are supported by the browser backend."
+            )
+        return normalized
 
-class ResponseInputItem(BaseModel):
+
+class ResponseInputItem(StrictModel):
     role: str = "user"
     content: str | list[ResponseInputPart]
 
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized not in RESPONSE_INPUT_ROLES:
+            raise ValueError(
+                "Only system, developer, user, and assistant response roles are supported."
+            )
+        return normalized
 
-class ResponsesRequest(BaseModel):
+
+class ResponsesRequest(StrictModel):
     model: str | None = None
     input: str | list[ResponseInputItem]
     instructions: str | None = None

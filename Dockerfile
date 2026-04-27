@@ -1,3 +1,5 @@
+FROM ghcr.io/astral-sh/uv:0.9.5 AS uv
+
 FROM mcr.microsoft.com/playwright:v1.58.2-noble
 
 ARG HTTP_PROXY
@@ -10,22 +12,15 @@ ARG no_proxy
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV UV_LINK_MODE=copy
-ENV PATH=/root/.local/bin:$PATH
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV APP_HOST=0.0.0.0
 ENV APP_PORT=8000
 ENV BROWSER_WORKERS=1
 ENV REQUEST_QUEUE_SIZE=8
-ENV HTTP_PROXY=${HTTP_PROXY}
-ENV HTTPS_PROXY=${HTTPS_PROXY}
-ENV http_proxy=${http_proxy}
-ENV https_proxy=${https_proxy}
-ENV NO_PROXY=${NO_PROXY}
-ENV no_proxy=${no_proxy}
 
 WORKDIR /app
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+COPY --from=uv /uv /uvx /bin/
 RUN set -eux; \
     chromium_path="$(find /ms-playwright -path '*/chrome-linux64/chrome' -type f | head -n 1)"; \
     test -x "$chromium_path"; \
@@ -38,7 +33,13 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY .env.example ./
 
-RUN uv sync --frozen --no-dev
+RUN HTTP_PROXY="${HTTP_PROXY}" \
+    HTTPS_PROXY="${HTTPS_PROXY}" \
+    http_proxy="${http_proxy}" \
+    https_proxy="${https_proxy}" \
+    NO_PROXY="${NO_PROXY}" \
+    no_proxy="${no_proxy}" \
+    uv sync --frozen --no-dev
 
 EXPOSE 8000
 

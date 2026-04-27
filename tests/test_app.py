@@ -28,6 +28,10 @@ def _build_settings_form(**overrides: str) -> dict[str, str]:
     return payload
 
 
+def _auth_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer secret-token"}
+
+
 @pytest.fixture
 def test_app(tmp_path, monkeypatch) -> Iterator:
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
@@ -133,3 +137,57 @@ def test_network_exposed_app_requires_non_default_api_token(tmp_path, monkeypatc
                 pass
     finally:
         get_settings.cache_clear()
+
+
+def test_chat_completions_rejects_tool_message_role(test_app) -> None:
+    with TestClient(test_app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_auth_headers(),
+            json={
+                "model": "google-search",
+                "messages": [{"role": "tool", "content": "tool output"}],
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_chat_completions_rejects_image_parts(test_app) -> None:
+    with TestClient(test_app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_auth_headers(),
+            json={
+                "model": "google-search",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "what is in this image?"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "https://example.com/image.jpg"},
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_responses_rejects_tools_field(test_app) -> None:
+    with TestClient(test_app) as client:
+        response = client.post(
+            "/v1/responses",
+            headers=_auth_headers(),
+            json={
+                "model": "google-search",
+                "input": "hello",
+                "tools": [{"type": "function", "name": "lookup"}],
+            },
+        )
+
+    assert response.status_code == 422

@@ -96,7 +96,10 @@ uv run googleaisearch2api
 - `BROWSER_USER_AGENT`: 可选，覆盖浏览器级 UA；留空时服务会给 headless Chrome 使用普通 Chrome UA
 - `BROWSER_WORKERS`: 常驻浏览器 worker 数
 - `REQUEST_QUEUE_SIZE`: 内存等待队列容量；满了以后返回 `429`
+- `REQUEST_LOG_MAX_ROWS`: SQLite 里最多保留多少条最近请求日志；默认 200
 - `BROWSER_PROXY_SERVER`: 代理地址，例如 `http://127.0.0.1:7890`；也支持 `http://user:pass@host:port`，运行时会自动拆分认证字段传给浏览器。
+
+请求日志会自动脱敏常见密钥、Bearer token、`user:pass@host` 形式的内联凭据，并且不会把最终 Google URL 里的 `q=` 查询词原样持久化到 SQLite。
 
 如果容器里需要走宿主机代理：
 
@@ -145,6 +148,7 @@ curl http://127.0.0.1:8000/v1/responses \
 - Google 页面结构可能变化；如果选择器或页面行为失效，先运行 `scripts/probe_google_ai.py` 重新取证，再改提取逻辑。
 - 当前 streaming 是在拿到完整答案后按 OpenAI SSE 形状回放，不是 Google 原生流式协议透传。
 - 代理支持已经接入浏览器启动参数，但代理能否连通取决于你自己的代理服务。
+- 目前只支持文本输入。`tools`、图片/文件输入、`tool`/`function` 一类消息角色会返回 `422`，而不是静默降级。
 
 ## 友情链接
 

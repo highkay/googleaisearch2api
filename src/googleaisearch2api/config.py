@@ -116,6 +116,7 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("BROWSER_WORKERS", "MAX_CONCURRENT_REQUESTS"),
     )
     request_queue_size: int = Field(default=8, ge=1, validation_alias="REQUEST_QUEUE_SIZE")
+    request_log_max_rows: int = Field(default=200, ge=10, validation_alias="REQUEST_LOG_MAX_ROWS")
 
     browser_proxy_server: str = Field(default="", validation_alias="BROWSER_PROXY_SERVER")
     browser_proxy_username: str = Field(default="", validation_alias="BROWSER_PROXY_USERNAME")

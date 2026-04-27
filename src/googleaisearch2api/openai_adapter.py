@@ -10,6 +10,10 @@ from collections.abc import Iterable
 from .schemas import ChatMessage, GoogleAiResult, ResponsesRequest
 
 
+class OpenAICompatibilityError(ValueError):
+    pass
+
+
 def flatten_message_content(content) -> str:
     if isinstance(content, str):
         return content.strip()
@@ -31,13 +35,13 @@ def build_prompt_from_messages(messages: list[ChatMessage]) -> str:
         if not text:
             continue
         role = message.role.lower()
-        if role == "system":
+        if role in {"system", "developer"}:
             system_messages.append(text)
         else:
             transcript.append(f"{role.upper()}: {text}")
 
     if not transcript:
-        raise ValueError("No non-system messages were provided.")
+        raise OpenAICompatibilityError("No non-system chat messages were provided.")
 
     parts: list[str] = []
     if system_messages:
@@ -52,20 +56,33 @@ def build_prompt_from_messages(messages: list[ChatMessage]) -> str:
 
 def build_prompt_from_responses_request(payload: ResponsesRequest) -> str:
     parts: list[str] = []
+    system_messages: list[str] = []
     if payload.instructions:
-        parts.append("System instructions:\n" + payload.instructions.strip())
+        system_messages.append(payload.instructions.strip())
 
     if isinstance(payload.input, str):
-        parts.append("User request:\n" + payload.input.strip())
+        user_input = payload.input.strip()
+        if not user_input:
+            raise OpenAICompatibilityError("No response input text was provided.")
+        if system_messages:
+            parts.append("System instructions:\n" + "\n\n".join(system_messages))
+        parts.append("User request:\n" + user_input)
         return "\n\n".join(part for part in parts if part).strip()
 
     transcript: list[str] = []
     for item in payload.input:
         text = flatten_message_content(item.content)
-        if text:
-            transcript.append(f"{item.role.upper()}: {text}")
+        if not text:
+            continue
+        role = item.role.lower()
+        if role in {"system", "developer"}:
+            system_messages.append(text)
+            continue
+        transcript.append(f"{role.upper()}: {text}")
     if not transcript:
-        raise ValueError("No response input text was provided.")
+        raise OpenAICompatibilityError("No non-system response input text was provided.")
+    if system_messages:
+        parts.append("System instructions:\n" + "\n\n".join(system_messages))
     parts.append("Conversation transcript:\n" + "\n\n".join(transcript))
     parts.append("Respond to the latest user request.")
     return "\n\n".join(parts).strip()

@@ -31,6 +31,7 @@ from .config import (
 from .db import create_db_engine, create_session_factory, create_tables
 from .logging import configure_logging
 from .openai_adapter import (
+    OpenAICompatibilityError,
     build_chat_completion_response,
     build_prompt_from_messages,
     build_prompt_from_responses_request,
@@ -72,7 +73,11 @@ def create_services(settings: AppSettings) -> Services:
     engine = create_db_engine(str(settings.db_path))
     create_tables(engine)
     session_factory = create_session_factory(engine)
-    store = ConfigStore(session_factory, ServiceConfig.from_settings(settings))
+    store = ConfigStore(
+        session_factory,
+        ServiceConfig.from_settings(settings),
+        request_log_max_rows=settings.request_log_max_rows,
+    )
     pool = BrowserPool(
         worker_count=settings.max_concurrent_requests,
         queue_capacity=settings.request_queue_size,
@@ -363,7 +368,13 @@ def create_app() -> FastAPI:
 
     @app.post("/v1/chat/completions", dependencies=[Depends(require_api_token)])
     def chat_completions(payload: ChatCompletionsRequest, request: Request):
-        prompt = build_prompt_from_messages(payload.messages)
+        try:
+            prompt = build_prompt_from_messages(payload.messages)
+        except OpenAICompatibilityError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
         _, model_name, _, result = _run_google_ai(
             request=request,
             endpoint="/v1/chat/completions",
@@ -380,7 +391,13 @@ def create_app() -> FastAPI:
 
     @app.post("/v1/responses", dependencies=[Depends(require_api_token)])
     def responses_api(payload: ResponsesRequest, request: Request):
-        prompt = build_prompt_from_responses_request(payload)
+        try:
+            prompt = build_prompt_from_responses_request(payload)
+        except OpenAICompatibilityError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
         _, model_name, _, result = _run_google_ai(
             request=request,
             endpoint="/v1/responses",
