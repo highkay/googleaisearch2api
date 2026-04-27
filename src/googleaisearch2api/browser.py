@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from textwrap import shorten
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit, urlunparse, urlunsplit
 
 from patchright.sync_api import Error as PatchrightError
 from patchright.sync_api import TimeoutError as PatchrightTimeoutError
@@ -123,6 +123,33 @@ def resolve_browser_user_agent(config: ServiceConfig) -> str | None:
     if not config.browser_headless:
         return None
     return DEFAULT_CHROME_USER_AGENT
+
+
+def _split_proxy_server_auth(proxy_server: str) -> tuple[str, str | None, str | None]:
+    parsed = urlsplit(proxy_server)
+    if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+        return proxy_server, None, None
+
+    server_netloc = parsed.netloc.rsplit("@", 1)[1]
+    server = urlunsplit((parsed.scheme, server_netloc, "", "", ""))
+    username = unquote(parsed.username) if parsed.username is not None else None
+    password = unquote(parsed.password) if parsed.password is not None else None
+    return server, username, password
+
+
+def resolve_browser_proxy(config: ServiceConfig) -> dict | None:
+    if not config.proxy_enabled or not config.browser_proxy_server:
+        return None
+
+    server, embedded_username, embedded_password = _split_proxy_server_auth(
+        config.browser_proxy_server
+    )
+    return {
+        "server": server,
+        "username": config.browser_proxy_username or embedded_username,
+        "password": config.browser_proxy_password or embedded_password,
+        "bypass": config.browser_proxy_bypass,
+    }
 
 
 class GoogleAiRunner:
@@ -276,13 +303,9 @@ class GoogleAiRunner:
         if browser_user_agent:
             kwargs["args"] = [f"--user-agent={browser_user_agent}"]
 
-        if config.proxy_enabled:
-            kwargs["proxy"] = {
-                "server": config.browser_proxy_server,
-                "username": config.browser_proxy_username,
-                "password": config.browser_proxy_password,
-                "bypass": config.browser_proxy_bypass,
-            }
+        browser_proxy = resolve_browser_proxy(config)
+        if browser_proxy:
+            kwargs["proxy"] = browser_proxy
         return kwargs
 
     def _submit_query(self, page, prompt: str) -> bool:

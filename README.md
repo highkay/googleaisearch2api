@@ -90,7 +90,7 @@ uv run googleaisearch2api
 - `BROWSER_USER_AGENT`: 可选，覆盖浏览器级 UA；留空时服务会给 headless Chrome 使用普通 Chrome UA
 - `BROWSER_WORKERS`: 常驻浏览器 worker 数
 - `REQUEST_QUEUE_SIZE`: 内存等待队列容量；满了以后返回 `429`
-- `BROWSER_PROXY_SERVER`: 代理地址，例如 `http://127.0.0.1:7890`
+- `BROWSER_PROXY_SERVER`: 代理地址，例如 `http://127.0.0.1:7890`；也支持 `http://user:pass@host:port`，运行时会自动拆分认证字段传给浏览器。
 
 如果容器里需要走宿主机代理：
 
