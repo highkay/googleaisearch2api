@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Console Login</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
+</head>
+<body>
+    <div class="backdrop"></div>
+    <main class="shell shell-narrow">
+        <section class="panel login-panel">
+            <div class="panel-head">
+                <p class="eyebrow">Google AI Search2API</p>
+                <h1>Console Login</h1>
+                <p>Use the current API token to unlock the operator console.</p>
+            </div>
+
+            {% if status_message %}
+            <section class="flash">
+                {{ status_message }}
+            </section>
+            {% endif %}
+
+            <form method="post" action="/console/login" class="login-form">
+                <input type="hidden" name="next" value="{{ next_target }}">
+                <label class="wide">
+                    <span>API token</span>
+                    <input type="password" name="console_token" required autocomplete="current-password">
+                </label>
+                <div class="actions wide">
+                    <button type="submit" class="primary">Open console</button>
+                </div>
+            </form>
+        </section>
+    </main>
+</body>
+</html>

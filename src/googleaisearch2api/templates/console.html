@@ -94,7 +94,8 @@
                     </label>
                     <label>
                         <span>API token</span>
-                        <input type="text" name="api_token" value="{{ config.api_token }}" required>
+                        <input type="password" name="api_token" value="" placeholder="Leave blank to keep current token" autocomplete="new-password">
+                        <small class="field-help">Leave blank to keep the current token. Enter a new value to rotate it.</small>
                     </label>
                     <label class="wide">
                         <span>User-Agent override</span>
@@ -130,7 +131,12 @@
                     </label>
                     <label>
                         <span>Proxy password</span>
-                        <input type="text" name="browser_proxy_password" value="{{ config.browser_proxy_password or '' }}">
+                        <input type="password" name="browser_proxy_password" value="" placeholder="{{ 'Leave blank to keep current password' if config.browser_proxy_password else 'Optional proxy password' }}" autocomplete="new-password">
+                        <small class="field-help">Leave blank to keep the current password.</small>
+                    </label>
+                    <label class="checkbox">
+                        <input type="checkbox" name="clear_browser_proxy_password">
+                        <span>Clear stored proxy password</span>
                     </label>
                     <label>
                         <span>Proxy bypass</span>
@@ -147,6 +153,9 @@
                     <h2>Live Probe</h2>
                     <p>Use the current browser settings to run a real Google AI query before changing business code.</p>
                 </div>
+                <form method="post" action="/console/logout" class="inline-form">
+                    <button type="submit" class="ghost">Log out console</button>
+                </form>
                 <form method="post" action="/console/actions/probe" class="probe-form">
                     <label class="wide">
                         <span>Probe prompt</span>
@@ -156,10 +165,6 @@
                         <button type="submit" class="secondary">Run live probe</button>
                     </div>
                 </form>
-                <div class="probe-note">
-                    <span class="note-label">Token mask</span>
-                    <strong>{{ config.masked_api_token }}</strong>
-                </div>
             </article>
         </section>
 

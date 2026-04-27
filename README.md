@@ -26,6 +26,11 @@
 
 ```bash
 cp .env.example .env
+```
+
+先在 `.env` 里填一个你自己的 `API_TOKEN`，再启动：
+
+```bash
 docker compose up --build -d
 ```
 
@@ -44,7 +49,7 @@ curl http://127.0.0.1:9010/healthz
 
 ```bash
 curl http://127.0.0.1:9010/v1/models \
-  -H "Authorization: Bearer change-me-google-search"
+  -H "Authorization: Bearer your-strong-token"
 ```
 
 ```bash
@@ -85,6 +90,7 @@ uv run googleaisearch2api
 ## 关键配置
 
 - `API_TOKEN`: OpenAI 兼容接口的 Bearer Token
+- Console 使用同一个 `API_TOKEN` 登录；敏感字段默认不会回显到页面里
 - `DEFAULT_MODEL`: 对外暴露的模型名
 - `BROWSER_HEADLESS`: 是否无头运行
 - `BROWSER_USER_AGENT`: 可选，覆盖浏览器级 UA；留空时服务会给 headless Chrome 使用普通 Chrome UA
@@ -104,7 +110,7 @@ BROWSER_PROXY_SERVER=http://host.docker.internal:7890
 
 ```bash
 curl http://127.0.0.1:8000/v1/models \
-  -H "Authorization: Bearer change-me-google-search"
+  -H "Authorization: Bearer your-strong-token"
 ```
 
 Chat Completions：
@@ -112,7 +118,7 @@ Chat Completions：
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer change-me-google-search" \
+  -H "Authorization: Bearer your-strong-token" \
   -d '{
     "model": "google-search",
     "messages": [
@@ -126,7 +132,7 @@ Responses API：
 ```bash
 curl http://127.0.0.1:8000/v1/responses \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer change-me-google-search" \
+  -H "Authorization: Bearer your-strong-token" \
   -d '{
     "model": "google-search",
     "input": "Summarize the latest differences between Responses API and Chat Completions API in 3 points."

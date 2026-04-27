@@ -45,6 +45,10 @@ body {
     padding: 32px 0 48px;
 }
 
+.shell-narrow {
+    width: min(720px, calc(100vw - 32px));
+}
+
 .hero {
     display: grid;
     grid-template-columns: 2fr 1fr;
@@ -175,7 +179,8 @@ body {
 }
 
 .config-form,
-.probe-form {
+.probe-form,
+.login-form {
     margin-top: 20px;
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -183,13 +188,15 @@ body {
 }
 
 .config-form label,
-.probe-form label {
+.probe-form label,
+.login-form label {
     display: grid;
     gap: 8px;
 }
 
 .config-form label.wide,
 .probe-form label.wide,
+.login-form label.wide,
 .actions.wide {
     grid-column: 1 / -1;
 }
@@ -266,25 +273,24 @@ button.secondary {
     background: linear-gradient(135deg, #c85d2f, #a14822);
 }
 
-.probe-note {
-    margin-top: 18px;
-    padding: 16px 18px;
-    border-radius: 18px;
-    background: var(--accent-soft);
+button.ghost {
+    color: var(--text);
+    background: rgba(23, 32, 29, 0.06);
 }
 
-.note-label {
-    display: block;
+.field-help {
+    margin: 0;
     color: var(--muted);
-    font-size: 0.75rem;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    font-size: 0.82rem;
+    line-height: 1.5;
 }
 
-.probe-note strong {
-    display: block;
-    margin-top: 8px;
-    font-family: "IBM Plex Mono", Consolas, monospace;
+.inline-form {
+    margin-top: 16px;
+}
+
+.login-panel {
+    margin-top: 48px;
 }
 
 .table-wrap {
@@ -381,7 +387,8 @@ th {
     }
 
     .config-form,
-    .probe-form {
+    .probe-form,
+    .login-form {
         grid-template-columns: 1fr;
     }
 }

@@ -11,7 +11,7 @@ services:
       APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
       APP_DATA_DIR: /app/data
       DEFAULT_MODEL: ${DEFAULT_MODEL:-google-search}
-      API_TOKEN: ${API_TOKEN:-change-me-google-search}
+      API_TOKEN: ${API_TOKEN:?set API_TOKEN in .env or shell before starting compose}
       BROWSER_HEADLESS: ${BROWSER_HEADLESS:-true}
       BROWSER_USER_AGENT: ${BROWSER_USER_AGENT:-}
       BROWSER_LOCALE: ${BROWSER_LOCALE:-en-US}

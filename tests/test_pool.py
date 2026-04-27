@@ -6,7 +6,11 @@ import time
 import pytest
 
 from googleaisearch2api.config import ServiceConfig
-from googleaisearch2api.pool import BrowserPool, BrowserPoolSaturatedError
+from googleaisearch2api.pool import (
+    BrowserPool,
+    BrowserPoolSaturatedError,
+    BrowserPoolTimeoutError,
+)
 from googleaisearch2api.schemas import GoogleAiResult
 
 
@@ -143,4 +147,31 @@ def test_browser_pool_reset_marks_next_generation() -> None:
         pool.reset()
         assert pool.get_summary().generation == 1
     finally:
+        pool.close()
+
+
+def test_browser_pool_times_out_and_recycles_stuck_work() -> None:
+    release = threading.Event()
+
+    class BlockingRunner:
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            release.wait(timeout=5)
+            return _result(prompt)
+
+        def close(self) -> None:
+            release.set()
+
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=BlockingRunner,
+        request_timeout_buffer_ms=50,
+    )
+    config = ServiceConfig(browser_timeout_ms=100, answer_timeout_ms=100)
+    try:
+        with pytest.raises(BrowserPoolTimeoutError):
+            pool.execute(config, "stuck")
+        assert pool.get_summary().generation == 1
+    finally:
+        release.set()
         pool.close()

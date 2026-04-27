@@ -6,10 +6,20 @@ from pathlib import Path
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_API_TOKEN = "change-me-google-search"
+
+
+def _mask_secret(value: str | None) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}***{value[-4:]}"
+
 
 class ServiceConfig(BaseModel):
     default_model: str = "google-search"
-    api_token: str = "change-me-google-search"
+    api_token: str = DEFAULT_API_TOKEN
     browser_headless: bool = True
     browser_user_agent: str | None = None
     browser_locale: str = "en-US"
@@ -31,11 +41,16 @@ class ServiceConfig(BaseModel):
 
     @property
     def masked_api_token(self) -> str:
-        if not self.api_token:
-            return ""
-        if len(self.api_token) <= 8:
-            return "*" * len(self.api_token)
-        return f"{self.api_token[:4]}***{self.api_token[-4:]}"
+        return _mask_secret(self.api_token)
+
+    @property
+    def masked_proxy_password(self) -> str:
+        return _mask_secret(self.browser_proxy_password)
+
+    def pool_wait_timeout_ms(self, *, buffer_ms: int = 5_000) -> int:
+        first_wait_ms = min(self.answer_timeout_ms, 15_000)
+        total_ms = (self.browser_timeout_ms * 3) + first_wait_ms + self.answer_timeout_ms
+        return max(total_ms + buffer_ms, 1_000)
 
     @classmethod
     def from_settings(cls, settings: AppSettings) -> ServiceConfig:
@@ -84,7 +99,7 @@ class AppSettings(BaseSettings):
     app_data_dir: Path = Field(default=Path("data"), validation_alias="APP_DATA_DIR")
 
     default_model: str = Field(default="google-search", validation_alias="DEFAULT_MODEL")
-    api_token: str = Field(default="change-me-google-search", validation_alias="API_TOKEN")
+    api_token: str = Field(default=DEFAULT_API_TOKEN, validation_alias="API_TOKEN")
 
     browser_headless: bool = Field(default=True, validation_alias="BROWSER_HEADLESS")
     browser_user_agent: str = Field(default="", validation_alias="BROWSER_USER_AGENT")

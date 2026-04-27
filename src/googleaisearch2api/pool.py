@@ -4,6 +4,7 @@ import queue
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -32,6 +33,10 @@ class BrowserPoolSaturatedError(BrowserPoolError):
     pass
 
 
+class BrowserPoolTimeoutError(BrowserPoolError):
+    pass
+
+
 @dataclass(slots=True)
 class _PoolJob:
     config: ServiceConfig
@@ -50,15 +55,19 @@ class BrowserPool:
         queue_capacity: int,
         runner_factory: Callable[[], RunnerProtocol] = GoogleAiRunner,
         worker_poll_interval_s: float = 0.25,
+        request_timeout_buffer_ms: int = 5_000,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
         if queue_capacity < 1:
             raise ValueError("queue_capacity must be at least 1")
+        if request_timeout_buffer_ms < 0:
+            raise ValueError("request_timeout_buffer_ms must be at least 0")
 
         self._worker_count = worker_count
         self._runner_factory = runner_factory
         self._worker_poll_interval_s = worker_poll_interval_s
+        self._request_timeout_buffer_ms = request_timeout_buffer_ms
         self._jobs: queue.Queue[object] = queue.Queue(maxsize=queue_capacity)
         self._lock = threading.Lock()
         self._closed = False
@@ -97,7 +106,15 @@ class BrowserPool:
                 f"{self._jobs.maxsize} queued requests are already occupied."
             ) from exc
 
-        return future.result()
+        timeout_s = self._resolve_request_timeout_s(config)
+        try:
+            return future.result(timeout=timeout_s)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            self.reset()
+            raise BrowserPoolTimeoutError(
+                "Browser worker exceeded the request wait timeout and was scheduled for recycle."
+            ) from exc
 
     def reset(self) -> None:
         with self._lock:
@@ -168,6 +185,9 @@ class BrowserPool:
 
                 job = item
                 generation_seen = self._sync_generation(worker_index, runner, generation_seen)
+                if job.future.cancelled():
+                    self._jobs.task_done()
+                    continue
                 self._mark_worker_busy(worker_index, busy=True)
                 try:
                     result = runner.run_prompt(job.config, job.prompt)
@@ -222,3 +242,7 @@ class BrowserPool:
     def _set_worker_error(self, worker_index: int, error_message: str | None) -> None:
         with self._lock:
             self._worker_errors[worker_index] = error_message
+
+    def _resolve_request_timeout_s(self, config: ServiceConfig) -> float:
+        timeout_ms = config.pool_wait_timeout_ms(buffer_ms=self._request_timeout_buffer_ms)
+        return timeout_ms / 1000
