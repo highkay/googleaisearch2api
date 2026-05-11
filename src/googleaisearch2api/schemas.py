@@ -8,6 +8,7 @@ CHAT_TEXT_PART_TYPES = {"text"}
 CHAT_ROLES = {"system", "developer", "user", "assistant"}
 RESPONSE_INPUT_PART_TYPES = {"input_text"}
 RESPONSE_INPUT_ROLES = {"system", "developer", "user", "assistant"}
+QUERY_CONTEXT_ROLES = {"system", "developer", "user", "assistant"}
 
 
 class StrictModel(BaseModel):
@@ -137,3 +138,44 @@ class ResponsesRequest(StrictModel):
     instructions: str | None = None
     stream: bool = False
     user: str | None = None
+
+
+class QueryContextMessage(StrictModel):
+    role: str = "user"
+    content: str
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized not in QUERY_CONTEXT_ROLES:
+            raise ValueError(
+                "Only system, developer, user, and assistant query context roles are supported."
+            )
+        return normalized
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Query context content must not be empty.")
+        return value
+
+
+class QueryRequest(StrictModel):
+    query: str
+    model: str | None = None
+    instructions: str | None = None
+    context: str | list[QueryContextMessage] | None = None
+    stream: bool = False
+    include_citations: bool = True
+    include_google_metadata: bool = True
+    user: str | None = None
+    metadata: dict[str, str | int | float | bool | None] | None = None
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Query must not be empty.")
+        return value

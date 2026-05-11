@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from googleaisearch2api.app import create_app
 from googleaisearch2api.config import DEFAULT_API_TOKEN, ServiceConfigUpdate, get_settings
+from googleaisearch2api.schemas import Citation, GoogleAiResult
 
 
 def _build_settings_form(**overrides: str) -> dict[str, str]:
@@ -30,6 +31,35 @@ def _build_settings_form(**overrides: str) -> dict[str, str]:
 
 def _auth_headers() -> dict[str, str]:
     return {"Authorization": "Bearer secret-token"}
+
+
+class FakePool:
+    def __init__(self, answer_text: str = "Browser-backed answer.") -> None:
+        self.answer_text = answer_text
+        self.prompts: list[str] = []
+        self.closed = False
+
+    def execute(self, config, prompt: str) -> GoogleAiResult:
+        self.prompts.append(prompt)
+        return GoogleAiResult(
+            answer_text=self.answer_text,
+            citations=[Citation(title="Source", url="https://example.com")],
+            final_url="https://www.google.com/search?udm=50",
+            page_title="Google Search",
+        )
+
+    def reset(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _install_fake_pool(app, answer_text: str = "Browser-backed answer.") -> FakePool:
+    app.state.services.pool.close()
+    pool = FakePool(answer_text=answer_text)
+    app.state.services.pool = pool
+    return pool
 
 
 @pytest.fixture
@@ -176,6 +206,104 @@ def test_chat_completions_rejects_image_parts(test_app) -> None:
         )
 
     assert response.status_code == 422
+
+
+def test_query_post_returns_tool_friendly_response_shape(test_app) -> None:
+    with TestClient(test_app) as client:
+        pool = _install_fake_pool(test_app, answer_text="Tool friendly answer.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={
+                "model": "google-search",
+                "query": "Question",
+                "instructions": "Use verified facts only.",
+                "context": [{"role": "assistant", "content": "Previous answer"}],
+            },
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["object"] == "query.result"
+    assert payload["model"] == "google-search"
+    assert payload["answer"] == "Tool friendly answer."
+    assert payload["usage"]["total_tokens"] >= payload["usage"]["input_tokens"]
+    assert payload["citations"][0]["url"] == "https://example.com"
+    assert pool.prompts == [
+        "System instructions:\n"
+        "Use verified facts only.\n\n"
+        "Conversation context:\n"
+        "ASSISTANT: Previous answer\n\n"
+        "User request:\n"
+        "Question"
+    ]
+    assert recent[0].endpoint == "/query"
+
+
+def test_query_get_returns_tool_friendly_response_shape(test_app) -> None:
+    with TestClient(test_app) as client:
+        pool = _install_fake_pool(test_app, answer_text="GET answer.")
+        response = client.get(
+            "/query",
+            headers=_auth_headers(),
+            params={
+                "q": "Question",
+                "include_citations": False,
+                "include_google_metadata": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"] == "GET answer."
+    assert "citations" not in payload
+    assert "google_ai" not in payload
+    assert pool.prompts == ["User request:\nQuestion"]
+
+
+def test_query_stream_returns_simple_sse_events(test_app) -> None:
+    with TestClient(test_app) as client:
+        _install_fake_pool(test_app, answer_text="Streaming answer.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={
+                "model": "google-search",
+                "query": "Question",
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: query.created" in response.text
+    assert "event: answer.delta" in response.text
+    assert '"delta": "Streaming answer."' in response.text
+    assert "event: query.completed" in response.text
+
+
+def test_query_rejects_empty_query_and_invalid_context_role(test_app) -> None:
+    with TestClient(test_app) as client:
+        pool = _install_fake_pool(test_app)
+        empty_query = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "   "},
+        )
+        invalid_role = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={
+                "model": "google-search",
+                "query": "hello",
+                "context": [{"role": "tool", "content": "tool output"}],
+            },
+        )
+
+    assert empty_query.status_code == 422
+    assert invalid_role.status_code == 422
+    assert pool.prompts == []
 
 
 def test_responses_rejects_tools_field(test_app) -> None:

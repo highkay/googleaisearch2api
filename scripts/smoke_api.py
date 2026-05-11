@@ -22,7 +22,18 @@ def main() -> None:
     with httpx.Client(base_url=args.base_url, timeout=120.0) as client:
         health = client.get("/healthz")
         models = client.get("/v1/models", headers=headers)
-        completion = client.post(
+        query = client.post(
+            "/query",
+            headers=headers,
+            json={
+                "model": "google-search",
+                "query": (
+                    "What is the difference between Responses API and "
+                    "Chat Completions API? summarize in 3 points"
+                ),
+            },
+        )
+        chat_completion = client.post(
             "/v1/chat/completions",
             headers=headers,
             json={
@@ -44,7 +55,8 @@ def main() -> None:
             {
                 "health": health.json(),
                 "models": models.json(),
-                "completion": completion.json(),
+                "query": query.json(),
+                "chat_completion": chat_completion.json(),
             },
             ensure_ascii=False,
             indent=2,

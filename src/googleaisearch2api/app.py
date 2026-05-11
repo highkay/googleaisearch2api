@@ -9,7 +9,7 @@ from typing import Annotated
 from urllib.parse import urlencode, urlsplit
 
 import uvicorn
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -45,7 +45,12 @@ from .pool import (
     BrowserPoolSaturatedError,
     BrowserPoolTimeoutError,
 )
-from .schemas import ChatCompletionsRequest, ResponsesRequest
+from .query_adapter import (
+    build_prompt_from_query_request,
+    build_query_response,
+    iter_query_stream,
+)
+from .schemas import ChatCompletionsRequest, QueryRequest, ResponsesRequest
 from .store import ConfigStore
 
 security = HTTPBearer(auto_error=False)
@@ -365,6 +370,56 @@ def create_app() -> FastAPI:
                 }
             ],
         }
+
+    def _query_response(payload: QueryRequest, request: Request):
+        prompt = build_prompt_from_query_request(payload)
+        _, model_name, request_id, result = _run_google_ai(
+            request=request,
+            endpoint="/query",
+            prompt=prompt,
+            stream=payload.stream,
+            requested_model=payload.model,
+        )
+        if payload.stream:
+            return StreamingResponse(
+                iter_query_stream(
+                    result=result,
+                    model_name=model_name,
+                    prompt=prompt,
+                    request_id=request_id,
+                    payload=payload,
+                ),
+                media_type="text/event-stream",
+            )
+        return build_query_response(
+            result=result,
+            model_name=model_name,
+            prompt=prompt,
+            request_id=request_id,
+            payload=payload,
+        )
+
+    @app.get("/query", dependencies=[Depends(require_api_token)])
+    def query_get(
+        request: Request,
+        q: str = Query(..., min_length=1),
+        model: str | None = Query(None),
+        stream: bool = Query(False),
+        include_citations: bool = Query(True),
+        include_google_metadata: bool = Query(True),
+    ):
+        payload = QueryRequest(
+            query=q,
+            model=model,
+            stream=stream,
+            include_citations=include_citations,
+            include_google_metadata=include_google_metadata,
+        )
+        return _query_response(payload, request)
+
+    @app.post("/query", dependencies=[Depends(require_api_token)])
+    def query_post(payload: QueryRequest, request: Request):
+        return _query_response(payload, request)
 
     @app.post("/v1/chat/completions", dependencies=[Depends(require_api_token)])
     def chat_completions(payload: ChatCompletionsRequest, request: Request):

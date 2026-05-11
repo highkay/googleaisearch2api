@@ -13,6 +13,8 @@
 ## 功能
 
 - `GET /v1/models`
+- `GET /query`
+- `POST /query`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - Bearer Token 认证
@@ -116,6 +118,26 @@ curl http://127.0.0.1:8000/v1/models \
   -H "Authorization: Bearer your-strong-token"
 ```
 
+轻量查询接口：
+
+```bash
+curl http://127.0.0.1:8000/query \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-strong-token" \
+  -d '{
+    "model": "google-search",
+    "query": "What is the difference between Responses API and Chat Completions API? summarize in 3 points",
+    "stream": false
+  }'
+```
+
+快速 GET 查询：
+
+```bash
+curl "http://127.0.0.1:8000/query?q=What%20changed%20in%20OpenAI%20Responses%20API%3F" \
+  -H "Authorization: Bearer your-strong-token"
+```
+
 Chat Completions：
 
 ```bash
@@ -141,6 +163,18 @@ curl http://127.0.0.1:8000/v1/responses \
     "input": "Summarize the latest differences between Responses API and Chat Completions API in 3 points."
   }'
 ```
+
+## Tool Query 设计
+
+`/query` 是给 tool wrapper 使用的轻量查询接口，不伪装成 OpenAI SDK 协议，但功能上覆盖现有 OpenAI 兼容接口能做的事：
+
+- `POST /query` 使用 JSON body，适合工具调用和较长查询。
+- `GET /query?q=...` 使用 query string，适合临时探测；长文本或敏感文本仍建议走 POST。
+- 入参核心字段是 `query`，可选 `instructions` 和 `context` 用来表达 OpenAI chat/responses 里的 system prompt 与上下文。
+- `context` 支持普通字符串，也支持 `{role, content}` 数组；角色支持 `system`、`developer`、`user`、`assistant`。
+- 返回结构是工具友好的 `answer`、`citations`、`usage`、`google_ai`，不需要客户端解析 `choices` 或 `output`。
+- `stream=true` 时返回 SSE：`query.created`、`answer.delta`、`query.completed`；和现有流式接口一样，这是拿到完整 Google AI 结果后的事件回放，不是 Google 原生流式协议透传。
+- 认证、模型解析、请求日志、并发队列、浏览器 worker 和错误码都复用现有 `/v1/chat/completions` 与 `/v1/responses` 的基础设施。
 
 ## 已知边界
 
