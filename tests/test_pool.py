@@ -197,12 +197,42 @@ def test_browser_pool_recycles_and_retries_blocked_sessions() -> None:
             self.close_calls += 1
 
     runner = BlockedOnceRunner()
-    pool = BrowserPool(worker_count=1, queue_capacity=1, runner_factory=lambda: runner)
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=lambda: runner,
+        blocked_retry_count=1,
+    )
     try:
         result = pool.execute(ServiceConfig(), "retry me")
 
         assert result.answer_text == "answer for retry me"
         assert runner.prompts == ["retry me", "retry me"]
+        assert runner.close_calls == 1
+    finally:
+        pool.close()
+
+
+def test_browser_pool_does_not_retry_blocked_sessions_by_default() -> None:
+    class BlockedRunner:
+        def __init__(self) -> None:
+            self.prompt_calls = 0
+            self.close_calls = 0
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            self.prompt_calls += 1
+            raise GoogleAiBlockedError("Google blocked the session while opening query page")
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    runner = BlockedRunner()
+    pool = BrowserPool(worker_count=1, queue_capacity=1, runner_factory=lambda: runner)
+    try:
+        with pytest.raises(GoogleAiBlockedError):
+            pool.execute(ServiceConfig(), "do not retry")
+
+        assert runner.prompt_calls == 1
         assert runner.close_calls == 1
     finally:
         pool.close()

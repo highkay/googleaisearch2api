@@ -118,7 +118,7 @@ class AppSettings(BaseSettings):
     request_queue_size: int = Field(default=8, ge=1, validation_alias="REQUEST_QUEUE_SIZE")
     request_log_max_rows: int = Field(default=200, ge=10, validation_alias="REQUEST_LOG_MAX_ROWS")
     google_ai_blocked_retry_count: int = Field(
-        default=1,
+        default=0,
         ge=0,
         validation_alias=AliasChoices("GOOGLE_AI_BLOCKED_RETRY_COUNT", "GOOGLE_BLOCKED_RETRIES"),
     )

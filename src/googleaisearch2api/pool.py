@@ -56,7 +56,7 @@ class BrowserPool:
         runner_factory: Callable[[], RunnerProtocol] = GoogleAiRunner,
         worker_poll_interval_s: float = 0.25,
         request_timeout_buffer_ms: int = 5_000,
-        blocked_retry_count: int = 1,
+        blocked_retry_count: int = 0,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
