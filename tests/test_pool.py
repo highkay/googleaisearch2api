@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from googleaisearch2api.browser import GoogleAiBlockedError
 from googleaisearch2api.config import ServiceConfig
 from googleaisearch2api.pool import (
     BrowserPool,
@@ -174,4 +175,34 @@ def test_browser_pool_times_out_and_recycles_stuck_work() -> None:
         assert pool.get_summary().generation == 1
     finally:
         release.set()
+        pool.close()
+
+
+def test_browser_pool_recycles_and_retries_blocked_sessions() -> None:
+    class BlockedOnceRunner:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.close_calls = 0
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                raise GoogleAiBlockedError(
+                    "Google blocked the session while opening query page: "
+                    "this network is blocked due to unaddressed abuse complaints"
+                )
+            return _result(prompt)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    runner = BlockedOnceRunner()
+    pool = BrowserPool(worker_count=1, queue_capacity=1, runner_factory=lambda: runner)
+    try:
+        result = pool.execute(ServiceConfig(), "retry me")
+
+        assert result.answer_text == "answer for retry me"
+        assert runner.prompts == ["retry me", "retry me"]
+        assert runner.close_calls == 1
+    finally:
         pool.close()

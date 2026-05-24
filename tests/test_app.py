@@ -262,6 +262,19 @@ def test_query_get_returns_tool_friendly_response_shape(test_app) -> None:
     assert pool.prompts == ["User request:\nQuestion"]
 
 
+def test_query_get_rejects_blank_query_without_calling_pool(test_app) -> None:
+    with TestClient(test_app) as client:
+        pool = _install_fake_pool(test_app)
+        response = client.get(
+            "/query",
+            headers=_auth_headers(),
+            params={"q": "   "},
+        )
+
+    assert response.status_code == 422
+    assert pool.prompts == []
+
+
 def test_query_stream_returns_simple_sse_events(test_app) -> None:
     with TestClient(test_app) as client:
         _install_fake_pool(test_app, answer_text="Streaming answer.")

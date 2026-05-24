@@ -29,6 +29,9 @@ DISCLAIMER_MARKERS = [
 
 BLOCKED_MARKERS = [
     "unusual traffic",
+    "this network is blocked due to unaddressed abuse complaints",
+    "malicious behavior",
+    "this page checks to see if it's really a human",
     "not a robot",
     "captcha",
     "抱歉",

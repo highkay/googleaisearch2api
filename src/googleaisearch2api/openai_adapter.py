@@ -96,21 +96,9 @@ def estimate_tokens(text: str) -> int:
 
 
 def _chunk_text(text: str, target_size: int = 120) -> list[str]:
-    sentences = [chunk.strip() for chunk in re.split(r"(?<=[.!?。！？])\s+", text) if chunk.strip()]
-    chunks: list[str] = []
-    current = ""
-    for sentence in sentences:
-        if len(current) + len(sentence) + 1 <= target_size:
-            current = f"{current} {sentence}".strip()
-            continue
-        if current:
-            chunks.append(current)
-        current = sentence
-    if current:
-        chunks.append(current)
-    if chunks:
-        return chunks
-    return [text]
+    if len(text) <= target_size:
+        return [text]
+    return [text[index : index + target_size] for index in range(0, len(text), target_size)]
 
 
 def build_chat_completion_response(

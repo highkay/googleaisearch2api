@@ -1,8 +1,7 @@
 services:
   googleaisearch2api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${GOOGLEAISEARCH2API_IMAGE:-ghcr.io/highkay/googleaisearch2api:latest}
+    pull_policy: always
     ports:
       - "${APP_PORT:-9010}:8000"
     environment:
@@ -21,6 +20,7 @@ services:
       BROWSER_WORKERS: ${BROWSER_WORKERS:-2}
       REQUEST_QUEUE_SIZE: ${REQUEST_QUEUE_SIZE:-8}
       REQUEST_LOG_MAX_ROWS: ${REQUEST_LOG_MAX_ROWS:-200}
+      GOOGLE_AI_BLOCKED_RETRY_COUNT: ${GOOGLE_AI_BLOCKED_RETRY_COUNT:-1}
       BROWSER_PROXY_SERVER: ${BROWSER_PROXY_SERVER:-}
       BROWSER_PROXY_USERNAME: ${BROWSER_PROXY_USERNAME:-}
       BROWSER_PROXY_PASSWORD: ${BROWSER_PROXY_PASSWORD:-}

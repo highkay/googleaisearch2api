@@ -1,7 +1,11 @@
+import json
+
 from googleaisearch2api.openai_adapter import (
     build_chat_completion_response,
     build_prompt_from_messages,
     build_prompt_from_responses_request,
+    iter_chat_completion_stream,
+    iter_responses_api_stream,
 )
 from googleaisearch2api.schemas import (
     ChatMessage,
@@ -68,3 +72,38 @@ def test_chat_completion_response_contains_usage_and_citations() -> None:
     assert payload["choices"][0]["message"]["content"] == "Three point answer."
     assert payload["usage"]["total_tokens"] >= payload["usage"]["prompt_tokens"]
     assert payload["citations"][0]["url"] == "https://openai.com"
+
+
+def test_openai_stream_deltas_preserve_original_formatting() -> None:
+    answer = (
+        "Header\n\n"
+        "- first item keeps  double spaces\n"
+        "- second item keeps indentation:\n"
+        "    nested detail with enough text to force a streamed chunk split after the default "
+        "target size"
+    )
+    result = GoogleAiResult(
+        answer_text=answer,
+        citations=[],
+        final_url="https://www.google.com/search?udm=50",
+        page_title="Google Search",
+    )
+
+    chat_deltas = []
+    for event in iter_chat_completion_stream(result=result, model_name="google-search"):
+        if event == "data: [DONE]\n\n":
+            continue
+        data = json.loads(event.removeprefix("data: ").strip())
+        delta = data["choices"][0]["delta"]
+        if "content" in delta:
+            chat_deltas.append(delta["content"])
+
+    response_deltas = []
+    for event in iter_responses_api_stream(result=result, model_name="google-search"):
+        if not event.startswith("event: response.output_text.delta"):
+            continue
+        data_line = next(line for line in event.splitlines() if line.startswith("data: "))
+        response_deltas.append(json.loads(data_line.removeprefix("data: "))["delta"])
+
+    assert "".join(chat_deltas) == answer
+    assert "".join(response_deltas) == answer

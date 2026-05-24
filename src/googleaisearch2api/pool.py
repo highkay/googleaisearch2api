@@ -10,7 +10,7 @@ from typing import Protocol
 
 from loguru import logger
 
-from .browser import GoogleAiRunner
+from .browser import GoogleAiBlockedError, GoogleAiRunner
 from .config import ServiceConfig
 from .schemas import GoogleAiResult, RuntimePoolSummary
 
@@ -56,6 +56,7 @@ class BrowserPool:
         runner_factory: Callable[[], RunnerProtocol] = GoogleAiRunner,
         worker_poll_interval_s: float = 0.25,
         request_timeout_buffer_ms: int = 5_000,
+        blocked_retry_count: int = 1,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
@@ -63,11 +64,14 @@ class BrowserPool:
             raise ValueError("queue_capacity must be at least 1")
         if request_timeout_buffer_ms < 0:
             raise ValueError("request_timeout_buffer_ms must be at least 0")
+        if blocked_retry_count < 0:
+            raise ValueError("blocked_retry_count must be at least 0")
 
         self._worker_count = worker_count
         self._runner_factory = runner_factory
         self._worker_poll_interval_s = worker_poll_interval_s
         self._request_timeout_buffer_ms = request_timeout_buffer_ms
+        self._blocked_retry_count = blocked_retry_count
         self._jobs: queue.Queue[object] = queue.Queue(maxsize=queue_capacity)
         self._lock = threading.Lock()
         self._closed = False
@@ -190,7 +194,7 @@ class BrowserPool:
                     continue
                 self._mark_worker_busy(worker_index, busy=True)
                 try:
-                    result = runner.run_prompt(job.config, job.prompt)
+                    result = self._run_prompt_with_blocked_retries(worker_index, runner, job)
                 except Exception as exc:
                     self._set_worker_error(worker_index, repr(exc))
                     if not job.future.done():
@@ -210,6 +214,35 @@ class BrowserPool:
                 runner.close()
             except Exception:
                 logger.exception("Failed to close browser runner for worker {}", worker_index + 1)
+
+    def _run_prompt_with_blocked_retries(
+        self,
+        worker_index: int,
+        runner: RunnerProtocol,
+        job: _PoolJob,
+    ) -> GoogleAiResult:
+        for attempt in range(self._blocked_retry_count + 1):
+            try:
+                return runner.run_prompt(job.config, job.prompt)
+            except GoogleAiBlockedError:
+                try:
+                    runner.close()
+                except Exception:
+                    logger.exception(
+                        "Failed to recycle blocked browser runner for worker {}",
+                        worker_index + 1,
+                    )
+                if attempt >= self._blocked_retry_count:
+                    raise
+                logger.warning(
+                    "Google blocked browser worker {}; recycled runner and retrying request "
+                    "({}/{})",
+                    worker_index + 1,
+                    attempt + 1,
+                    self._blocked_retry_count,
+                )
+
+        raise BrowserPoolError("Browser blocked retry loop exited unexpectedly.")
 
     def _sync_generation(
         self,
@@ -245,4 +278,5 @@ class BrowserPool:
 
     def _resolve_request_timeout_s(self, config: ServiceConfig) -> float:
         timeout_ms = config.pool_wait_timeout_ms(buffer_ms=self._request_timeout_buffer_ms)
+        timeout_ms *= self._blocked_retry_count + 1
         return timeout_ms / 1000

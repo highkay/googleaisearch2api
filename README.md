@@ -33,7 +33,8 @@ cp .env.example .env
 先在 `.env` 里填一个你自己的 `API_TOKEN`，再启动：
 
 ```bash
-docker compose up --build -d
+docker compose pull
+docker compose up -d
 ```
 
 默认宿主端口是 `9010`。启动后访问：
@@ -41,7 +42,7 @@ docker compose up --build -d
 - API: `http://127.0.0.1:9010`
 - Console: `http://127.0.0.1:9010/console`
 
-默认 Compose 不再挂载源码目录，也不会在容器启动时重新执行 `uv sync`。这样可以直接复用镜像里已经构建好的运行环境，避免宿主机仓库里的 `.python-version=3.13` 触发容器冷启动下载 Python，导致服务长时间不可用。
+默认 Compose 使用 GitHub Actions 发布到 GHCR 的镜像：`ghcr.io/highkay/googleaisearch2api:latest`。它不再挂载源码目录，也不会在容器启动时重新执行 `uv sync`。这样可以直接复用镜像里已经构建好的运行环境，避免宿主机仓库里的 `.python-version=3.13` 触发容器冷启动下载 Python，导致服务长时间不可用。
 
 ## 启动后验证
 
@@ -99,6 +100,7 @@ uv run googleaisearch2api
 - `BROWSER_WORKERS`: 常驻浏览器 worker 数
 - `REQUEST_QUEUE_SIZE`: 内存等待队列容量；满了以后返回 `429`
 - `REQUEST_LOG_MAX_ROWS`: SQLite 里最多保留多少条最近请求日志；默认 200
+- `GOOGLE_AI_BLOCKED_RETRY_COUNT`: Google 返回机器人/abuse block 页面时，回收当前 browser session 后重试的次数；默认 1
 - `BROWSER_PROXY_SERVER`: 代理地址，例如 `http://127.0.0.1:7890`；也支持 `http://user:pass@host:port`，运行时会自动拆分认证字段传给浏览器。
 
 请求日志会自动脱敏常见密钥、Bearer token、`user:pass@host` 形式的内联凭据，并且不会把最终 Google URL 里的 `q=` 查询词原样持久化到 SQLite。

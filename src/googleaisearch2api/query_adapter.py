@@ -31,19 +31,7 @@ def build_prompt_from_query_request(payload: QueryRequest) -> str:
 def _chunk_text(text: str, target_size: int = 120) -> list[str]:
     if len(text) <= target_size:
         return [text]
-    chunks: list[str] = []
-    current = ""
-    for word in text.split():
-        candidate = f"{current} {word}".strip()
-        if len(candidate) <= target_size:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        current = word
-    if current:
-        chunks.append(current)
-    return chunks or [text]
+    return [text[index : index + target_size] for index in range(0, len(text), target_size)]
 
 
 def build_query_response(

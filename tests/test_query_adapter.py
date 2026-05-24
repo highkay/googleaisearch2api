@@ -1,3 +1,5 @@
+import json
+
 from googleaisearch2api.query_adapter import (
     build_prompt_from_query_request,
     build_query_response,
@@ -101,3 +103,38 @@ def test_query_stream_uses_simple_sse_events() -> None:
     assert '"delta": "Streaming answer."' in joined
     assert "event: query.completed" in joined
     assert '"answer": "Streaming answer."' in joined
+
+
+def test_query_stream_deltas_preserve_original_formatting() -> None:
+    answer = (
+        "Header\n\n"
+        "- first item keeps  double spaces\n"
+        "- second item keeps indentation:\n"
+        "    nested detail with enough text to force a streamed chunk split after the default "
+        "target size"
+    )
+    result = GoogleAiResult(
+        answer_text=answer,
+        citations=[],
+        final_url="https://www.google.com/search?udm=50",
+        page_title="Google Search",
+    )
+    payload = QueryRequest(query="Question", stream=True)
+
+    events = list(
+        iter_query_stream(
+            result=result,
+            model_name="google-search",
+            prompt="User request:\nQuestion",
+            request_id="abc123",
+            payload=payload,
+        )
+    )
+
+    deltas = []
+    for event in events:
+        if not event.startswith("event: answer.delta"):
+            continue
+        data_line = next(line for line in event.splitlines() if line.startswith("data: "))
+        deltas.append(json.loads(data_line.removeprefix("data: "))["delta"])
+    assert "".join(deltas) == answer

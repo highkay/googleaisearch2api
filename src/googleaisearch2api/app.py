@@ -10,11 +10,13 @@ from urllib.parse import urlencode, urlsplit
 
 import uvicorn
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from loguru import logger
+from pydantic import ValidationError
 
 from .browser import (
     GoogleAiBlockedError,
@@ -86,6 +88,7 @@ def create_services(settings: AppSettings) -> Services:
     pool = BrowserPool(
         worker_count=settings.max_concurrent_requests,
         queue_capacity=settings.request_queue_size,
+        blocked_retry_count=settings.google_ai_blocked_retry_count,
     )
     return Services(settings=settings, store=store, pool=pool)
 
@@ -408,13 +411,16 @@ def create_app() -> FastAPI:
         include_citations: bool = Query(True),
         include_google_metadata: bool = Query(True),
     ):
-        payload = QueryRequest(
-            query=q,
-            model=model,
-            stream=stream,
-            include_citations=include_citations,
-            include_google_metadata=include_google_metadata,
-        )
+        try:
+            payload = QueryRequest(
+                query=q,
+                model=model,
+                stream=stream,
+                include_citations=include_citations,
+                include_google_metadata=include_google_metadata,
+            )
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors()) from exc
         return _query_response(payload, request)
 
     @app.post("/query", dependencies=[Depends(require_api_token)])

@@ -1,5 +1,9 @@
 services:
   googleaisearch2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    pull_policy: build
     environment:
       UV_PYTHON: /usr/bin/python3.12
       UV_PYTHON_DOWNLOADS: never
