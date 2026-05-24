@@ -101,7 +101,7 @@ uv run googleaisearch2api
 - `REQUEST_QUEUE_SIZE`: 内存等待队列容量；满了以后返回 `429`
 - `REQUEST_LOG_MAX_ROWS`: SQLite 里最多保留多少条最近请求日志；默认 200
 - `GOOGLE_AI_BLOCKED_RETRY_COUNT`: Google 返回机器人/abuse block 页面时，回收当前 browser session 后重试的次数；默认 0。只有在代理会轮换到新出口 IP 时才建议调高；同一出口网络被 Google block 时，立即重试通常会提高失败率。
-- `BROWSER_PROXY_SERVER`: 代理地址，例如 `http://127.0.0.1:7890`；也支持 `http://user:pass@host:port`，运行时会自动拆分认证字段传给浏览器。
+- `BROWSER_PROXY_SERVER`: 代理地址，例如 `http://127.0.0.1:7890` 或 `socks5h://user:pass@host:port`；HTTP 代理会把认证字段传给浏览器，`socks5`/`socks5h` 会先走本地 HTTP CONNECT 桥接层，再由桥接层向 SOCKS5 上游完成认证。
 
 请求日志会自动脱敏常见密钥、Bearer token、`user:pass@host` 形式的内联凭据，并且不会把最终 Google URL 里的 `q=` 查询词原样持久化到 SQLite。
 
@@ -109,6 +109,12 @@ uv run googleaisearch2api
 
 ```env
 BROWSER_PROXY_SERVER=http://host.docker.internal:7890
+```
+
+如果要使用带认证的 SOCKS5 代理，推荐使用远端 DNS 解析的 `socks5h` 形式：
+
+```env
+BROWSER_PROXY_SERVER=socks5h://user:pass@192.168.1.18:2260
 ```
 
 ## API 示例

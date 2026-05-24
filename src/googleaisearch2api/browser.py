@@ -10,6 +10,11 @@ from patchright.sync_api import TimeoutError as PatchrightTimeoutError
 from patchright.sync_api import sync_playwright
 
 from .config import ServiceConfig
+from .proxy_bridge import (
+    LocalSocksProxyBridge,
+    build_socks_proxy_target,
+    is_socks_proxy_server,
+)
 from .schemas import Citation, GoogleAiResult
 
 ANSWER_SELECTORS = [
@@ -161,6 +166,7 @@ class GoogleAiRunner:
         self._playwright = None
         self._browser = None
         self._context = None
+        self._proxy_bridge: LocalSocksProxyBridge | None = None
         self._session_signature: tuple | None = None
 
     def close(self) -> None:
@@ -294,6 +300,10 @@ class GoogleAiRunner:
                 pass
             self._playwright = None
 
+        if self._proxy_bridge is not None:
+            self._proxy_bridge.stop()
+            self._proxy_bridge = None
+
         self._session_signature = None
 
     def _build_launch_kwargs(self, config: ServiceConfig) -> dict:
@@ -306,10 +316,33 @@ class GoogleAiRunner:
         if browser_user_agent:
             kwargs["args"] = [f"--user-agent={browser_user_agent}"]
 
-        browser_proxy = resolve_browser_proxy(config)
+        browser_proxy = self._resolve_launch_proxy_locked(config)
         if browser_proxy:
             kwargs["proxy"] = browser_proxy
         return kwargs
+
+    def _resolve_launch_proxy_locked(self, config: ServiceConfig) -> dict | None:
+        browser_proxy = resolve_browser_proxy(config)
+        if not browser_proxy:
+            return None
+
+        proxy_server = browser_proxy["server"]
+        if not is_socks_proxy_server(proxy_server):
+            return browser_proxy
+
+        target = build_socks_proxy_target(
+            proxy_server,
+            username=browser_proxy.get("username"),
+            password=browser_proxy.get("password"),
+        )
+        if self._proxy_bridge is not None:
+            self._proxy_bridge.stop()
+        self._proxy_bridge = LocalSocksProxyBridge(target)
+        self._proxy_bridge.start()
+        return {
+            "server": self._proxy_bridge.server_url,
+            "bypass": browser_proxy.get("bypass"),
+        }
 
     def _submit_query(self, page, prompt: str) -> bool:
         try:

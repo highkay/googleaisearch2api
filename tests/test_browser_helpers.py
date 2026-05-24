@@ -1,4 +1,5 @@
 from googleaisearch2api.browser import (
+    GoogleAiRunner,
     clean_answer_text,
     filter_citations,
     resolve_browser_proxy,
@@ -107,3 +108,34 @@ def test_resolve_browser_proxy_decodes_embedded_credentials() -> None:
         "password": "p:ss",
         "bypass": None,
     }
+
+
+def test_resolve_browser_proxy_splits_socks5h_embedded_credentials() -> None:
+    config = ServiceConfig(
+        browser_proxy_server="socks5h://openai:secret@192.168.1.18:2260",
+    )
+
+    assert resolve_browser_proxy(config) == {
+        "server": "socks5h://192.168.1.18:2260",
+        "username": "openai",
+        "password": "secret",
+        "bypass": None,
+    }
+
+
+def test_runner_wraps_authenticated_socks_proxy_with_local_http_bridge() -> None:
+    runner = GoogleAiRunner()
+    try:
+        config = ServiceConfig(
+            browser_proxy_server="socks5h://openai:secret@192.168.1.18:2260",
+            browser_proxy_bypass="localhost,127.0.0.1",
+        )
+
+        proxy = runner._build_launch_kwargs(config)["proxy"]
+    finally:
+        runner.close()
+
+    assert proxy["server"].startswith("http://127.0.0.1:")
+    assert proxy["bypass"] == "localhost,127.0.0.1"
+    assert "username" not in proxy
+    assert "password" not in proxy
