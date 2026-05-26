@@ -30,6 +30,7 @@ class ServiceConfig(BaseModel):
     browser_proxy_username: str | None = None
     browser_proxy_password: str | None = None
     browser_proxy_bypass: str | None = None
+    resin_sticky_session_enabled: bool = False
 
     @property
     def browser_label(self) -> str:
@@ -67,6 +68,7 @@ class ServiceConfig(BaseModel):
             browser_proxy_username=settings.browser_proxy_username or None,
             browser_proxy_password=settings.browser_proxy_password or None,
             browser_proxy_bypass=settings.browser_proxy_bypass or None,
+            resin_sticky_session_enabled=settings.resin_sticky_session_enabled,
         )
 
 
@@ -83,6 +85,7 @@ class ServiceConfigUpdate(BaseModel):
     browser_proxy_username: str | None = None
     browser_proxy_password: str | None = None
     browser_proxy_bypass: str | None = None
+    resin_sticky_session_enabled: bool = False
 
 
 class AppSettings(BaseSettings):
@@ -122,11 +125,19 @@ class AppSettings(BaseSettings):
         ge=0,
         validation_alias=AliasChoices("GOOGLE_AI_BLOCKED_RETRY_COUNT", "GOOGLE_BLOCKED_RETRIES"),
     )
+    proxy_allow_fallback_to_base: bool = Field(
+        default=False,
+        validation_alias="PROXY_ALLOW_FALLBACK_TO_BASE",
+    )
 
     browser_proxy_server: str = Field(default="", validation_alias="BROWSER_PROXY_SERVER")
     browser_proxy_username: str = Field(default="", validation_alias="BROWSER_PROXY_USERNAME")
     browser_proxy_password: str = Field(default="", validation_alias="BROWSER_PROXY_PASSWORD")
     browser_proxy_bypass: str = Field(default="", validation_alias="BROWSER_PROXY_BYPASS")
+    resin_sticky_session_enabled: bool = Field(
+        default=False,
+        validation_alias="RESIN_STICKY_SESSION_ENABLED",
+    )
 
     @property
     def db_path(self) -> Path:

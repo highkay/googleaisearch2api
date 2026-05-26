@@ -47,6 +47,15 @@ from .pool import (
     BrowserPoolSaturatedError,
     BrowserPoolTimeoutError,
 )
+from .proxy_sessions import (
+    ProxySessionConfigError,
+    ProxySessionSelection,
+    ProxySessionSelector,
+    ProxySessionStore,
+    ProxySessionUnavailableError,
+    google_block_has_ip_mismatch,
+    parse_google_block_ips,
+)
 from .query_adapter import (
     build_prompt_from_query_request,
     build_query_response,
@@ -64,6 +73,8 @@ class Services:
     settings: AppSettings
     store: ConfigStore
     pool: BrowserPool
+    proxy_session_store: ProxySessionStore
+    proxy_selector: ProxySessionSelector
 
 
 def _templates() -> Jinja2Templates:
@@ -85,12 +96,23 @@ def create_services(settings: AppSettings) -> Services:
         ServiceConfig.from_settings(settings),
         request_log_max_rows=settings.request_log_max_rows,
     )
+    proxy_session_store = ProxySessionStore(session_factory)
+    proxy_selector = ProxySessionSelector(
+        proxy_session_store,
+        allow_fallback_to_base=settings.proxy_allow_fallback_to_base,
+    )
     pool = BrowserPool(
         worker_count=settings.max_concurrent_requests,
         queue_capacity=settings.request_queue_size,
         blocked_retry_count=settings.google_ai_blocked_retry_count,
     )
-    return Services(settings=settings, store=store, pool=pool)
+    return Services(
+        settings=settings,
+        store=store,
+        pool=pool,
+        proxy_session_store=proxy_session_store,
+        proxy_selector=proxy_selector,
+    )
 
 
 def get_services(request: Request) -> Services:
@@ -167,6 +189,24 @@ def _resolve_model(requested_model: str | None, config: ServiceConfig) -> str:
     )
 
 
+def _record_proxy_session_error(
+    services: Services,
+    selection: ProxySessionSelection | None,
+    *,
+    blocked: bool,
+    error_message: str,
+    block_ips: list[str] | None = None,
+) -> None:
+    if selection is None:
+        return
+    services.proxy_session_store.finish_request_error(
+        selection.session.id,
+        blocked=blocked,
+        error_message=error_message,
+        block_ips=block_ips,
+    )
+
+
 def _run_google_ai(
     *,
     request: Request,
@@ -178,21 +218,50 @@ def _run_google_ai(
     services = get_services(request)
     config = services.store.get_config()
     model_name = _resolve_model(requested_model, config)
+    selection: ProxySessionSelection | None = None
+    effective_config = config
+    try:
+        selection = services.proxy_selector.select(config)
+    except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
+        request_id = services.store.start_request(
+            endpoint=endpoint,
+            model_name=model_name,
+            prompt_preview=prompt,
+            client_ip=request.client.host if request.client else None,
+            stream=stream,
+            config=config,
+        )
+        services.store.finish_request_error(request_id, str(exc), 0)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    if selection is not None:
+        effective_config = selection.config
+
     request_id = services.store.start_request(
         endpoint=endpoint,
         model_name=model_name,
         prompt_preview=prompt,
         client_ip=request.client.host if request.client else None,
         stream=stream,
-        config=config,
+        config=effective_config,
+        proxy_session_id=selection.session.id if selection else None,
+        proxy_base_username=selection.session.proxy_base_username if selection else None,
+        proxy_username=selection.session.proxy_username if selection else None,
+        proxy_primary_ip=selection.session.primary_ip if selection else None,
+        proxy_ip_vector_hash=selection.session.ip_vector_hash if selection else None,
+        proxy_iplark_score=selection.session.iplark_min_quality_score if selection else None,
     )
 
     started_at = time.perf_counter()
     try:
-        result = services.pool.execute(config, prompt)
+        result = services.pool.execute(effective_config, prompt)
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_success(request_id, result, duration_ms)
-        return config, model_name, request_id, result
+        if selection is not None:
+            services.proxy_session_store.finish_request_success(selection.session.id)
+        return effective_config, model_name, request_id, result
     except BrowserPoolSaturatedError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_error(request_id, str(exc), duration_ms)
@@ -213,19 +282,53 @@ def _run_google_ai(
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
     except GoogleAiBlockedError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, str(exc), duration_ms)
+        block_ips = parse_google_block_ips(str(exc))
+        services.store.finish_request_error(
+            request_id,
+            str(exc),
+            duration_ms,
+            google_block_ips=block_ips,
+            google_block_mismatch=google_block_has_ip_mismatch(block_ips),
+        )
+        _record_proxy_session_error(
+            services,
+            selection,
+            blocked=True,
+            error_message=str(exc),
+            block_ips=block_ips,
+        )
+        if selection is not None:
+            services.pool.reset()
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except GoogleAiTimeoutError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_error(request_id, str(exc), duration_ms)
+        _record_proxy_session_error(
+            services,
+            selection,
+            blocked=False,
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
     except GoogleAiRuntimeError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_error(request_id, str(exc), duration_ms)
+        _record_proxy_session_error(
+            services,
+            selection,
+            blocked=False,
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_error(request_id, repr(exc), duration_ms)
+        _record_proxy_session_error(
+            services,
+            selection,
+            blocked=False,
+            error_message=repr(exc),
+        )
         logger.exception("Unhandled request failure")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -305,6 +408,7 @@ def create_app() -> FastAPI:
             "model": config.default_model,
             "browser": config.browser_label,
             "proxy_enabled": config.proxy_enabled,
+            "resin_sticky_session_enabled": config.resin_sticky_session_enabled,
             "headless": config.browser_headless,
             "workers": pool_summary.worker_count,
             "busy_workers": pool_summary.busy_workers,
@@ -484,6 +588,8 @@ def create_app() -> FastAPI:
             )
         summary = services.store.get_summary()
         pool_summary = services.pool.get_summary()
+        proxy_session_summary = services.proxy_session_store.get_summary()
+        proxy_sessions = services.proxy_session_store.list_proxy_sessions(limit=20)
         recent_requests = services.store.list_recent_requests(limit=20)
         return templates.TemplateResponse(
             request=request,
@@ -493,6 +599,8 @@ def create_app() -> FastAPI:
                 "config": config,
                 "summary": summary,
                 "pool_summary": pool_summary,
+                "proxy_session_summary": proxy_session_summary,
+                "proxy_sessions": proxy_sessions,
                 "recent_requests": recent_requests,
                 "status_message": _status_message(status_code),
             },
@@ -509,13 +617,16 @@ def create_app() -> FastAPI:
             )
         summary = services.store.get_summary()
         pool_summary = services.pool.get_summary()
+        proxy_session_summary = services.proxy_session_store.get_summary()
         return {
             "summary": summary.model_dump(mode="json"),
             "pool": pool_summary.model_dump(mode="json"),
+            "proxy_sessions": proxy_session_summary,
             "config": {
                 "default_model": config.default_model,
                 "browser_label": config.browser_label,
                 "proxy_enabled": config.proxy_enabled,
+                "resin_sticky_session_enabled": config.resin_sticky_session_enabled,
                 "browser_headless": config.browser_headless,
             },
         }
@@ -536,6 +647,7 @@ def create_app() -> FastAPI:
         browser_proxy_password: str = Form(""),
         clear_browser_proxy_password: str | None = Form(None),
         browser_proxy_bypass: str = Form(""),
+        resin_sticky_session_enabled: str | None = Form(None),
     ) -> RedirectResponse:
         services = get_services(request)
         current_config = services.store.get_config()
@@ -561,6 +673,7 @@ def create_app() -> FastAPI:
                 else browser_proxy_password.strip() or current_config.browser_proxy_password or ""
             ),
             browser_proxy_bypass=browser_proxy_bypass,
+            resin_sticky_session_enabled=_coerce_checkbox(resin_sticky_session_enabled),
         )
         updated_config = services.store.update_config(update)
         services.pool.reset()

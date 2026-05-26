@@ -72,6 +72,18 @@ def _sanitize_logged_url(url: str | None) -> str | None:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
+def _load_json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [str(item) for item in loaded]
+
+
 class ConfigStore:
     def __init__(self, session_factory, defaults: ServiceConfig, request_log_max_rows: int = 200):
         self._session_factory = session_factory
@@ -92,6 +104,7 @@ class ConfigStore:
             browser_proxy_username=row.browser_proxy_username,
             browser_proxy_password=row.browser_proxy_password,
             browser_proxy_bypass=row.browser_proxy_bypass,
+            resin_sticky_session_enabled=bool(row.resin_sticky_session_enabled),
         )
 
     def _get_or_create_row(self, session) -> ServiceConfigRow:
@@ -113,6 +126,7 @@ class ConfigStore:
                 browser_proxy_username=self._defaults.browser_proxy_username,
                 browser_proxy_password=self._defaults.browser_proxy_password,
                 browser_proxy_bypass=self._defaults.browser_proxy_bypass,
+                resin_sticky_session_enabled=self._defaults.resin_sticky_session_enabled,
                 updated_at=utc_now(),
             )
             session.add(row)
@@ -142,6 +156,7 @@ class ConfigStore:
             row.browser_proxy_username = _coalesce_blank(update.browser_proxy_username)
             row.browser_proxy_password = _coalesce_blank(update.browser_proxy_password)
             row.browser_proxy_bypass = _coalesce_blank(update.browser_proxy_bypass)
+            row.resin_sticky_session_enabled = update.resin_sticky_session_enabled
             row.updated_at = utc_now()
             session.add(row)
             session.commit()
@@ -157,6 +172,12 @@ class ConfigStore:
         client_ip: str | None,
         stream: bool,
         config: ServiceConfig,
+        proxy_session_id: int | None = None,
+        proxy_base_username: str | None = None,
+        proxy_username: str | None = None,
+        proxy_primary_ip: str | None = None,
+        proxy_ip_vector_hash: str | None = None,
+        proxy_iplark_score: int | None = None,
     ) -> str:
         request_id = uuid.uuid4().hex
         with self._session_factory() as session:
@@ -170,6 +191,13 @@ class ConfigStore:
                 stream=stream,
                 headless=config.browser_headless,
                 proxy_enabled=config.proxy_enabled,
+                resin_sticky_session_enabled=config.resin_sticky_session_enabled,
+                proxy_session_id=proxy_session_id,
+                proxy_base_username=proxy_base_username,
+                proxy_username=proxy_username,
+                proxy_primary_ip=proxy_primary_ip,
+                proxy_ip_vector_hash=proxy_ip_vector_hash,
+                proxy_iplark_score=proxy_iplark_score,
             )
             session.add(row)
             self._trim_request_logs(session)
@@ -196,7 +224,15 @@ class ConfigStore:
             self._trim_request_logs(session)
             session.commit()
 
-    def finish_request_error(self, request_id: str, error_message: str, duration_ms: int) -> None:
+    def finish_request_error(
+        self,
+        request_id: str,
+        error_message: str,
+        duration_ms: int,
+        *,
+        google_block_ips: list[str] | None = None,
+        google_block_mismatch: bool = False,
+    ) -> None:
         with self._session_factory() as session:
             row = session.get(RequestLogRow, request_id)
             if row is None:
@@ -204,6 +240,9 @@ class ConfigStore:
             row.status = "error"
             row.error_message = _sanitize_logged_text(error_message, limit=3000)
             row.duration_ms = duration_ms
+            if google_block_ips is not None:
+                row.google_block_ips_json = json.dumps(google_block_ips, ensure_ascii=False)
+                row.google_block_mismatch = google_block_mismatch
             row.finished_at = utc_now()
             session.add(row)
             self._trim_request_logs(session)
@@ -276,6 +315,15 @@ class ConfigStore:
                         final_url=row.final_url,
                         duration_ms=row.duration_ms,
                         client_ip=row.client_ip,
+                        resin_sticky_session_enabled=row.resin_sticky_session_enabled,
+                        proxy_session_id=row.proxy_session_id,
+                        proxy_base_username=row.proxy_base_username,
+                        proxy_username=row.proxy_username,
+                        proxy_primary_ip=row.proxy_primary_ip,
+                        proxy_ip_vector_hash=row.proxy_ip_vector_hash,
+                        proxy_iplark_score=row.proxy_iplark_score,
+                        google_block_ips=_load_json_list(row.google_block_ips_json),
+                        google_block_mismatch=bool(row.google_block_mismatch),
                         created_at=row.created_at,
                         finished_at=row.finished_at,
                         citations=citations,

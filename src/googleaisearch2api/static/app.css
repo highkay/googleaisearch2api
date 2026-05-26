@@ -338,6 +338,40 @@ th {
     background: rgba(200, 93, 47, 0.14);
 }
 
+.status.active,
+.status.risk_checked,
+.status.egress_checked {
+    color: #0c695c;
+    background: rgba(13, 143, 123, 0.12);
+}
+
+.status.cooldown {
+    color: #8d2e11;
+    background: rgba(200, 93, 47, 0.14);
+}
+
+.status.retired {
+    color: #3d423e;
+    background: rgba(23, 32, 29, 0.12);
+}
+
+.mono {
+    font-family: "IBM Plex Mono", Consolas, monospace;
+    font-size: 0.88rem;
+}
+
+td small {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+}
+
+.proxy-detail {
+    min-width: 18ch;
+    color: var(--muted);
+    line-height: 1.5;
+}
+
 .clip {
     max-width: 44ch;
     white-space: normal;

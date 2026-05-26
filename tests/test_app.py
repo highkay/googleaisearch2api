@@ -37,9 +37,11 @@ class FakePool:
     def __init__(self, answer_text: str = "Browser-backed answer.") -> None:
         self.answer_text = answer_text
         self.prompts: list[str] = []
+        self.configs: list = []
         self.closed = False
 
     def execute(self, config, prompt: str) -> GoogleAiResult:
+        self.configs.append(config)
         self.prompts.append(prompt)
         return GoogleAiResult(
             answer_text=self.answer_text,
@@ -239,6 +241,87 @@ def test_query_post_returns_tool_friendly_response_shape(test_app) -> None:
         "Question"
     ]
     assert recent[0].endpoint == "/query"
+
+
+def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        snapshot = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user1",
+            proxy_username="openai.user1",
+            status="active",
+        )
+        test_app.state.services.proxy_session_store.update_egress(
+            proxy_session_id=snapshot.id,
+            ips=["203.0.113.10"],
+            source="test",
+        )
+        test_app.state.services.proxy_session_store.mark_canary_success(snapshot.id)
+        pool = _install_fake_pool(test_app, answer_text="Sticky answer.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 200
+    assert pool.configs[0].browser_proxy_username == "openai.user1"
+    assert recent[0].resin_sticky_session_enabled is True
+    assert recent[0].proxy_base_username == "openai"
+    assert recent[0].proxy_username == "openai.user1"
+    assert recent[0].proxy_primary_ip == "203.0.113.10"
+
+
+def test_query_fails_fast_when_sticky_enabled_without_active_session(test_app) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        pool = _install_fake_pool(test_app)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 503
+    assert "No active sticky proxy session" in response.json()["detail"]
+    assert pool.prompts == []
+    assert recent[0].status == "error"
+    assert recent[0].resin_sticky_session_enabled is True
 
 
 def test_query_get_returns_tool_friendly_response_shape(test_app) -> None:

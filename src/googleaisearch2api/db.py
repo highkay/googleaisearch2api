@@ -32,6 +32,7 @@ class ServiceConfigRow(Base):
     browser_proxy_username: Mapped[str | None] = mapped_column(Text, nullable=True)
     browser_proxy_password: Mapped[str | None] = mapped_column(Text, nullable=True)
     browser_proxy_bypass: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resin_sticky_session_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -52,8 +53,87 @@ class RequestLogRow(Base):
     stream: Mapped[bool] = mapped_column(Boolean, default=False)
     headless: Mapped[bool] = mapped_column(Boolean, default=True)
     proxy_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    resin_sticky_session_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    proxy_session_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proxy_base_username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proxy_username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proxy_primary_ip: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    proxy_ip_vector_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    proxy_iplark_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    google_block_ips_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_block_mismatch: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProxySessionRow(Base):
+    __tablename__ = "proxy_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    proxy_base_username: Mapped[str] = mapped_column(Text, nullable=False)
+    session_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    proxy_username: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="new")
+    epoch: Mapped[int] = mapped_column(Integer, default=0)
+    primary_ip: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    ip_vector_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ip_vector_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    asn: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    organization: Mapped[str | None] = mapped_column(Text, nullable=True)
+    iplark_min_quality_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    iplark_usage_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    iplark_category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    iplark_public_proxy: Mapped[bool] = mapped_column(Boolean, default=False)
+    iplark_threat: Mapped[bool] = mapped_column(Boolean, default=False)
+    iplark_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_canary_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    google_canary_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_canary_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    request_success_count: Mapped[int] = mapped_column(Integer, default=0)
+    request_block_count: Mapped[int] = mapped_column(Integer, default=0)
+    request_error_count: Mapped[int] = mapped_column(Integer, default=0)
+    canary_success_count: Mapped[int] = mapped_column(Integer, default=0)
+    canary_block_count: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_of_session_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_selected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retire_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ProxyIpObservationRow(Base):
+    __tablename__ = "proxy_ip_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    proxy_session_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    epoch: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    ip: Mapped[str] = mapped_column(String(128), nullable=False)
+    asn: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    organization: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ProxySessionEventRow(Base):
+    __tablename__ = "proxy_session_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    proxy_session_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    message: Mapped[str] = mapped_column(Text, default="")
+    raw_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 def create_db_engine(db_path: str):
@@ -71,10 +151,24 @@ def create_session_factory(engine):
 def create_tables(engine) -> None:
     Base.metadata.create_all(engine)
     _ensure_service_config_columns(engine)
+    _ensure_request_log_columns(engine)
 
 
 def _ensure_service_config_columns(engine) -> None:
     _ensure_column(engine, "service_config", "browser_user_agent", "TEXT")
+    _ensure_column(engine, "service_config", "resin_sticky_session_enabled", "BOOLEAN DEFAULT 0")
+
+
+def _ensure_request_log_columns(engine) -> None:
+    _ensure_column(engine, "request_logs", "resin_sticky_session_enabled", "BOOLEAN DEFAULT 0")
+    _ensure_column(engine, "request_logs", "proxy_session_id", "INTEGER")
+    _ensure_column(engine, "request_logs", "proxy_base_username", "TEXT")
+    _ensure_column(engine, "request_logs", "proxy_username", "TEXT")
+    _ensure_column(engine, "request_logs", "proxy_primary_ip", "VARCHAR(128)")
+    _ensure_column(engine, "request_logs", "proxy_ip_vector_hash", "VARCHAR(64)")
+    _ensure_column(engine, "request_logs", "proxy_iplark_score", "INTEGER")
+    _ensure_column(engine, "request_logs", "google_block_ips_json", "TEXT")
+    _ensure_column(engine, "request_logs", "google_block_mismatch", "BOOLEAN DEFAULT 0")
 
 
 def _ensure_column(engine, table_name: str, column_name: str, column_sql: str) -> None:

@@ -39,11 +39,13 @@ def test_update_config_and_summary(tmp_path: Path) -> None:
         browser_proxy_username="",
         browser_proxy_password="",
         browser_proxy_bypass="localhost",
+        resin_sticky_session_enabled=True,
     )
     config = store.update_config(update)
     assert config.default_model == "google-search-v2"
     assert config.browser_user_agent == "Mozilla/5.0 TestBrowser"
     assert config.proxy_enabled is True
+    assert config.resin_sticky_session_enabled is True
 
     request_id = store.start_request(
         endpoint="/v1/chat/completions",
@@ -52,6 +54,12 @@ def test_update_config_and_summary(tmp_path: Path) -> None:
         client_ip="127.0.0.1",
         stream=False,
         config=config,
+        proxy_session_id=7,
+        proxy_base_username="openai",
+        proxy_username="openai.user1",
+        proxy_primary_ip="203.0.113.10",
+        proxy_ip_vector_hash="hash",
+        proxy_iplark_score=76,
     )
     store.finish_request_success(
         request_id,
@@ -70,6 +78,11 @@ def test_update_config_and_summary(tmp_path: Path) -> None:
     assert summary.total_requests == 1
     assert summary.successful_requests == 1
     assert recent[0].response_preview == "world"
+    assert recent[0].resin_sticky_session_enabled is True
+    assert recent[0].proxy_session_id == 7
+    assert recent[0].proxy_username == "openai.user1"
+    assert recent[0].proxy_primary_ip == "203.0.113.10"
+    assert recent[0].proxy_iplark_score == 76
 
 
 def test_request_logs_redact_secrets_and_trim_old_rows(tmp_path: Path) -> None:

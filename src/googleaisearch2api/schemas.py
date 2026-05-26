@@ -39,6 +39,15 @@ class RecentRequest(StrictModel):
     final_url: str | None = None
     duration_ms: int | None = None
     client_ip: str | None = None
+    resin_sticky_session_enabled: bool = False
+    proxy_session_id: int | None = None
+    proxy_base_username: str | None = None
+    proxy_username: str | None = None
+    proxy_primary_ip: str | None = None
+    proxy_ip_vector_hash: str | None = None
+    proxy_iplark_score: int | None = None
+    google_block_ips: list[str] = Field(default_factory=list)
+    google_block_mismatch: bool = False
     created_at: datetime
     finished_at: datetime | None = None
     citations: list[Citation] = Field(default_factory=list)

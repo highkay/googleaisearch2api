@@ -10,6 +10,7 @@ async function refreshSummary() {
     const payload = await response.json();
     const summary = payload.summary || {};
     const pool = payload.pool || {};
+    const proxySessions = payload.proxy_sessions || {};
     const statMap = {
         total_requests: summary.total_requests,
         successful_requests: summary.successful_requests,
@@ -21,6 +22,8 @@ async function refreshSummary() {
         queued_requests: pool.queued_requests,
         workers_with_errors: pool.workers_with_errors,
         generation: pool.generation,
+        sticky_active: proxySessions.active || 0,
+        sticky_cooldown: proxySessions.cooldown || 0,
     };
 
     Object.entries(statMap).forEach(([key, value]) => {

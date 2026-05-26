@@ -29,7 +29,7 @@
                 </div>
                 <div class="meta-card">
                     <span>Proxy</span>
-                    <strong>{{ "Enabled" if config.proxy_enabled else "Disabled" }}</strong>
+                    <strong>{{ "Sticky" if config.resin_sticky_session_enabled else ("Enabled" if config.proxy_enabled else "Disabled") }}</strong>
                 </div>
                 <div class="meta-card">
                     <span>Pool</span>
@@ -78,6 +78,14 @@
             <article class="stat-card">
                 <span class="stat-label">Generation</span>
                 <strong class="stat-value" data-stat="generation">{{ pool_summary.generation }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Sticky active</span>
+                <strong class="stat-value" data-stat="sticky_active">{{ proxy_session_summary.get("active", 0) }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Sticky cooldown</span>
+                <strong class="stat-value" data-stat="sticky_cooldown">{{ proxy_session_summary.get("cooldown", 0) }}</strong>
             </article>
         </section>
 
@@ -138,6 +146,10 @@
                         <input type="checkbox" name="clear_browser_proxy_password">
                         <span>Clear stored proxy password</span>
                     </label>
+                    <label class="checkbox wide">
+                        <input type="checkbox" name="resin_sticky_session_enabled" {% if config.resin_sticky_session_enabled %}checked{% endif %}>
+                        <span>Use Resin sticky sessions</span>
+                    </label>
                     <label>
                         <span>Proxy bypass</span>
                         <input type="text" name="browser_proxy_bypass" value="{{ config.browser_proxy_bypass or '' }}" placeholder="localhost,127.0.0.1">
@@ -170,6 +182,67 @@
 
         <section class="panel full">
             <div class="panel-head">
+                <h2>Proxy Sessions</h2>
+                <p>Sticky sessions that passed probes are selected automatically before browser execution.</p>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Session</th>
+                            <th>Status</th>
+                            <th>IP</th>
+                            <th>Score</th>
+                            <th>Traffic</th>
+                            <th>Last event</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in proxy_sessions %}
+                        <tr>
+                            <td>
+                                <div class="mono">{{ item.proxy_username }}</div>
+                                <small>{{ item.proxy_base_username }}</small>
+                            </td>
+                            <td><span class="status {{ item.status }}">{{ item.status }}</span></td>
+                            <td>{{ item.primary_ip or "n/a" }}</td>
+                            <td>{{ item.iplark_min_quality_score if item.iplark_min_quality_score is not none else "n/a" }}</td>
+                            <td>
+                                <div class="proxy-detail">ok {{ item.request_success_count }} / blocked {{ item.request_block_count }} / err {{ item.request_error_count }}</div>
+                            </td>
+                            <td>
+                                {% if item.last_blocked_at %}
+                                {{ item.last_blocked_at.strftime("%Y-%m-%d %H:%M:%S") }}
+                                {% elif item.last_success_at %}
+                                {{ item.last_success_at.strftime("%Y-%m-%d %H:%M:%S") }}
+                                {% elif item.last_selected_at %}
+                                {{ item.last_selected_at.strftime("%Y-%m-%d %H:%M:%S") }}
+                                {% else %}
+                                n/a
+                                {% endif %}
+                                {% if item.retire_reason %}
+                                <div class="clip error-text">{{ item.retire_reason }}</div>
+                                {% endif %}
+                                {% if item.google_canary_status and item.google_canary_status != "unknown" %}
+                                <div class="proxy-detail">canary {{ item.google_canary_status }}</div>
+                                {% endif %}
+                                {% if item.google_canary_error %}
+                                <div class="clip error-text">{{ item.google_canary_error }}</div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" class="empty">No sticky proxy sessions have been recorded yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel full">
+            <div class="panel-head">
                 <h2>Recent Requests</h2>
                 <p>Requests are persisted with prompt excerpt, status, latency, result preview and extracted citations.</p>
             </div>
@@ -181,6 +254,7 @@
                             <th>Endpoint</th>
                             <th>Status</th>
                             <th>Latency</th>
+                            <th>Proxy</th>
                             <th>Prompt</th>
                             <th>Result</th>
                         </tr>
@@ -192,6 +266,19 @@
                             <td>{{ item.endpoint }}</td>
                             <td><span class="status {{ item.status }}">{{ item.status }}</span></td>
                             <td>{{ item.duration_ms if item.duration_ms is not none else "n/a" }}</td>
+                            <td>
+                                {% if item.proxy_username %}
+                                <div class="mono">{{ item.proxy_username }}</div>
+                                <small>{{ item.proxy_primary_ip or "n/a" }}</small>
+                                {% if item.proxy_iplark_score is not none %}
+                                <small>score {{ item.proxy_iplark_score }}</small>
+                                {% endif %}
+                                {% elif item.resin_sticky_session_enabled %}
+                                sticky unavailable
+                                {% else %}
+                                n/a
+                                {% endif %}
+                            </td>
                             <td>
                                 <div class="clip">{{ item.prompt_preview }}</div>
                             </td>
@@ -212,7 +299,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="6" class="empty">No requests have been recorded yet.</td>
+                            <td colspan="7" class="empty">No requests have been recorded yet.</td>
                         </tr>
                         {% endfor %}
                     </tbody>
