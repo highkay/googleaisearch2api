@@ -1,7 +1,7 @@
 services:
   googleaisearch2api:
     image: ${GOOGLEAISEARCH2API_IMAGE:-ghcr.io/highkay/googleaisearch2api:latest}
-    pull_policy: always
+    pull_policy: ${GOOGLEAISEARCH2API_PULL_POLICY:-always}
     ports:
       - "${APP_PORT:-9010}:8000"
     environment:
