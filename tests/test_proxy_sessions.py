@@ -112,6 +112,41 @@ def test_proxy_session_selector_uses_active_session_without_hardcoded_country(
     assert selection.config.browser_proxy_username == "openai.user1"
 
 
+def test_proxy_session_selector_rotates_active_sessions_before_success_bias(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    first = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+        status=STATUS_ACTIVE,
+    )
+    store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user2",
+        proxy_username="openai.user2",
+        status=STATUS_ACTIVE,
+    )
+    selector = ProxySessionSelector(store)
+    config = ServiceConfig(
+        browser_proxy_server="http://192.0.2.1:2260",
+        browser_proxy_username="openai",
+        browser_proxy_password="pass",
+        resin_sticky_session_enabled=True,
+    )
+
+    first_selection = selector.select(config)
+    assert first_selection is not None
+    assert first_selection.session.proxy_username == "openai.user1"
+    store.finish_request_success(first.id)
+
+    second_selection = selector.select(config)
+
+    assert second_selection is not None
+    assert second_selection.session.proxy_username == "openai.user2"
+
+
 def test_update_egress_retires_duplicate_ip_vector(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     first = store.upsert_proxy_session(

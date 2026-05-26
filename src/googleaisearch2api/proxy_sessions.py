@@ -467,8 +467,8 @@ class ProxySessionStore:
                 .order_by(
                     ProxySessionRow.request_block_count.asc(),
                     ProxySessionRow.request_error_count.asc(),
-                    ProxySessionRow.request_success_count.desc(),
                     ProxySessionRow.last_selected_at.asc().nullsfirst(),
+                    ProxySessionRow.request_success_count.desc(),
                     ProxySessionRow.id.asc(),
                 )
                 .limit(1)
