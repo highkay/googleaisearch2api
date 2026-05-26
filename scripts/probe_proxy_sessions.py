@@ -54,6 +54,8 @@ def _datetime_for_compare(value: datetime, reference: datetime) -> datetime:
         return value.replace(tzinfo=reference.tzinfo)
     if value.tzinfo is not None and reference.tzinfo is None:
         return value.replace(tzinfo=None)
+    if value.tzinfo is not None and reference.tzinfo is not None:
+        return value.astimezone(reference.tzinfo)
     return value
 
 
@@ -78,7 +80,7 @@ def _skip_candidate_reason(
         if snapshot.cooldown_until is None:
             return "session is in cooldown"
         cooldown_until = _datetime_for_compare(snapshot.cooldown_until, now)
-        compare_now = _datetime_for_compare(now, snapshot.cooldown_until)
+        compare_now = _datetime_for_compare(now, cooldown_until)
         if cooldown_until > compare_now:
             return "session is in cooldown"
     if snapshot.status == STATUS_RETIRED and not risk_retired and not retry_retired:

@@ -101,6 +101,41 @@ def test_skip_candidate_preserves_active_and_cooldown_sessions() -> None:
     )
 
 
+def test_skip_candidate_handles_sqlite_naive_cooldown_datetime() -> None:
+    now = datetime(2026, 5, 26, 12, 0, tzinfo=UTC)
+    active_cooldown = _snapshot(
+        status=STATUS_COOLDOWN,
+        cooldown_until=datetime(2026, 5, 26, 13, 0),
+    )
+    expired_cooldown = _snapshot(
+        status=STATUS_COOLDOWN,
+        cooldown_until=datetime(2026, 5, 26, 11, 0),
+    )
+
+    assert (
+        _skip_candidate_reason(
+            active_cooldown,
+            now=now,
+            refresh_active=False,
+            retry_cooldown=False,
+            retry_retired=False,
+            only_risk_retired=False,
+        )
+        == "session is in cooldown"
+    )
+    assert (
+        _skip_candidate_reason(
+            expired_cooldown,
+            now=now,
+            refresh_active=False,
+            retry_cooldown=False,
+            retry_retired=False,
+            only_risk_retired=False,
+        )
+        is None
+    )
+
+
 def test_skip_candidate_retries_legacy_risk_retired_only() -> None:
     now = datetime(2026, 5, 26, tzinfo=UTC)
     risk_retired = _snapshot(
