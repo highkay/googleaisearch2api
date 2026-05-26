@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from .browser import resolve_browser_proxy
 from .config import ServiceConfig
@@ -569,6 +569,45 @@ class ProxySessionStore:
                 )
                 or 0
             )
+
+    def find_google_blocked_session_for_ip(
+        self,
+        proxy_base_username: str,
+        primary_ip: str,
+        *,
+        exclude_session_id: int | None = None,
+    ) -> ProxySessionSnapshot | None:
+        normalized = normalize_ip_vector([primary_ip])
+        if not normalized:
+            return None
+
+        statement = (
+            select(ProxySessionRow)
+            .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+            .where(ProxySessionRow.primary_ip == normalized[0])
+            .where(
+                or_(
+                    ProxySessionRow.google_canary_status == "blocked",
+                    ProxySessionRow.canary_block_count > 0,
+                    ProxySessionRow.request_block_count > 0,
+                    ProxySessionRow.last_blocked_at.is_not(None),
+                )
+            )
+            .order_by(
+                ProxySessionRow.last_blocked_at.desc().nullslast(),
+                ProxySessionRow.updated_at.desc(),
+                ProxySessionRow.id.asc(),
+            )
+            .limit(1)
+        )
+        if exclude_session_id is not None:
+            statement = statement.where(ProxySessionRow.id != exclude_session_id)
+
+        with self._session_factory() as session:
+            row = session.scalars(statement).first()
+            if row is None:
+                return None
+            return ProxySessionSnapshot.from_row(row)
 
     def list_proxy_sessions(self, limit: int = 20) -> list[ProxySessionSnapshot]:
         with self._session_factory() as session:

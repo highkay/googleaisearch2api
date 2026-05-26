@@ -20,22 +20,26 @@ _candidate_indices = _SCRIPT._candidate_indices
 _canary_answer_matches = _SCRIPT._canary_answer_matches
 _run_canary = _SCRIPT._run_canary
 _skip_candidate_reason = _SCRIPT._skip_candidate_reason
+_skip_known_google_blocked_ip = _SCRIPT._skip_known_google_blocked_ip
 
 
 def _snapshot(
     *,
     status: str,
+    id: int = 1,
+    proxy_username: str = "openai.user1",
+    primary_ip: str | None = "203.0.113.10",
     retire_reason: str | None = None,
     cooldown_until: datetime | None = None,
 ) -> ProxySessionSnapshot:
     return ProxySessionSnapshot(
-        id=1,
+        id=id,
         proxy_base_username="openai",
         session_name="user1",
-        proxy_username="openai.user1",
+        proxy_username=proxy_username,
         status=status,
         epoch=0,
-        primary_ip="203.0.113.10",
+        primary_ip=primary_ip,
         ip_vector_hash="hash",
         iplark_min_quality_score=34,
         google_canary_status="",
@@ -144,6 +148,76 @@ def test_skip_candidate_retries_legacy_risk_retired_only() -> None:
 def test_candidate_indices_can_shuffle_with_stable_seed() -> None:
     assert _candidate_indices(1, 5, shuffle=False, seed=None) == [1, 2, 3, 4, 5]
     assert _candidate_indices(1, 5, shuffle=True, seed=7) == [5, 1, 4, 2, 3]
+
+
+class _FakeKnownBlockedStore:
+    def __init__(self, blocked: ProxySessionSnapshot | None) -> None:
+        self.blocked = blocked
+        self.events: list[dict] = []
+        self.cooldown_reasons: list[str] = []
+
+    def find_google_blocked_session_for_ip(
+        self,
+        proxy_base_username: str,
+        primary_ip: str,
+        *,
+        exclude_session_id: int | None = None,
+    ) -> ProxySessionSnapshot | None:
+        assert proxy_base_username == "openai"
+        assert primary_ip == "203.0.113.10"
+        assert exclude_session_id == 2
+        return self.blocked
+
+    def record_event(self, **kwargs: object) -> None:
+        self.events.append(kwargs)
+
+    def mark_session_cooldown(
+        self,
+        _proxy_session_id: int,
+        *,
+        reason: str,
+    ) -> ProxySessionSnapshot:
+        self.cooldown_reasons.append(reason)
+        return _snapshot(status=STATUS_COOLDOWN, id=2, proxy_username="openai.user2")
+
+
+def test_skip_known_google_blocked_ip_uses_own_google_failure_history() -> None:
+    blocked = _snapshot(
+        status=STATUS_COOLDOWN,
+        id=1,
+        proxy_username="openai.user1",
+        primary_ip="203.0.113.10",
+    )
+    store = _FakeKnownBlockedStore(blocked)
+
+    result = _skip_known_google_blocked_ip(
+        store,
+        _snapshot(status=STATUS_ACTIVE, id=2, proxy_username="openai.user2"),
+        base_username="openai",
+        enabled=True,
+    )
+
+    assert result.status == STATUS_COOLDOWN
+    assert "openai.user1" in store.cooldown_reasons[0]
+    assert store.events[0]["event_type"] == "known_google_blocked_ip_skipped"
+
+
+def test_skip_known_google_blocked_ip_can_be_disabled() -> None:
+    store = _FakeKnownBlockedStore(
+        _snapshot(status=STATUS_COOLDOWN, id=1, proxy_username="openai.user1")
+    )
+    snapshot = _snapshot(status=STATUS_ACTIVE, id=2, proxy_username="openai.user2")
+
+    result = _skip_known_google_blocked_ip(
+        store,
+        snapshot,
+        base_username="openai",
+        enabled=False,
+    )
+
+    assert result is snapshot
+    assert store.events == []
+    assert store.cooldown_reasons == []
 
 
 def test_canary_answer_match_normalizes_trailing_period_and_whitespace() -> None:

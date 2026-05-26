@@ -218,6 +218,48 @@ def test_update_egress_clears_stale_duplicate_when_ip_changes(tmp_path: Path) ->
     assert refreshed.duplicate_of_session_id is None
 
 
+def test_find_google_blocked_session_for_ip_uses_exact_base_and_ip(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    blocked = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    other = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user2",
+        proxy_username="openai.user2",
+    )
+    blocked = store.update_egress(
+        proxy_session_id=blocked.id,
+        ips=["203.0.113.10"],
+        source="test",
+    )
+    store.mark_canary_blocked(
+        blocked.id,
+        error_message="Google unusual traffic",
+        block_ips=["203.0.113.10"],
+    )
+
+    found = store.find_google_blocked_session_for_ip(
+        "openai",
+        "203.0.113.10",
+        exclude_session_id=other.id,
+    )
+
+    assert found is not None
+    assert found.id == blocked.id
+    assert store.find_google_blocked_session_for_ip("JP", "203.0.113.10") is None
+    assert (
+        store.find_google_blocked_session_for_ip(
+            "openai",
+            "203.0.113.10",
+            exclude_session_id=blocked.id,
+        )
+        is None
+    )
+
+
 def test_risk_metadata_does_not_filter_before_google_canary(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     snapshot = store.upsert_proxy_session(

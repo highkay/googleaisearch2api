@@ -233,6 +233,46 @@ def _run_iplark(
     return snapshot, result
 
 
+def _skip_known_google_blocked_ip(
+    store: ProxySessionStore,
+    snapshot: ProxySessionSnapshot,
+    *,
+    base_username: str,
+    enabled: bool,
+) -> ProxySessionSnapshot:
+    if not enabled or not snapshot.primary_ip:
+        return snapshot
+
+    blocked = store.find_google_blocked_session_for_ip(
+        base_username,
+        snapshot.primary_ip,
+        exclude_session_id=snapshot.id,
+    )
+    if blocked is None:
+        return snapshot
+
+    message = (
+        f"egress IP {snapshot.primary_ip} matched Google-blocked session "
+        f"{blocked.proxy_username}"
+    )
+    store.record_event(
+        proxy_session_id=snapshot.id,
+        event_type="known_google_blocked_ip_skipped",
+        message=message,
+        raw_json={
+            "matched_session_id": blocked.id,
+            "matched_proxy_username": blocked.proxy_username,
+            "matched_primary_ip": blocked.primary_ip,
+            "matched_canary_block_count": blocked.canary_block_count,
+            "matched_request_block_count": blocked.request_block_count,
+            "matched_last_blocked_at": (
+                blocked.last_blocked_at.isoformat() if blocked.last_blocked_at else None
+            ),
+        },
+    )
+    return store.mark_session_cooldown(snapshot.id, reason=message)
+
+
 def _proxy_url_for_urllib(config: ServiceConfig) -> str:
     browser_proxy = resolve_browser_proxy(config)
     if not browser_proxy:
@@ -437,6 +477,11 @@ def main() -> None:
         help="Timeout in seconds for --fast-ipapi-egress.",
     )
     parser.add_argument(
+        "--allow-known-google-blocked-ip",
+        action="store_true",
+        help="Do not skip exits whose IP already has Google blocked evidence.",
+    )
+    parser.add_argument(
         "--refresh-active",
         action="store_true",
         help="Re-probe active sessions instead of preserving known-good sessions.",
@@ -569,6 +614,21 @@ def main() -> None:
                 candidate_config,
                 checks=max(args.egress_checks, 1),
             )
+        if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+            records.append(
+                {
+                    "session": _snapshot_json(snapshot),
+                    "iplark": asdict(iplark_result) if iplark_result else None,
+                }
+            )
+            continue
+
+        snapshot = _skip_known_google_blocked_ip(
+            store,
+            snapshot,
+            base_username=base_username,
+            enabled=not args.allow_known_google_blocked_ip,
+        )
         if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
             records.append(
                 {
