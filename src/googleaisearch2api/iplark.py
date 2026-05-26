@@ -5,6 +5,8 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from patchright.sync_api import Error as PatchrightError
 from patchright.sync_api import TimeoutError as PatchrightTimeoutError
@@ -14,7 +16,16 @@ from .browser import DEFAULT_BROWSER_CHANNEL, resolve_browser_user_agent
 from .config import ServiceConfig
 
 IPLARK_BASE_URL = "https://iplark.com"
+IPAPI_IS_BASE_URL = "https://api.ipapi.is"
 QUALITY_SCORE_KEYS = {"quality_score", "qualityScore", "score", "risk_score"}
+RISK_LABELS = {
+    "very low": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "very high": 4,
+    "critical": 5,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +39,7 @@ class IplarkProbeResult:
     tag: str | None = None
     score_json: dict[str, Any] = field(default_factory=dict)
     intelligence_json: dict[str, Any] = field(default_factory=dict)
+    source: str = "iplark"
 
 
 def _normalize_key(value: str) -> str:
@@ -78,7 +90,16 @@ def _to_bool(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "risk", "risky"}
+        return value.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "risk",
+            "risky",
+            "是",
+            "有",
+        }
     return False
 
 
@@ -95,6 +116,147 @@ def _to_text(value: Any) -> str | None:
 
 def _has_quality_score(payload: dict[str, Any]) -> bool:
     return _to_int(_find_key(payload, QUALITY_SCORE_KEYS)) is not None
+
+
+def _clamp_quality_score(value: int) -> int:
+    return max(0, min(100, value))
+
+
+def _parse_abuser_score(value: Any) -> tuple[float | None, str | None]:
+    if value is None:
+        return None, None
+    text = str(value).strip()
+    if not text:
+        return None, None
+
+    score = None
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", text)
+    if match:
+        try:
+            score = float(match.group(1))
+        except ValueError:
+            score = None
+
+    label = None
+    label_match = re.search(r"\(([^)]+)\)", text)
+    if label_match:
+        candidate = label_match.group(1).strip().lower()
+        label = candidate or None
+    return score, label
+
+
+def _highest_risk_label(labels: list[str | None]) -> str | None:
+    best = None
+    best_rank = -1
+    for label in labels:
+        if not label:
+            continue
+        rank = RISK_LABELS.get(label.lower(), -1)
+        if rank > best_rank:
+            best = label
+            best_rank = rank
+    return best
+
+
+def _payloads_from_ipapi_payload(
+    ip: str,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    company = payload.get("company") if isinstance(payload.get("company"), dict) else {}
+    asn = payload.get("asn") if isinstance(payload.get("asn"), dict) else {}
+
+    risk_values = [
+        _parse_abuser_score(company.get("abuser_score")),
+        _parse_abuser_score(asn.get("abuser_score")),
+        _parse_abuser_score(payload.get("abuser_score")),
+    ]
+    numeric_risks = [score for score, _ in risk_values if score is not None]
+    risk_score = max(numeric_risks) if numeric_risks else None
+    risk_label = _highest_risk_label([label for _, label in risk_values])
+
+    is_datacenter = _to_bool(payload.get("is_datacenter"))
+    is_proxy = _to_bool(payload.get("is_proxy"))
+    is_vpn = _to_bool(payload.get("is_vpn"))
+    is_tor = _to_bool(payload.get("is_tor"))
+    is_abuser = _to_bool(payload.get("is_abuser"))
+
+    public_proxy = is_proxy or is_tor
+    high_label = RISK_LABELS.get((risk_label or "").lower(), -1) >= RISK_LABELS["high"]
+    threat = is_tor or high_label or (risk_score is not None and risk_score >= 0.5)
+
+    quality_score = 100
+    if is_datacenter:
+        quality_score -= 25
+    if is_vpn:
+        quality_score -= 25
+    if is_proxy:
+        quality_score -= 40
+    if is_tor:
+        quality_score -= 60
+    if is_abuser and risk_score is None:
+        quality_score -= 20
+    if risk_score is not None:
+        quality_score -= min(60, round(risk_score * 100))
+    if risk_label and RISK_LABELS.get(risk_label.lower(), 0) >= RISK_LABELS["medium"]:
+        quality_score = min(quality_score, 70)
+    if public_proxy:
+        quality_score = min(quality_score, 60)
+    if threat:
+        quality_score = min(quality_score, 50)
+    quality_score = _clamp_quality_score(quality_score)
+
+    flags = []
+    if is_datacenter:
+        flags.append("datacenter")
+    if is_vpn:
+        flags.append("vpn")
+    if is_proxy:
+        flags.append("proxy")
+    if is_tor:
+        flags.append("tor")
+    if is_abuser:
+        flags.append("abuser")
+    if risk_label:
+        flags.append(f"risk:{risk_label}")
+
+    usage_type = None
+    if is_tor:
+        usage_type = "tor"
+    elif is_proxy:
+        usage_type = "proxy"
+    elif is_vpn:
+        usage_type = "vpn"
+    elif is_datacenter:
+        usage_type = "datacenter"
+    elif _to_bool(payload.get("is_mobile")):
+        usage_type = "mobile"
+
+    category = _to_text(company.get("type")) or ("datacenter" if is_datacenter else None)
+    intelligence = {
+        "usageType": usage_type,
+        "category": category,
+        "publicProxy": public_proxy,
+        "threat": threat,
+        "tag": ", ".join(flags) if flags else None,
+        "riskScore": risk_score,
+        "riskLabel": risk_label,
+        "source": "ipapi.is",
+    }
+    intelligence = {key: value for key, value in intelligence.items() if value is not None}
+
+    score_json = {
+        "provider": "ipapi.is",
+        "ip": ip,
+        "quality_score": quality_score,
+        "risk_score": risk_score,
+        "risk_label": risk_label,
+    }
+    intelligence_json = {
+        "provider": "ipapi.is",
+        "intelligence": intelligence,
+        "raw": payload,
+    }
+    return score_json, intelligence_json
 
 
 def _parse_quality_score_from_text(body_text: str) -> int | None:
@@ -159,6 +321,7 @@ def parse_iplark_payloads(
     *,
     score_json: dict[str, Any] | None,
     intelligence_json: dict[str, Any] | None,
+    source: str = "iplark",
 ) -> IplarkProbeResult:
     score_json = score_json or {}
     intelligence_json = intelligence_json or {}
@@ -176,6 +339,30 @@ def parse_iplark_payloads(
         tag=_to_text(_find_key(intelligence_json, {"tag", "tags"})),
         score_json=score_json,
         intelligence_json=intelligence_json,
+        source=source,
+    )
+
+
+def probe_ipapi_is_ip(ip: str, *, timeout_s: int = 20) -> IplarkProbeResult:
+    url = f"{IPAPI_IS_BASE_URL}?{urlencode({'q': ip})}"
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        },
+    )
+    with urlopen(request, timeout=timeout_s) as response:
+        body = response.read().decode("utf-8", "replace")
+    payload = json.loads(body)
+    if not isinstance(payload, dict):
+        payload = {}
+    score_json, intelligence_json = _payloads_from_ipapi_payload(ip, payload)
+    return parse_iplark_payloads(
+        ip,
+        score_json=score_json,
+        intelligence_json=intelligence_json,
+        source="ipapi.is",
     )
 
 
@@ -259,8 +446,18 @@ def probe_iplark_ip(
             context.close()
             browser.close()
 
-    return parse_iplark_payloads(
+    result = parse_iplark_payloads(
         ip,
         score_json=score_json,
         intelligence_json=intelligence_json,
     )
+    if result.quality_score is not None:
+        return result
+
+    try:
+        fallback = probe_ipapi_is_ip(ip)
+    except Exception:
+        return result
+    if fallback.quality_score is not None:
+        return fallback
+    return result

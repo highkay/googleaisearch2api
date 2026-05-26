@@ -103,8 +103,9 @@ def _run_iplark(
     store.record_event(
         proxy_session_id=snapshot.id,
         event_type="iplark",
-        message=f"score={result.quality_score}",
+        message=f"source={result.source} score={result.quality_score}",
         raw_json={
+            "source": result.source,
             "score": result.score_json,
             "intelligence": result.intelligence_json,
         },
