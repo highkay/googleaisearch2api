@@ -141,6 +141,24 @@ def test_update_egress_retires_duplicate_ip_vector(tmp_path: Path) -> None:
     assert second.duplicate_of_session_id == first.id
 
 
+def test_missing_iplark_score_puts_session_in_cooldown(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    snapshot = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+
+    snapshot = store.update_iplark_result(
+        proxy_session_id=snapshot.id,
+        quality_score=None,
+    )
+
+    assert snapshot.status == STATUS_COOLDOWN
+    assert snapshot.cooldown_until is not None
+    assert snapshot.retire_reason == "iplark score unavailable"
+
+
 def test_upsert_preserves_existing_status_unless_explicitly_changed(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     snapshot = store.upsert_proxy_session(

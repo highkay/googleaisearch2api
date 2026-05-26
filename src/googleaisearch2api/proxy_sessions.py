@@ -344,6 +344,10 @@ class ProxySessionStore:
                 row.status = STATUS_RETIRED
                 row.retired_at = now
                 row.retire_reason = "iplark flagged public proxy/threat"
+            elif quality_score is None:
+                row.status = STATUS_COOLDOWN
+                row.cooldown_until = now + timedelta(hours=DEFAULT_BLOCK_COOLDOWN_HOURS)
+                row.retire_reason = "iplark score unavailable"
             elif quality_score is not None and quality_score < min_quality_score:
                 row.status = STATUS_COOLDOWN
                 row.cooldown_until = now + timedelta(hours=DEFAULT_BLOCK_COOLDOWN_HOURS)

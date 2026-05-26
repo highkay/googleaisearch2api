@@ -104,6 +104,7 @@ new
 任意阶段可进入 `retired`：
 
 - 无法稳定得到出口向量。
+- IPLark 查询失败或无法取得 `quality_score`。
 - IPLark `publicProxy=true`。
 - IPLark `threat` 非空且不是 `-`。
 - Google canary unusual traffic。

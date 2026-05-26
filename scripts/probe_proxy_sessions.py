@@ -77,7 +77,19 @@ def _run_iplark(
             reason="egress probe did not find an IP",
         )
         return snapshot, None
-    result = probe_iplark_ip(snapshot.primary_ip, direct_config)
+    try:
+        result = probe_iplark_ip(snapshot.primary_ip, direct_config)
+    except Exception as exc:
+        store.record_event(
+            proxy_session_id=snapshot.id,
+            event_type="iplark_error",
+            message=repr(exc),
+        )
+        snapshot = store.mark_session_cooldown(
+            snapshot.id,
+            reason=f"iplark probe failed: {exc!r}",
+        )
+        return snapshot, None
     snapshot = store.update_iplark_result(
         proxy_session_id=snapshot.id,
         quality_score=result.quality_score,

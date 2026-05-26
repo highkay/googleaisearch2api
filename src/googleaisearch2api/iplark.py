@@ -169,11 +169,14 @@ def probe_iplark_ip(
                     wait_until="domcontentloaded",
                     timeout=timeout_ms,
                 )
-            except PatchrightTimeoutError:
+            except (PatchrightError, PatchrightTimeoutError):
                 pass
             page.wait_for_timeout(settle_ms)
             if not score_json or not intelligence_json:
-                body = page.locator("body").inner_text(timeout=5_000)
+                try:
+                    body = page.locator("body").inner_text(timeout=5_000)
+                except PatchrightError:
+                    body = ""
                 try:
                     payload = json.loads(body)
                 except json.JSONDecodeError:
