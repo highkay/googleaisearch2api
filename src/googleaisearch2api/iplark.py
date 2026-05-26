@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,6 +14,7 @@ from .browser import DEFAULT_BROWSER_CHANNEL, resolve_browser_user_agent
 from .config import ServiceConfig
 
 IPLARK_BASE_URL = "https://iplark.com"
+QUALITY_SCORE_KEYS = {"quality_score", "qualityScore", "score", "risk_score"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +93,67 @@ def _to_text(value: Any) -> str | None:
     return str(value).strip() or None
 
 
+def _has_quality_score(payload: dict[str, Any]) -> bool:
+    return _to_int(_find_key(payload, QUALITY_SCORE_KEYS)) is not None
+
+
+def _parse_quality_score_from_text(body_text: str) -> int | None:
+    patterns = (
+        r"(?:IP评分|IP\s*Score|IP\s*Quality\s*Score)\s+(\d{1,3})(?:\s+\1\s*/\s*100)?",
+        r"(?:IP评分|IP\s*Score|IP\s*Quality\s*Score).*?(\d{1,3})\s*/\s*100",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, body_text, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        score = _to_int(match.group(1))
+        if score is not None and 0 <= score <= 100:
+            return score
+    return None
+
+
+def _next_text_value(lines: list[str], labels: set[str]) -> str | None:
+    normalized_labels = {label.strip().rstrip(":：").lower() for label in labels}
+    for index, line in enumerate(lines):
+        normalized_line = line.strip().rstrip(":：").lower()
+        if normalized_line not in normalized_labels:
+            continue
+        for value in lines[index + 1 :]:
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _payloads_from_body_text(
+    ip: str,
+    body_text: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    score = _parse_quality_score_from_text(body_text)
+    score_json = {"ip": ip, "quality_score": score} if score is not None else {}
+
+    lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+    intelligence = {
+        "usageType": _next_text_value(lines, {"使用类型", "Usage Type"}),
+        "category": _next_text_value(lines, {"IP类型", "Category", "IP Type"}),
+        "publicProxy": _next_text_value(lines, {"代理", "Proxy"}),
+        "threat": _next_text_value(lines, {"威胁", "Threat"}),
+        "tag": _next_text_value(lines, {"标签", "Tag", "Tags"}),
+    }
+    intelligence = {key: value for key, value in intelligence.items() if value is not None}
+    intelligence_json = {"intelligence": intelligence} if intelligence else {}
+    return score_json, intelligence_json
+
+
+def _wait_for_payloads(page: Any, is_complete, timeout_ms: int) -> None:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while not is_complete():
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            return
+        page.wait_for_timeout(min(500, remaining_ms))
+
+
 def parse_iplark_payloads(
     ip: str,
     *,
@@ -100,9 +164,7 @@ def parse_iplark_payloads(
     intelligence_json = intelligence_json or {}
     return IplarkProbeResult(
         ip=ip,
-        quality_score=_to_int(
-            _find_key(score_json, {"quality_score", "qualityScore", "score", "risk_score"})
-        ),
+        quality_score=_to_int(_find_key(score_json, QUALITY_SCORE_KEYS)),
         usage_type=_to_text(
             _find_key(intelligence_json, {"usage_type", "usageType", "ip_type", "ipType"})
         ),
@@ -133,7 +195,7 @@ def probe_iplark_ip(
     config: ServiceConfig,
     *,
     timeout_ms: int = 30_000,
-    settle_ms: int = 3_000,
+    settle_ms: int = 12_000,
 ) -> IplarkProbeResult:
     score_json: dict[str, Any] = {}
     intelligence_json: dict[str, Any] = {}
@@ -171,11 +233,15 @@ def probe_iplark_ip(
                 )
             except (PatchrightError, PatchrightTimeoutError):
                 pass
-            page.wait_for_timeout(settle_ms)
+            _wait_for_payloads(
+                page,
+                lambda: _has_quality_score(score_json) and bool(intelligence_json),
+                settle_ms,
+            )
             if not score_json or not intelligence_json:
                 try:
                     body = page.locator("body").inner_text(timeout=5_000)
-                except PatchrightError:
+                except (PatchrightError, PatchrightTimeoutError):
                     body = ""
                 try:
                     payload = json.loads(body)
@@ -183,6 +249,12 @@ def probe_iplark_ip(
                     payload = {}
                 if isinstance(payload, dict) and not score_json:
                     score_json = payload
+                if body:
+                    body_score_json, body_intelligence_json = _payloads_from_body_text(ip, body)
+                    if not _has_quality_score(score_json):
+                        score_json = body_score_json
+                    if not intelligence_json:
+                        intelligence_json = body_intelligence_json
         finally:
             context.close()
             browser.close()
