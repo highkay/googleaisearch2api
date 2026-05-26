@@ -37,10 +37,11 @@ def _run_canary(
     snapshot: ProxySessionSnapshot,
     config: ServiceConfig,
     prompt: str,
+    expected_answer: str,
 ) -> ProxySessionSnapshot:
     runner = GoogleAiRunner()
     try:
-        runner.run_prompt(config, prompt)
+        result = runner.run_prompt(config, prompt)
     except GoogleAiBlockedError as exc:
         block_ips = parse_google_block_ips(str(exc))
         store.record_event(
@@ -61,6 +62,27 @@ def _run_canary(
         return store.mark_session_cooldown(snapshot.id, reason=f"google canary failed: {exc!r}")
     finally:
         runner.close()
+    expected = expected_answer.strip()
+    if expected and result.answer_text.strip() != expected:
+        store.record_event(
+            proxy_session_id=snapshot.id,
+            event_type="google_canary_unexpected_answer",
+            message=f"expected={expected!r} actual={result.answer_text.strip()!r}",
+            raw_json={
+                "expected": expected,
+                "actual": result.answer_text.strip(),
+                "final_url": result.final_url,
+                "page_title": result.page_title,
+                "body_excerpt": result.body_excerpt,
+            },
+        )
+        return store.mark_session_cooldown(
+            snapshot.id,
+            reason=(
+                "google canary returned unexpected answer: "
+                f"expected={expected!r} actual={result.answer_text.strip()!r}"
+            ),
+        )
     return store.mark_canary_success(snapshot.id)
 
 
@@ -184,6 +206,11 @@ def main() -> None:
         "--canary-prompt",
         default="What is OpenAI Responses API? Answer in one short sentence.",
     )
+    parser.add_argument(
+        "--canary-expected-answer",
+        default="",
+        help="When set, only mark canary successful if the answer text exactly matches this value.",
+    )
     args = parser.parse_args()
 
     if args.end < args.start:
@@ -248,7 +275,13 @@ def main() -> None:
             continue
 
         if not args.skip_google_canary:
-            snapshot = _run_canary(store, snapshot, candidate_config, args.canary_prompt)
+            snapshot = _run_canary(
+                store,
+                snapshot,
+                candidate_config,
+                args.canary_prompt,
+                args.canary_expected_answer,
+            )
 
         records.append(
             {
