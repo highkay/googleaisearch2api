@@ -288,12 +288,12 @@ class _FakeKnownBlockedPrefixStore:
         proxy_base_username: str,
         primary_ip: str,
         *,
-        min_blocked_count: int = 3,
+        min_blocked_count: int = 1,
         exclude_session_id: int | None = None,
     ) -> ProxyBlockedPrefixSnapshot | None:
         assert proxy_base_username == "openai"
         assert primary_ip == "203.0.113.42"
-        assert min_blocked_count == 3
+        assert min_blocked_count == 1
         assert exclude_session_id == 4
         return self.blocked_prefix
 
@@ -339,7 +339,7 @@ def test_skip_known_google_blocked_prefix_uses_failed_prefix_without_success() -
         ),
         base_username="openai",
         enabled=True,
-        min_blocked_count=3,
+        min_blocked_count=1,
     )
 
     assert result.status == STATUS_COOLDOWN

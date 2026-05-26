@@ -546,7 +546,7 @@ def main() -> None:
     parser.add_argument(
         "--known-google-blocked-prefix-min-count",
         type=int,
-        default=3,
+        default=1,
         help="Minimum Google-blocked sessions in a prefix before prefix-level skipping.",
     )
     parser.add_argument(

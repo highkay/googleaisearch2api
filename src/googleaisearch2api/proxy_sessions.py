@@ -661,7 +661,7 @@ class ProxySessionStore:
         proxy_base_username: str,
         primary_ip: str,
         *,
-        min_blocked_count: int = 3,
+        min_blocked_count: int = 1,
         exclude_session_id: int | None = None,
     ) -> ProxyBlockedPrefixSnapshot | None:
         network = _google_block_prefix_network(primary_ip)
