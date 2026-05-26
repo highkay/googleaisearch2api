@@ -326,6 +326,7 @@ class ProxySessionStore:
         tag: str | None = None,
         min_quality_score: int = 70,
     ) -> ProxySessionSnapshot:
+        del min_quality_score
         now = utc_now()
         with self._session_factory() as session:
             row = session.get(ProxySessionRow, proxy_session_id)
@@ -341,19 +342,7 @@ class ProxySessionStore:
             row.iplark_tag = tag
             row.last_checked_at = now
             row.updated_at = now
-            if public_proxy or threat:
-                row.status = STATUS_RETIRED
-                row.retired_at = now
-                row.retire_reason = "iplark flagged public proxy/threat"
-            elif quality_score is None:
-                row.status = STATUS_COOLDOWN
-                row.cooldown_until = now + timedelta(hours=DEFAULT_BLOCK_COOLDOWN_HOURS)
-                row.retire_reason = "iplark score unavailable"
-            elif quality_score is not None and quality_score < min_quality_score:
-                row.status = STATUS_COOLDOWN
-                row.cooldown_until = now + timedelta(hours=DEFAULT_BLOCK_COOLDOWN_HOURS)
-                row.retire_reason = f"iplark score below threshold {min_quality_score}"
-            elif row.status != STATUS_RETIRED:
+            if row.status != STATUS_RETIRED:
                 row.status = STATUS_RISK_CHECKED
                 row.cooldown_until = None
                 row.retire_reason = None

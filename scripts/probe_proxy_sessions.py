@@ -120,10 +120,6 @@ def _run_iplark(
             event_type="iplark_error",
             message=repr(exc),
         )
-        snapshot = store.mark_session_cooldown(
-            snapshot.id,
-            reason=f"iplark probe failed: {exc!r}",
-        )
         return snapshot, None
     snapshot = store.update_iplark_result(
         proxy_session_id=snapshot.id,
@@ -326,19 +322,24 @@ def main() -> None:
         help="Suffix template. Default creates <base>.user{n}.",
     )
     parser.add_argument("--egress-checks", type=int, default=2, help="Egress checks per session.")
-    parser.add_argument("--min-quality-score", type=int, default=70, help="IPLark score threshold.")
+    parser.add_argument(
+        "--min-quality-score",
+        type=int,
+        default=70,
+        help="Deprecated compatibility option; third-party risk scores are recorded only.",
+    )
     parser.add_argument(
         "--risk-source",
         choices=["auto", "ipapi"],
         default="auto",
-        help="IP risk source. auto uses IPLark with fallback; ipapi skips IPLark browser probing.",
+        help="IP risk metadata source. auto uses IPLark; ipapi skips IPLark browser probing.",
     )
     parser.add_argument("--skip-egress", action="store_true", help="Skip egress probing.")
-    parser.add_argument("--skip-iplark", action="store_true", help="Skip IPLark probing.")
+    parser.add_argument("--skip-iplark", action="store_true", help="Skip risk metadata probing.")
     parser.add_argument(
         "--fast-ipapi-egress",
         action="store_true",
-        help="Use one proxied api.ipapi.is request for both egress IP discovery and risk scoring.",
+        help="Use one proxied api.ipapi.is request for both egress IP discovery and risk metadata.",
     )
     parser.add_argument(
         "--fast-egress-timeout",

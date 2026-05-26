@@ -11,6 +11,7 @@ from googleaisearch2api.proxy_sessions import (
     STATUS_ACTIVE,
     STATUS_COOLDOWN,
     STATUS_RETIRED,
+    STATUS_RISK_CHECKED,
     ProxySessionConfigError,
     ProxySessionSelector,
     ProxySessionStore,
@@ -209,7 +210,7 @@ def test_update_egress_clears_stale_duplicate_when_ip_changes(tmp_path: Path) ->
     assert refreshed.duplicate_of_session_id is None
 
 
-def test_missing_iplark_score_puts_session_in_cooldown(tmp_path: Path) -> None:
+def test_risk_metadata_does_not_filter_before_google_canary(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     snapshot = store.upsert_proxy_session(
         proxy_base_username="openai",
@@ -220,11 +221,26 @@ def test_missing_iplark_score_puts_session_in_cooldown(tmp_path: Path) -> None:
     snapshot = store.update_iplark_result(
         proxy_session_id=snapshot.id,
         quality_score=None,
+        public_proxy=True,
+        threat=True,
+        min_quality_score=90,
     )
 
-    assert snapshot.status == STATUS_COOLDOWN
-    assert snapshot.cooldown_until is not None
-    assert snapshot.retire_reason == "iplark score unavailable"
+    assert snapshot.status == STATUS_RISK_CHECKED
+    assert snapshot.cooldown_until is None
+    assert snapshot.retire_reason is None
+    assert snapshot.iplark_min_quality_score is None
+
+    snapshot = store.update_iplark_result(
+        proxy_session_id=snapshot.id,
+        quality_score=10,
+        min_quality_score=90,
+    )
+
+    assert snapshot.status == STATUS_RISK_CHECKED
+    assert snapshot.cooldown_until is None
+    assert snapshot.retire_reason is None
+    assert snapshot.iplark_min_quality_score == 10
 
 
 def test_upsert_preserves_existing_status_unless_explicitly_changed(tmp_path: Path) -> None:

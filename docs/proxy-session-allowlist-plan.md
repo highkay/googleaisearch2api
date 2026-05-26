@@ -1,7 +1,7 @@
 # Proxy Session Allowlist 落地方案
 
 状态：2026-05-26 调查完成，进入实现拆分前方案。
-目标：把动态粘性代理从“直接使用基础代理用户名随机出口”改成“按当前代理用户名派生 `<base>.userN` 会话、评分、Google canary 晋级、运行时反馈淘汰”的闭环，降低 Google unusual traffic 阻断率。
+目标：把动态粘性代理从“直接使用基础代理用户名随机出口”改成“按当前代理用户名派生 `<base>.userN` 会话、出口发现、Google canary 晋级、运行时反馈淘汰”的闭环，降低 Google unusual traffic 阻断率。
 
 ## 1. 已验证事实
 
@@ -71,8 +71,8 @@ Google canary 结果：
 
 1. Console 增加 `Resin 粘性会话` 开关；不勾选时完全保持一般代理路径，勾选后才启用 `.userN` 会话清单。
 2. 不再把基础代理用户名直接投入 Google 请求；启用 Resin 粘性会话后只使用按当前 base prefix 派生出的 `<base>.userN`。
-3. 出口发现、风险评分、Google canary 都是非热路径；线上用户请求只做一次本地 DB 会话选择。
-4. IPLark 评分只能作为预筛选，Google canary 才是晋级 active 的硬门槛。
+3. 出口发现、风险元数据、Google canary 都是非热路径；线上用户请求只做一次本地 DB 会话选择。
+4. 第三方评分和风险标签只作为观测元数据，不作为准入门槛；Google canary 和真实请求成功才是晋级 active 的硬门槛。
 5. Google 一旦返回 unusual traffic，立即 cooldown 当前 session 和其出口 IP 向量，不等待累计失败。
 6. 重复出口不重复投入；同一个出口向量只保留一个表现最好的 session。
 7. 不记录代理密码，不把 prompt 发给 IP 风险服务。
@@ -104,9 +104,6 @@ new
 任意阶段可进入 `retired`：
 
 - 无法稳定得到出口向量。
-- IPLark 查询失败或无法取得 `quality_score`。
-- IPLark `publicProxy=true`。
-- IPLark `threat` 非空且不是 `-`。
 - Google canary unusual traffic。
 - 同一 session 连续多轮出口漂移。
 
@@ -360,26 +357,16 @@ IPLARK_BAD_CACHE_TTL_HOURS=24
 
 同一个 IP 被多个 `.userN` 发现时，不重复查 IPLark。
 
-### 6.3 评分规则
-
-初始阈值：
-
-```text
-IPLARK_MIN_QUALITY_SCORE=70
-IPLARK_STRICT_QUALITY_SCORE=75
-```
+### 6.3 风险元数据规则
 
 规则：
 
-- `quality_score >= 75`：允许进入 Google canary。
-- `70 <= quality_score < 75`：候选池不足时允许 canary，但选择权重降低。
-- `quality_score < 70`：不 canary，进入 cooldown。
-- `publicProxy=true`：retired。
-- `threat` 非空且不是 `-`：retired。
-- `category/usageType=数据中心` 不直接拒绝，但选择权重低于住宅/普通宽带。
-- 多 IP 向量取最低 `quality_score` 和最差风险标签。
+- `quality_score`、`publicProxy`、`threat`、`category/usageType` 只写入 DB 和 console，用于后续分析。
+- 第三方评分缺失、低分、查询失败、风险标签异常，都不阻止候选进入 Google canary。
+- 能提升有效 IP 命中率的硬规则只保留出口稳定性、重复出口去重、Google canary 和真实请求反馈。
+- 多 IP 向量只用于稳定性和重复判断，不用第三方分数做准入排序。
 
-注意：本地已验证 `216.73.156.47` 的 IPLark 分数是 76，但 Google canary 仍被 block，所以分数只能预筛，不能作为 active 判定。
+注意：本地已验证 `216.73.156.47` 的 IPLark 分数是 76，但 Google canary 仍被 block；线上也出现高分 IP 被 Google block 的情况。所以第三方分数只能作为观测，不能作为 active 判定。
 
 ## 7. Google Canary 晋级
 
@@ -433,7 +420,6 @@ ip address: 66.187.6.127 ≠ 2a09:bac5:624d:2da5::48c:59 time: ...
 只有满足以下条件才进入 `active`：
 
 - 出口向量稳定。
-- IPLark 风险通过。
 - Google canary 通过。
 - 不是重复出口，或重复出口是被明确替换的旧 session。
 
@@ -590,8 +576,8 @@ uv run python scripts/probe_proxy_sessions.py --base-username JP --start 1 --end
 
 1. 逐个生成 `.userN`。
 2. egress 探测出口向量。
-3. 查 IPLark。
-4. 低风险候选跑 Google canary。
+3. 查风险元数据；查询失败也继续。
+4. 候选跑 Google canary。
 5. 写入 SQLite。
 6. 打印 active/cooldown/retired 汇总。
 
@@ -657,13 +643,13 @@ uv run pytest
 必须跑：
 
 ```powershell
-uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 5 --egress --iplark
+uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 5
 ```
 
 验收：
 
 - `.userN` 能得到稳定出口向量。
-- IPLark JSON 能被解析。
+- 风险元数据能被解析；若第三方查询失败，候选仍继续 canary。
 - `216.73.156.47` 这类已知 IP 能得到 `quality_score=76` 附近的分数。
 
 Google canary 只小批量跑：
