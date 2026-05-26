@@ -3,12 +3,20 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict
+from urllib.parse import quote
+from urllib.request import ProxyHandler, Request, build_opener
 
-from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiRunner
+from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiRunner, resolve_browser_proxy
 from googleaisearch2api.config import ServiceConfig, get_settings
 from googleaisearch2api.db import create_db_engine, create_session_factory, create_tables
 from googleaisearch2api.egress import probe_egress
-from googleaisearch2api.iplark import IplarkProbeResult, probe_ipapi_is_ip, probe_iplark_ip
+from googleaisearch2api.iplark import (
+    IPAPI_IS_BASE_URL,
+    IplarkProbeResult,
+    parse_ipapi_is_payload,
+    probe_ipapi_is_ip,
+    probe_iplark_ip,
+)
 from googleaisearch2api.logging import configure_logging
 from googleaisearch2api.proxy_sessions import (
     DEFAULT_STICKY_SUFFIX_TEMPLATE,
@@ -139,6 +147,121 @@ def _run_iplark(
     return snapshot, result
 
 
+def _proxy_url_for_urllib(config: ServiceConfig) -> str:
+    browser_proxy = resolve_browser_proxy(config)
+    if not browser_proxy:
+        raise ValueError("proxy is not configured")
+    server = str(browser_proxy["server"])
+    if "://" not in server:
+        server = f"http://{server}"
+    scheme, rest = server.split("://", 1)
+    if scheme.lower().startswith("socks"):
+        raise ValueError("fast IPAPI egress only supports HTTP proxies")
+
+    username = browser_proxy.get("username")
+    if not username:
+        return server
+    password = browser_proxy.get("password") or ""
+    return f"{scheme}://{quote(username, safe='')}:{quote(password, safe='')}@{rest}"
+
+
+def _text_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _ipapi_asn_and_org(payload: dict) -> tuple[str | None, str | None]:
+    asn_payload = payload.get("asn") if isinstance(payload.get("asn"), dict) else {}
+    company_payload = payload.get("company") if isinstance(payload.get("company"), dict) else {}
+    asn_value = _text_or_none(asn_payload.get("asn"))
+    if asn_value and not asn_value.upper().startswith("AS"):
+        asn_value = f"AS{asn_value}"
+    organization = (
+        _text_or_none(company_payload.get("name"))
+        or _text_or_none(asn_payload.get("org"))
+        or _text_or_none(asn_payload.get("name"))
+    )
+    return asn_value, organization
+
+
+def _run_fast_ipapi_egress(
+    store: ProxySessionStore,
+    snapshot: ProxySessionSnapshot,
+    config: ServiceConfig,
+    *,
+    min_quality_score: int,
+    timeout_s: int,
+) -> tuple[ProxySessionSnapshot, IplarkProbeResult | None]:
+    try:
+        proxy_url = _proxy_url_for_urllib(config)
+        opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        request = Request(
+            IPAPI_IS_BASE_URL,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/124 Safari/537.36",
+            },
+        )
+        with opener.open(request, timeout=timeout_s) as response:
+            body = response.read().decode("utf-8", "replace")
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            payload = {}
+        ip = payload.get("ip")
+        if not isinstance(ip, str) or not ip.strip():
+            raise ValueError("api.ipapi.is response did not include ip")
+    except Exception as exc:
+        store.record_event(
+            proxy_session_id=snapshot.id,
+            event_type="fast_ipapi_egress_error",
+            message=repr(exc),
+        )
+        return (
+            store.mark_session_cooldown(
+                snapshot.id,
+                reason=f"fast IPAPI egress failed: {exc!r}",
+            ),
+            None,
+        )
+
+    asn, organization = _ipapi_asn_and_org(payload)
+    snapshot = store.update_egress(
+        proxy_session_id=snapshot.id,
+        ips=[ip],
+        source="ipapi.is",
+        asn=asn,
+        organization=organization,
+        raw_json={"ipapi": payload},
+    )
+    if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+        return snapshot, None
+
+    result = parse_ipapi_is_payload(ip, payload)
+    snapshot = store.update_iplark_result(
+        proxy_session_id=snapshot.id,
+        quality_score=result.quality_score,
+        usage_type=result.usage_type,
+        category=result.category,
+        public_proxy=result.public_proxy,
+        threat=result.threat,
+        tag=result.tag,
+        min_quality_score=min_quality_score,
+    )
+    store.record_event(
+        proxy_session_id=snapshot.id,
+        event_type="ipapi_egress_risk",
+        message=f"score={result.quality_score}",
+        raw_json={
+            "source": result.source,
+            "score": result.score_json,
+            "intelligence": result.intelligence_json,
+        },
+    )
+    return snapshot, result
+
+
 def _run_egress(
     store: ProxySessionStore,
     snapshot: ProxySessionSnapshot,
@@ -211,6 +334,17 @@ def main() -> None:
     )
     parser.add_argument("--skip-egress", action="store_true", help="Skip egress probing.")
     parser.add_argument("--skip-iplark", action="store_true", help="Skip IPLark probing.")
+    parser.add_argument(
+        "--fast-ipapi-egress",
+        action="store_true",
+        help="Use one proxied api.ipapi.is request for both egress IP discovery and risk scoring.",
+    )
+    parser.add_argument(
+        "--fast-egress-timeout",
+        type=int,
+        default=12,
+        help="Timeout in seconds for --fast-ipapi-egress.",
+    )
     parser.add_argument("--skip-google-canary", action="store_true", help="Skip Google canary.")
     parser.add_argument(
         "--canary-prompt",
@@ -257,7 +391,15 @@ def main() -> None:
         candidate_config = build_proxy_config_for_session(base_config, proxy_username)
 
         iplark_result = None
-        if not args.skip_egress:
+        if args.fast_ipapi_egress:
+            snapshot, iplark_result = _run_fast_ipapi_egress(
+                store,
+                snapshot,
+                candidate_config,
+                min_quality_score=args.min_quality_score,
+                timeout_s=args.fast_egress_timeout,
+            )
+        elif not args.skip_egress:
             snapshot = _run_egress(
                 store,
                 snapshot,
@@ -265,10 +407,15 @@ def main() -> None:
                 checks=max(args.egress_checks, 1),
             )
         if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
-            records.append({"session": _snapshot_json(snapshot), "iplark": None})
+            records.append(
+                {
+                    "session": _snapshot_json(snapshot),
+                    "iplark": asdict(iplark_result) if iplark_result else None,
+                }
+            )
             continue
 
-        if not args.skip_iplark:
+        if not args.skip_iplark and not args.fast_ipapi_egress:
             snapshot, iplark_result = _run_iplark(
                 store,
                 snapshot,

@@ -343,6 +343,16 @@ def parse_iplark_payloads(
     )
 
 
+def parse_ipapi_is_payload(ip: str, payload: dict[str, Any]) -> IplarkProbeResult:
+    score_json, intelligence_json = _payloads_from_ipapi_payload(ip, payload)
+    return parse_iplark_payloads(
+        ip,
+        score_json=score_json,
+        intelligence_json=intelligence_json,
+        source="ipapi.is",
+    )
+
+
 def probe_ipapi_is_ip(ip: str, *, timeout_s: int = 20) -> IplarkProbeResult:
     url = f"{IPAPI_IS_BASE_URL}?{urlencode({'q': ip})}"
     request = Request(
@@ -357,13 +367,7 @@ def probe_ipapi_is_ip(ip: str, *, timeout_s: int = 20) -> IplarkProbeResult:
     payload = json.loads(body)
     if not isinstance(payload, dict):
         payload = {}
-    score_json, intelligence_json = _payloads_from_ipapi_payload(ip, payload)
-    return parse_iplark_payloads(
-        ip,
-        score_json=score_json,
-        intelligence_json=intelligence_json,
-        source="ipapi.is",
-    )
+    return parse_ipapi_is_payload(ip, payload)
 
 
 def _build_launch_kwargs(config: ServiceConfig) -> dict[str, Any]:
