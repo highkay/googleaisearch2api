@@ -260,6 +260,46 @@ def test_find_google_blocked_session_for_ip_uses_exact_base_and_ip(tmp_path: Pat
     )
 
 
+def test_find_google_blocked_session_for_ip_uses_google_block_observation(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    blocked = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    other = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user2",
+        proxy_username="openai.user2",
+    )
+    blocked = store.update_egress(
+        proxy_session_id=blocked.id,
+        ips=["66.187.6.127"],
+        source="test",
+    )
+    store.mark_canary_blocked(
+        blocked.id,
+        error_message="Google unusual traffic",
+        block_ips=["2a09:bac5:624d:2da5::48c:59"],
+    )
+
+    found = store.find_google_blocked_session_for_ip(
+        "openai",
+        "2a09:bac5:624d:2da5::48c:59",
+        exclude_session_id=other.id,
+    )
+
+    assert found is not None
+    assert found.id == blocked.id
+    assert found.primary_ip == "66.187.6.127"
+    assert store.find_google_blocked_session_for_ip(
+        "JP",
+        "2a09:bac5:624d:2da5::48c:59",
+    ) is None
+
+
 def test_risk_metadata_does_not_filter_before_google_canary(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     snapshot = store.upsert_proxy_session(

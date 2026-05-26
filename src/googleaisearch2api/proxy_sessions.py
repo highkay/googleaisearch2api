@@ -581,18 +581,19 @@ class ProxySessionStore:
         if not normalized:
             return None
 
+        def blocked_status_filter():
+            return or_(
+                ProxySessionRow.google_canary_status == "blocked",
+                ProxySessionRow.canary_block_count > 0,
+                ProxySessionRow.request_block_count > 0,
+                ProxySessionRow.last_blocked_at.is_not(None),
+            )
+
         statement = (
             select(ProxySessionRow)
             .where(ProxySessionRow.proxy_base_username == proxy_base_username)
             .where(ProxySessionRow.primary_ip == normalized[0])
-            .where(
-                or_(
-                    ProxySessionRow.google_canary_status == "blocked",
-                    ProxySessionRow.canary_block_count > 0,
-                    ProxySessionRow.request_block_count > 0,
-                    ProxySessionRow.last_blocked_at.is_not(None),
-                )
-            )
+            .where(blocked_status_filter())
             .order_by(
                 ProxySessionRow.last_blocked_at.desc().nullslast(),
                 ProxySessionRow.updated_at.desc(),
@@ -605,9 +606,34 @@ class ProxySessionStore:
 
         with self._session_factory() as session:
             row = session.scalars(statement).first()
-            if row is None:
-                return None
-            return ProxySessionSnapshot.from_row(row)
+            if row is not None:
+                return ProxySessionSnapshot.from_row(row)
+
+            observation_statement = (
+                select(ProxySessionRow)
+                .join(
+                    ProxyIpObservationRow,
+                    ProxyIpObservationRow.proxy_session_id == ProxySessionRow.id,
+                )
+                .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+                .where(ProxyIpObservationRow.source == "google_block")
+                .where(ProxyIpObservationRow.ip == normalized[0])
+                .where(blocked_status_filter())
+                .order_by(
+                    ProxySessionRow.last_blocked_at.desc().nullslast(),
+                    ProxySessionRow.updated_at.desc(),
+                    ProxySessionRow.id.asc(),
+                )
+                .limit(1)
+            )
+            if exclude_session_id is not None:
+                observation_statement = observation_statement.where(
+                    ProxySessionRow.id != exclude_session_id
+                )
+            row = session.scalars(observation_statement).first()
+            if row is not None:
+                return ProxySessionSnapshot.from_row(row)
+            return None
 
     def list_proxy_sessions(self, limit: int = 20) -> list[ProxySessionSnapshot]:
         with self._session_factory() as session:
