@@ -669,8 +669,37 @@ class ProxySessionStore:
             return None
 
         blocked_rows: list[ProxySessionRow] = []
+        blocked_row_ids: set[int] = set()
+        success_row_ids: set[int] = set()
         success_count = 0
         min_blocked_count = max(min_blocked_count, 1)
+
+        def has_success(row: ProxySessionRow) -> bool:
+            return (
+                row.status == STATUS_ACTIVE
+                or row.canary_success_count > 0
+                or row.request_success_count > 0
+            )
+
+        def has_google_block(row: ProxySessionRow) -> bool:
+            return (
+                row.google_canary_status == "blocked"
+                or row.canary_block_count > 0
+                or row.request_block_count > 0
+                or row.last_blocked_at is not None
+            )
+
+        def record_success(row: ProxySessionRow) -> None:
+            nonlocal success_count
+            if row.id not in success_row_ids:
+                success_row_ids.add(row.id)
+                success_count += 1
+
+        def record_block(row: ProxySessionRow) -> None:
+            if row.id not in blocked_row_ids:
+                blocked_row_ids.add(row.id)
+                blocked_rows.append(row)
+
         with self._session_factory() as session:
             statement = (
                 select(ProxySessionRow)
@@ -692,19 +721,40 @@ class ProxySessionStore:
                     continue
                 if address not in network:
                     continue
-                if (
-                    row.status == STATUS_ACTIVE
-                    or row.canary_success_count > 0
-                    or row.request_success_count > 0
-                ):
-                    success_count += 1
-                if (
-                    row.google_canary_status == "blocked"
-                    or row.canary_block_count > 0
-                    or row.request_block_count > 0
-                    or row.last_blocked_at is not None
-                ):
-                    blocked_rows.append(row)
+                if has_success(row):
+                    record_success(row)
+                if has_google_block(row):
+                    record_block(row)
+
+            observation_statement = (
+                select(ProxySessionRow, ProxyIpObservationRow.ip)
+                .join(
+                    ProxyIpObservationRow,
+                    ProxyIpObservationRow.proxy_session_id == ProxySessionRow.id,
+                )
+                .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+                .where(ProxyIpObservationRow.source == "google_block")
+                .order_by(
+                    ProxySessionRow.last_blocked_at.desc().nullslast(),
+                    ProxySessionRow.updated_at.desc(),
+                    ProxySessionRow.id.asc(),
+                )
+            )
+            if exclude_session_id is not None:
+                observation_statement = observation_statement.where(
+                    ProxySessionRow.id != exclude_session_id
+                )
+            for row, observed_ip in session.execute(observation_statement).all():
+                try:
+                    address = ipaddress.ip_address(str(observed_ip))
+                except ValueError:
+                    continue
+                if address not in network:
+                    continue
+                if has_success(row):
+                    record_success(row)
+                if has_google_block(row):
+                    record_block(row)
 
             if success_count > 0 or len(blocked_rows) < min_blocked_count:
                 return None

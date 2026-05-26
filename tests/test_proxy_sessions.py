@@ -384,6 +384,52 @@ def test_find_google_blocked_prefix_for_ip_uses_blocked_prefix_without_success(
     assert store.find_google_blocked_prefix_for_ip("JP", "203.0.113.42") is None
 
 
+def test_find_google_blocked_prefix_for_ip_uses_google_block_observations(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    for index, ip in enumerate(
+        ["198.51.100.10", "198.51.100.11", "198.51.100.12"],
+        start=1,
+    ):
+        session = store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name=f"user{index}",
+            proxy_username=f"openai.user{index}",
+        )
+        store.update_egress(
+            proxy_session_id=session.id,
+            ips=[f"203.0.113.{index}"],
+            source="test",
+        )
+        store.mark_canary_blocked(
+            session.id,
+            error_message=f"Google unusual traffic: ip address: {ip}",
+            block_ips=[ip],
+        )
+    candidate = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user42",
+        proxy_username="openai.user42",
+    )
+    store.update_egress(
+        proxy_session_id=candidate.id,
+        ips=["198.51.100.42"],
+        source="test",
+    )
+
+    found = store.find_google_blocked_prefix_for_ip(
+        "openai",
+        "198.51.100.42",
+        exclude_session_id=candidate.id,
+    )
+
+    assert found is not None
+    assert found.prefix == "198.51.100.0/24"
+    assert found.blocked_count == 3
+    assert found.success_count == 0
+
+
 def test_find_google_blocked_prefix_for_ip_ignores_prefix_with_success(
     tmp_path: Path,
 ) -> None:
