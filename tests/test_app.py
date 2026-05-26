@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from googleaisearch2api.app import create_app
+from googleaisearch2api.browser import GoogleAiBlockedError
 from googleaisearch2api.config import DEFAULT_API_TOKEN, ServiceConfigUpdate, get_settings
 from googleaisearch2api.schemas import Citation, GoogleAiResult
 
@@ -34,15 +35,34 @@ def _auth_headers() -> dict[str, str]:
 
 
 class FakePool:
-    def __init__(self, answer_text: str = "Browser-backed answer.") -> None:
+    def __init__(
+        self,
+        answer_text: str = "Browser-backed answer.",
+        outcomes: list[GoogleAiResult | Exception] | None = None,
+    ) -> None:
         self.answer_text = answer_text
+        self.outcomes = list(outcomes or [])
         self.prompts: list[str] = []
         self.configs: list = []
+        self.blocked_retry_counts: list[int | None] = []
+        self.reset_calls = 0
         self.closed = False
 
-    def execute(self, config, prompt: str) -> GoogleAiResult:
+    def execute(
+        self,
+        config,
+        prompt: str,
+        *,
+        blocked_retry_count: int | None = None,
+    ) -> GoogleAiResult:
         self.configs.append(config)
         self.prompts.append(prompt)
+        self.blocked_retry_counts.append(blocked_retry_count)
+        if self.outcomes:
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
         return GoogleAiResult(
             answer_text=self.answer_text,
             citations=[Citation(title="Source", url="https://example.com")],
@@ -51,15 +71,19 @@ class FakePool:
         )
 
     def reset(self) -> None:
-        pass
+        self.reset_calls += 1
 
     def close(self) -> None:
         self.closed = True
 
 
-def _install_fake_pool(app, answer_text: str = "Browser-backed answer.") -> FakePool:
+def _install_fake_pool(
+    app,
+    answer_text: str = "Browser-backed answer.",
+    outcomes: list[GoogleAiResult | Exception] | None = None,
+) -> FakePool:
     app.state.services.pool.close()
-    pool = FakePool(answer_text=answer_text)
+    pool = FakePool(answer_text=answer_text, outcomes=outcomes)
     app.state.services.pool = pool
     return pool
 
@@ -288,6 +312,94 @@ def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:
     assert recent[0].proxy_base_username == "openai"
     assert recent[0].proxy_username == "openai.user1"
     assert recent[0].proxy_primary_ip == "203.0.113.10"
+
+
+def test_query_reselects_sticky_proxy_session_after_google_block(test_app) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.settings.google_ai_blocked_retry_count = 1
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        first = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user1",
+            proxy_username="openai.user1",
+            status="active",
+        )
+        second = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user2",
+            proxy_username="openai.user2",
+            status="active",
+        )
+        test_app.state.services.proxy_session_store.update_egress(
+            proxy_session_id=first.id,
+            ips=["203.0.113.10"],
+            source="test",
+        )
+        test_app.state.services.proxy_session_store.update_egress(
+            proxy_session_id=second.id,
+            ips=["203.0.113.20"],
+            source="test",
+        )
+        test_app.state.services.proxy_session_store.mark_canary_success(first.id)
+        test_app.state.services.proxy_session_store.mark_canary_success(second.id)
+        blocked_error = GoogleAiBlockedError(
+            "Google blocked the session while opening query page: "
+            "our systems have detected unusual traffic from your computer network. "
+            "ip address: 2606:c700:1:47:9e6b:ff:fe5e:b6f5"
+        )
+        pool = _install_fake_pool(
+            test_app,
+            answer_text="Recovered answer.",
+            outcomes=[blocked_error],
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+        sessions = {
+            snapshot.proxy_username: snapshot
+            for snapshot in test_app.state.services.proxy_session_store.list_proxy_sessions(
+                limit=10
+            )
+        }
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Recovered answer."
+    assert [config.browser_proxy_username for config in pool.configs] == [
+        "openai.user1",
+        "openai.user2",
+    ]
+    assert pool.blocked_retry_counts == [0, 0]
+    assert pool.reset_calls == 1
+
+    requests_by_proxy = {record.proxy_username: record for record in recent}
+    assert requests_by_proxy["openai.user1"].status == "error"
+    assert requests_by_proxy["openai.user1"].google_block_ips == [
+        "2606:c700:1:47:9e6b:ff:fe5e:b6f5"
+    ]
+    assert requests_by_proxy["openai.user2"].status == "ok"
+    assert sessions["openai.user1"].status == "cooldown"
+    assert sessions["openai.user1"].request_block_count == 1
+    assert sessions["openai.user2"].status == "active"
+    assert sessions["openai.user2"].request_success_count == 1
 
 
 def test_query_fails_fast_when_sticky_enabled_without_active_session(test_app) -> None:

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 
 from .browser import resolve_browser_proxy
 from .config import ServiceConfig
@@ -473,6 +473,7 @@ class ProxySessionStore:
 
     def select_active_session(self, proxy_base_username: str) -> ProxySessionSnapshot | None:
         now = utc_now()
+        proven_success_rank = case((ProxySessionRow.request_success_count > 0, 0), else_=1)
         with self._session_factory() as session:
             row = session.scalars(
                 select(ProxySessionRow)
@@ -486,6 +487,7 @@ class ProxySessionStore:
                 .order_by(
                     ProxySessionRow.request_block_count.asc(),
                     ProxySessionRow.request_error_count.asc(),
+                    proven_success_rank.asc(),
                     ProxySessionRow.last_selected_at.asc().nullsfirst(),
                     ProxySessionRow.request_success_count.desc(),
                     ProxySessionRow.id.asc(),

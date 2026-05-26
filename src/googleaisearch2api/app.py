@@ -218,122 +218,153 @@ def _run_google_ai(
     services = get_services(request)
     config = services.store.get_config()
     model_name = _resolve_model(requested_model, config)
-    selection: ProxySessionSelection | None = None
-    effective_config = config
-    try:
-        selection = services.proxy_selector.select(config)
-    except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
+    max_attempts = (
+        services.settings.google_ai_blocked_retry_count + 1
+        if config.resin_sticky_session_enabled
+        else 1
+    )
+
+    for attempt_index in range(max_attempts):
+        selection: ProxySessionSelection | None = None
+        effective_config = config
+        try:
+            selection = services.proxy_selector.select(config)
+        except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
+            request_id = services.store.start_request(
+                endpoint=endpoint,
+                model_name=model_name,
+                prompt_preview=prompt,
+                client_ip=request.client.host if request.client else None,
+                stream=stream,
+                config=config,
+            )
+            services.store.finish_request_error(request_id, str(exc), 0)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        if selection is not None:
+            effective_config = selection.config
+
         request_id = services.store.start_request(
             endpoint=endpoint,
             model_name=model_name,
             prompt_preview=prompt,
             client_ip=request.client.host if request.client else None,
             stream=stream,
-            config=config,
+            config=effective_config,
+            proxy_session_id=selection.session.id if selection else None,
+            proxy_base_username=selection.session.proxy_base_username if selection else None,
+            proxy_username=selection.session.proxy_username if selection else None,
+            proxy_primary_ip=selection.session.primary_ip if selection else None,
+            proxy_ip_vector_hash=selection.session.ip_vector_hash if selection else None,
+            proxy_iplark_score=selection.session.iplark_min_quality_score if selection else None,
         )
-        services.store.finish_request_error(request_id, str(exc), 0)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-    if selection is not None:
-        effective_config = selection.config
 
-    request_id = services.store.start_request(
-        endpoint=endpoint,
-        model_name=model_name,
-        prompt_preview=prompt,
-        client_ip=request.client.host if request.client else None,
-        stream=stream,
-        config=effective_config,
-        proxy_session_id=selection.session.id if selection else None,
-        proxy_base_username=selection.session.proxy_base_username if selection else None,
-        proxy_username=selection.session.proxy_username if selection else None,
-        proxy_primary_ip=selection.session.primary_ip if selection else None,
-        proxy_ip_vector_hash=selection.session.ip_vector_hash if selection else None,
-        proxy_iplark_score=selection.session.iplark_min_quality_score if selection else None,
+        started_at = time.perf_counter()
+        try:
+            result = services.pool.execute(
+                effective_config,
+                prompt,
+                blocked_retry_count=0 if selection is not None else None,
+            )
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_success(request_id, result, duration_ms)
+            if selection is not None:
+                services.proxy_session_store.finish_request_success(selection.session.id)
+            return effective_config, model_name, request_id, result
+        except BrowserPoolSaturatedError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=str(exc),
+            ) from exc
+        except BrowserPoolClosedError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except BrowserPoolTimeoutError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=str(exc),
+            ) from exc
+        except GoogleAiBlockedError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            block_ips = parse_google_block_ips(str(exc))
+            services.store.finish_request_error(
+                request_id,
+                str(exc),
+                duration_ms,
+                google_block_ips=block_ips,
+                google_block_mismatch=google_block_has_ip_mismatch(block_ips),
+            )
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=True,
+                error_message=str(exc),
+                block_ips=block_ips,
+            )
+            if selection is not None:
+                services.pool.reset()
+                if attempt_index + 1 < max_attempts:
+                    logger.warning(
+                        "Google blocked sticky proxy session {}; retrying request "
+                        "with another session ({}/{})",
+                        selection.session.proxy_username,
+                        attempt_index + 1,
+                        max_attempts - 1,
+                    )
+                    continue
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        except GoogleAiTimeoutError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=False,
+                error_message=str(exc),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=str(exc),
+            ) from exc
+        except GoogleAiRuntimeError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=False,
+                error_message=str(exc),
+            )
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, repr(exc), duration_ms)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=False,
+                error_message=repr(exc),
+            )
+            logger.exception("Unhandled request failure")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Unhandled Google AI request failure.",
+            ) from exc
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Google AI request retry loop exited unexpectedly.",
     )
-
-    started_at = time.perf_counter()
-    try:
-        result = services.pool.execute(effective_config, prompt)
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_success(request_id, result, duration_ms)
-        if selection is not None:
-            services.proxy_session_store.finish_request_success(selection.session.id)
-        return effective_config, model_name, request_id, result
-    except BrowserPoolSaturatedError as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, str(exc), duration_ms)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=str(exc),
-        ) from exc
-    except BrowserPoolClosedError as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, str(exc), duration_ms)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-    except BrowserPoolTimeoutError as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, str(exc), duration_ms)
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
-    except GoogleAiBlockedError as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        block_ips = parse_google_block_ips(str(exc))
-        services.store.finish_request_error(
-            request_id,
-            str(exc),
-            duration_ms,
-            google_block_ips=block_ips,
-            google_block_mismatch=google_block_has_ip_mismatch(block_ips),
-        )
-        _record_proxy_session_error(
-            services,
-            selection,
-            blocked=True,
-            error_message=str(exc),
-            block_ips=block_ips,
-        )
-        if selection is not None:
-            services.pool.reset()
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GoogleAiTimeoutError as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, str(exc), duration_ms)
-        _record_proxy_session_error(
-            services,
-            selection,
-            blocked=False,
-            error_message=str(exc),
-        )
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
-    except GoogleAiRuntimeError as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, str(exc), duration_ms)
-        _record_proxy_session_error(
-            services,
-            selection,
-            blocked=False,
-            error_message=str(exc),
-        )
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except Exception as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, repr(exc), duration_ms)
-        _record_proxy_session_error(
-            services,
-            selection,
-            blocked=False,
-            error_message=repr(exc),
-        )
-        logger.exception("Unhandled request failure")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unhandled Google AI request failure.",
-        ) from exc
 
 
 def _safe_next_target(target: str | None) -> str:
