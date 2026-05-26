@@ -276,6 +276,7 @@ class ProxySessionStore:
             row.asn = asn
             row.organization = organization
             row.status = STATUS_EGRESS_CHECKED
+            row.duplicate_of_session_id = None
             row.last_checked_at = now
             row.updated_at = now
 

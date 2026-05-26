@@ -141,6 +141,39 @@ def test_update_egress_retires_duplicate_ip_vector(tmp_path: Path) -> None:
     assert second.duplicate_of_session_id == first.id
 
 
+def test_update_egress_clears_stale_duplicate_when_ip_changes(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    first = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    second = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user2",
+        proxy_username="openai.user2",
+    )
+    store.update_egress(
+        proxy_session_id=first.id,
+        ips=["203.0.113.10"],
+        source="test",
+    )
+    duplicate = store.update_egress(
+        proxy_session_id=second.id,
+        ips=["203.0.113.10"],
+        source="test",
+    )
+
+    refreshed = store.update_egress(
+        proxy_session_id=duplicate.id,
+        ips=["203.0.113.11"],
+        source="test",
+    )
+
+    assert refreshed.status != STATUS_RETIRED
+    assert refreshed.duplicate_of_session_id is None
+
+
 def test_missing_iplark_score_puts_session_in_cooldown(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     snapshot = store.upsert_proxy_session(

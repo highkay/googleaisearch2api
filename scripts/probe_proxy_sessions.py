@@ -30,6 +30,7 @@ from googleaisearch2api.proxy_sessions import (
     parse_google_block_ips,
     resolve_proxy_base_username,
 )
+from googleaisearch2api.store import ConfigStore
 
 
 def _snapshot_json(snapshot: ProxySessionSnapshot) -> dict:
@@ -365,9 +366,15 @@ def main() -> None:
     settings.ensure_directories()
     engine = create_db_engine(str(settings.db_path))
     create_tables(engine)
-    store = ProxySessionStore(create_session_factory(engine))
+    session_factory = create_session_factory(engine)
+    store = ProxySessionStore(session_factory)
+    config_store = ConfigStore(
+        session_factory,
+        ServiceConfig.from_settings(settings),
+        request_log_max_rows=settings.request_log_max_rows,
+    )
 
-    base_config = ServiceConfig.from_settings(settings)
+    base_config = config_store.get_config()
     base_username = args.base_username.strip() or resolve_proxy_base_username(base_config)
     direct_config = base_config.model_copy(
         update={
