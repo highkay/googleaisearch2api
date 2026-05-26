@@ -124,7 +124,18 @@ def _run_egress(
     asn = None
     organization = None
     for round_index in range(1, checks + 1):
-        result = probe_egress(config)
+        try:
+            result = probe_egress(config)
+        except Exception as exc:
+            store.record_event(
+                proxy_session_id=snapshot.id,
+                event_type="egress_error",
+                message=repr(exc),
+            )
+            return store.mark_session_cooldown(
+                snapshot.id,
+                reason=f"egress probe failed: {exc!r}",
+            )
         observed_vectors.append(result.ips)
         raw_payloads[f"round_{round_index}"] = result.raw
         asn = result.asn or asn

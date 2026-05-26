@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from patchright.sync_api import Error as PatchrightError
+from patchright.sync_api import TimeoutError as PatchrightTimeoutError
 from patchright.sync_api import sync_playwright
 
 from .browser import DEFAULT_BROWSER_CHANNEL, resolve_browser_proxy, resolve_browser_user_agent
@@ -37,6 +39,25 @@ def _parse_body_json(body_text: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _format_probe_error(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:500]}"
+
+
+def _probe_endpoint(page: Any, endpoint: str, timeout_ms: int) -> dict[str, Any]:
+    try:
+        page.goto(endpoint, wait_until="domcontentloaded", timeout=timeout_ms)
+    except (PatchrightError, PatchrightTimeoutError) as exc:
+        return {"error": _format_probe_error(exc)}
+
+    try:
+        body = page.locator("body").inner_text(timeout=5_000)
+    except (PatchrightError, PatchrightTimeoutError) as exc:
+        return {"error": _format_probe_error(exc)}
+
+    payload = _parse_body_json(body)
+    return payload or {"body": body[:500]}
 
 
 def _extract_asn(org: str | None) -> str | None:
@@ -92,10 +113,10 @@ def probe_egress(config: ServiceConfig, *, timeout_ms: int = 30_000) -> EgressPr
             page = context.new_page()
             try:
                 for endpoint in EGRESS_ENDPOINTS:
-                    page.goto(endpoint, wait_until="domcontentloaded", timeout=timeout_ms)
-                    body = page.locator("body").inner_text(timeout=5_000)
-                    payload = _parse_body_json(body)
-                    raw[endpoint] = payload or {"body": body[:500]}
+                    payload = _probe_endpoint(page, endpoint, timeout_ms)
+                    raw[endpoint] = payload
+                    if "error" in payload:
+                        continue
                     ip = payload.get("ip")
                     if isinstance(ip, str):
                         ips.append(ip)
