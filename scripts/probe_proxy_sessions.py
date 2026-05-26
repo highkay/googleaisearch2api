@@ -273,6 +273,58 @@ def _skip_known_google_blocked_ip(
     return store.mark_session_cooldown(snapshot.id, reason=message)
 
 
+def _skip_known_google_blocked_prefix(
+    store: ProxySessionStore,
+    snapshot: ProxySessionSnapshot,
+    *,
+    base_username: str,
+    enabled: bool,
+    min_blocked_count: int,
+) -> ProxySessionSnapshot:
+    if not enabled or not snapshot.primary_ip:
+        return snapshot
+
+    blocked_prefix = store.find_google_blocked_prefix_for_ip(
+        base_username,
+        snapshot.primary_ip,
+        min_blocked_count=min_blocked_count,
+        exclude_session_id=snapshot.id,
+    )
+    if blocked_prefix is None:
+        return snapshot
+
+    message = (
+        f"egress IP {snapshot.primary_ip} matched Google-blocked prefix "
+        f"{blocked_prefix.prefix} ({blocked_prefix.blocked_count} blocked, "
+        f"{blocked_prefix.success_count} successful)"
+    )
+    store.record_event(
+        proxy_session_id=snapshot.id,
+        event_type="known_google_blocked_prefix_skipped",
+        message=message,
+        raw_json={
+            "prefix": blocked_prefix.prefix,
+            "blocked_count": blocked_prefix.blocked_count,
+            "success_count": blocked_prefix.success_count,
+            "matched_session_id": blocked_prefix.matched_session.id,
+            "matched_proxy_username": blocked_prefix.matched_session.proxy_username,
+            "matched_primary_ip": blocked_prefix.matched_session.primary_ip,
+            "matched_canary_block_count": (
+                blocked_prefix.matched_session.canary_block_count
+            ),
+            "matched_request_block_count": (
+                blocked_prefix.matched_session.request_block_count
+            ),
+            "matched_last_blocked_at": (
+                blocked_prefix.matched_session.last_blocked_at.isoformat()
+                if blocked_prefix.matched_session.last_blocked_at
+                else None
+            ),
+        },
+    )
+    return store.mark_session_cooldown(snapshot.id, reason=message)
+
+
 def _proxy_url_for_urllib(config: ServiceConfig) -> str:
     browser_proxy = resolve_browser_proxy(config)
     if not browser_proxy:
@@ -482,6 +534,20 @@ def main() -> None:
         help="Do not skip exits whose IP already has Google blocked evidence.",
     )
     parser.add_argument(
+        "--allow-known-google-blocked-prefix",
+        action="store_true",
+        help=(
+            "Do not skip exits from a /24 IPv4 or /48 IPv6 prefix with repeated "
+            "Google blocked evidence and no successful session."
+        ),
+    )
+    parser.add_argument(
+        "--known-google-blocked-prefix-min-count",
+        type=int,
+        default=3,
+        help="Minimum Google-blocked sessions in a prefix before prefix-level skipping.",
+    )
+    parser.add_argument(
         "--refresh-active",
         action="store_true",
         help="Re-probe active sessions instead of preserving known-good sessions.",
@@ -539,6 +605,8 @@ def main() -> None:
         raise SystemExit("--end must be >= --start")
     if args.canary_repeats < 1:
         raise SystemExit("--canary-repeats must be >= 1")
+    if args.known_google_blocked_prefix_min_count < 1:
+        raise SystemExit("--known-google-blocked-prefix-min-count must be >= 1")
 
     settings = get_settings()
     configure_logging(settings.app_log_level)
@@ -615,12 +683,22 @@ def main() -> None:
                 checks=max(args.egress_checks, 1),
             )
 
-        snapshot = _skip_known_google_blocked_ip(
+        checked_snapshot = _skip_known_google_blocked_ip(
             store,
             snapshot,
             base_username=base_username,
             enabled=not args.allow_known_google_blocked_ip,
         )
+        if checked_snapshot is snapshot:
+            snapshot = _skip_known_google_blocked_prefix(
+                store,
+                snapshot,
+                base_username=base_username,
+                enabled=not args.allow_known_google_blocked_prefix,
+                min_blocked_count=args.known_google_blocked_prefix_min_count,
+            )
+        else:
+            snapshot = checked_snapshot
         if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
             records.append(
                 {

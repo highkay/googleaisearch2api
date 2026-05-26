@@ -300,6 +300,98 @@ def test_find_google_blocked_session_for_ip_uses_google_block_observation(
     ) is None
 
 
+def test_find_google_blocked_prefix_for_ip_uses_blocked_prefix_without_success(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    for index, ip in enumerate(
+        ["203.0.113.10", "203.0.113.11", "203.0.113.12"],
+        start=1,
+    ):
+        session = store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name=f"user{index}",
+            proxy_username=f"openai.user{index}",
+        )
+        store.update_egress(
+            proxy_session_id=session.id,
+            ips=[ip],
+            source="test",
+        )
+        store.mark_canary_blocked(
+            session.id,
+            error_message="Google unusual traffic",
+            block_ips=[ip],
+        )
+    candidate = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user42",
+        proxy_username="openai.user42",
+    )
+    store.update_egress(
+        proxy_session_id=candidate.id,
+        ips=["203.0.113.42"],
+        source="test",
+    )
+
+    found = store.find_google_blocked_prefix_for_ip(
+        "openai",
+        "203.0.113.42",
+        exclude_session_id=candidate.id,
+    )
+
+    assert found is not None
+    assert found.prefix == "203.0.113.0/24"
+    assert found.blocked_count == 3
+    assert found.success_count == 0
+    assert found.matched_session.proxy_username.startswith("openai.user")
+    assert store.find_google_blocked_prefix_for_ip("JP", "203.0.113.42") is None
+
+
+def test_find_google_blocked_prefix_for_ip_ignores_prefix_with_success(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    for index, ip in enumerate(
+        ["203.0.113.10", "203.0.113.11", "203.0.113.12"],
+        start=1,
+    ):
+        session = store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name=f"user{index}",
+            proxy_username=f"openai.user{index}",
+        )
+        store.update_egress(
+            proxy_session_id=session.id,
+            ips=[ip],
+            source="test",
+        )
+        store.mark_canary_blocked(
+            session.id,
+            error_message="Google unusual traffic",
+            block_ips=[ip],
+        )
+    success = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user20",
+        proxy_username="openai.user20",
+    )
+    store.update_egress(
+        proxy_session_id=success.id,
+        ips=["203.0.113.20"],
+        source="test",
+    )
+    store.mark_canary_success(success.id)
+
+    found = store.find_google_blocked_prefix_for_ip(
+        "openai",
+        "203.0.113.42",
+        min_blocked_count=3,
+    )
+
+    assert found is None
+
+
 def test_risk_metadata_does_not_filter_before_google_canary(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     snapshot = store.upsert_proxy_session(

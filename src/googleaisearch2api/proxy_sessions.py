@@ -102,6 +102,14 @@ class ProxySessionSelection:
     config: ServiceConfig
 
 
+@dataclass(frozen=True, slots=True)
+class ProxyBlockedPrefixSnapshot:
+    prefix: str
+    blocked_count: int
+    success_count: int
+    matched_session: ProxySessionSnapshot
+
+
 def _normalize_username(value: str | None) -> str:
     return (value or "").strip()
 
@@ -169,6 +177,17 @@ def parse_google_block_ips(message: str) -> list[str]:
 
 def google_block_has_ip_mismatch(ips: list[str]) -> bool:
     return len(set(ips)) >= 2
+
+
+def _google_block_prefix_network(
+    primary_ip: str,
+) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
+    normalized = normalize_ip_vector([primary_ip])
+    if not normalized:
+        return None
+    address = ipaddress.ip_address(normalized[0])
+    prefix_len = 24 if address.version == 4 else 48
+    return ipaddress.ip_network(f"{address}/{prefix_len}", strict=False)
 
 
 def is_risk_metadata_retire_reason(reason: str | None) -> bool:
@@ -634,6 +653,65 @@ class ProxySessionStore:
             if row is not None:
                 return ProxySessionSnapshot.from_row(row)
             return None
+
+    def find_google_blocked_prefix_for_ip(
+        self,
+        proxy_base_username: str,
+        primary_ip: str,
+        *,
+        min_blocked_count: int = 3,
+        exclude_session_id: int | None = None,
+    ) -> ProxyBlockedPrefixSnapshot | None:
+        network = _google_block_prefix_network(primary_ip)
+        if network is None:
+            return None
+
+        blocked_rows: list[ProxySessionRow] = []
+        success_count = 0
+        min_blocked_count = max(min_blocked_count, 1)
+        with self._session_factory() as session:
+            statement = (
+                select(ProxySessionRow)
+                .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+                .where(ProxySessionRow.primary_ip.is_not(None))
+                .order_by(
+                    ProxySessionRow.last_blocked_at.desc().nullslast(),
+                    ProxySessionRow.updated_at.desc(),
+                    ProxySessionRow.id.asc(),
+                )
+            )
+            if exclude_session_id is not None:
+                statement = statement.where(ProxySessionRow.id != exclude_session_id)
+            rows = session.scalars(statement).all()
+            for row in rows:
+                try:
+                    address = ipaddress.ip_address(str(row.primary_ip))
+                except ValueError:
+                    continue
+                if address not in network:
+                    continue
+                if (
+                    row.status == STATUS_ACTIVE
+                    or row.canary_success_count > 0
+                    or row.request_success_count > 0
+                ):
+                    success_count += 1
+                if (
+                    row.google_canary_status == "blocked"
+                    or row.canary_block_count > 0
+                    or row.request_block_count > 0
+                    or row.last_blocked_at is not None
+                ):
+                    blocked_rows.append(row)
+
+            if success_count > 0 or len(blocked_rows) < min_blocked_count:
+                return None
+            return ProxyBlockedPrefixSnapshot(
+                prefix=str(network),
+                blocked_count=len(blocked_rows),
+                success_count=success_count,
+                matched_session=ProxySessionSnapshot.from_row(blocked_rows[0]),
+            )
 
     def list_proxy_sessions(self, limit: int = 20) -> list[ProxySessionSnapshot]:
         with self._session_factory() as session:

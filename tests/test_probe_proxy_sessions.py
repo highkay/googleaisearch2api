@@ -7,6 +7,7 @@ from googleaisearch2api.proxy_sessions import (
     STATUS_ACTIVE,
     STATUS_COOLDOWN,
     STATUS_RETIRED,
+    ProxyBlockedPrefixSnapshot,
     ProxySessionSnapshot,
 )
 
@@ -21,6 +22,7 @@ _canary_answer_matches = _SCRIPT._canary_answer_matches
 _run_canary = _SCRIPT._run_canary
 _skip_candidate_reason = _SCRIPT._skip_candidate_reason
 _skip_known_google_blocked_ip = _SCRIPT._skip_known_google_blocked_ip
+_skip_known_google_blocked_prefix = _SCRIPT._skip_known_google_blocked_prefix
 
 
 def _snapshot(
@@ -233,6 +235,106 @@ def test_skip_known_google_blocked_ip_can_be_disabled() -> None:
         snapshot,
         base_username="openai",
         enabled=False,
+    )
+
+    assert result is snapshot
+    assert store.events == []
+    assert store.cooldown_reasons == []
+
+
+class _FakeKnownBlockedPrefixStore:
+    def __init__(self, blocked_prefix: ProxyBlockedPrefixSnapshot | None) -> None:
+        self.blocked_prefix = blocked_prefix
+        self.events: list[dict] = []
+        self.cooldown_reasons: list[str] = []
+
+    def find_google_blocked_prefix_for_ip(
+        self,
+        proxy_base_username: str,
+        primary_ip: str,
+        *,
+        min_blocked_count: int = 3,
+        exclude_session_id: int | None = None,
+    ) -> ProxyBlockedPrefixSnapshot | None:
+        assert proxy_base_username == "openai"
+        assert primary_ip == "203.0.113.42"
+        assert min_blocked_count == 3
+        assert exclude_session_id == 4
+        return self.blocked_prefix
+
+    def record_event(self, **kwargs: object) -> None:
+        self.events.append(kwargs)
+
+    def mark_session_cooldown(
+        self,
+        _proxy_session_id: int,
+        *,
+        reason: str,
+    ) -> ProxySessionSnapshot:
+        self.cooldown_reasons.append(reason)
+        return _snapshot(
+            status=STATUS_COOLDOWN,
+            id=4,
+            proxy_username="openai.user4",
+            primary_ip="203.0.113.42",
+        )
+
+
+def test_skip_known_google_blocked_prefix_uses_failed_prefix_without_success() -> None:
+    blocked_prefix = ProxyBlockedPrefixSnapshot(
+        prefix="203.0.113.0/24",
+        blocked_count=3,
+        success_count=0,
+        matched_session=_snapshot(
+            status=STATUS_COOLDOWN,
+            id=1,
+            proxy_username="openai.user1",
+            primary_ip="203.0.113.10",
+        ),
+    )
+    store = _FakeKnownBlockedPrefixStore(blocked_prefix)
+
+    result = _skip_known_google_blocked_prefix(
+        store,
+        _snapshot(
+            status=STATUS_ACTIVE,
+            id=4,
+            proxy_username="openai.user4",
+            primary_ip="203.0.113.42",
+        ),
+        base_username="openai",
+        enabled=True,
+        min_blocked_count=3,
+    )
+
+    assert result.status == STATUS_COOLDOWN
+    assert "203.0.113.0/24" in store.cooldown_reasons[0]
+    assert store.events[0]["event_type"] == "known_google_blocked_prefix_skipped"
+    assert store.events[0]["raw_json"]["blocked_count"] == 3
+
+
+def test_skip_known_google_blocked_prefix_can_be_disabled() -> None:
+    store = _FakeKnownBlockedPrefixStore(
+        ProxyBlockedPrefixSnapshot(
+            prefix="203.0.113.0/24",
+            blocked_count=3,
+            success_count=0,
+            matched_session=_snapshot(status=STATUS_COOLDOWN),
+        )
+    )
+    snapshot = _snapshot(
+        status=STATUS_ACTIVE,
+        id=4,
+        proxy_username="openai.user4",
+        primary_ip="203.0.113.42",
+    )
+
+    result = _skip_known_google_blocked_prefix(
+        store,
+        snapshot,
+        base_username="openai",
+        enabled=False,
+        min_blocked_count=3,
     )
 
     assert result is snapshot
