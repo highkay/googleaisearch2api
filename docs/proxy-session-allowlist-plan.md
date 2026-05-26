@@ -365,6 +365,8 @@ IPLARK_BAD_CACHE_TTL_HOURS=24
 - 第三方评分缺失、低分、查询失败、风险标签异常，都不阻止候选进入 Google canary。
 - 能提升有效 IP 命中率的硬规则只保留出口稳定性、重复出口去重、Google canary 和真实请求反馈。
 - 多 IP 向量只用于稳定性和重复判断，不用第三方分数做准入排序。
+- 旧版本因 `iplark flagged public proxy/threat`、低分或缺分而 retired 的会话属于“第三方元数据误杀”候选；新版扫描器会允许这类会话重新进入 canary，但仍跳过重复出口 retired。
+- 扫描器默认保护已 active 会话，并尊重未到期 cooldown，避免把 canary 预算浪费在已知可用或刚被 Google block 的出口上。需要强制刷新时显式使用 `--refresh-active` 或 `--retry-cooldown`。
 
 注意：本地已验证 `216.73.156.47` 的 IPLark 分数是 76，但 Google canary 仍被 block；线上也出现高分 IP 被 Google block 的情况。所以第三方分数只能作为观测，不能作为 active 判定。
 

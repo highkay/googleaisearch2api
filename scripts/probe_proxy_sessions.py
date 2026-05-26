@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from dataclasses import asdict
+from datetime import datetime
 from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
 
 from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiRunner, resolve_browser_proxy
 from googleaisearch2api.config import ServiceConfig, get_settings
-from googleaisearch2api.db import create_db_engine, create_session_factory, create_tables
+from googleaisearch2api.db import create_db_engine, create_session_factory, create_tables, utc_now
 from googleaisearch2api.egress import probe_egress
 from googleaisearch2api.iplark import (
     IPAPI_IS_BASE_URL,
@@ -20,6 +22,7 @@ from googleaisearch2api.iplark import (
 from googleaisearch2api.logging import configure_logging
 from googleaisearch2api.proxy_sessions import (
     DEFAULT_STICKY_SUFFIX_TEMPLATE,
+    STATUS_ACTIVE,
     STATUS_COOLDOWN,
     STATUS_RETIRED,
     ProxySessionSnapshot,
@@ -27,6 +30,7 @@ from googleaisearch2api.proxy_sessions import (
     build_proxy_config_for_session,
     format_sticky_username,
     google_block_has_ip_mismatch,
+    is_risk_metadata_retire_reason,
     parse_google_block_ips,
     resolve_proxy_base_username,
 )
@@ -39,6 +43,50 @@ def _snapshot_json(snapshot: ProxySessionSnapshot) -> dict:
         if hasattr(value, "isoformat"):
             payload[key] = value.isoformat()
     return payload
+
+
+def _datetime_for_compare(value: datetime, reference: datetime) -> datetime:
+    if value.tzinfo is None and reference.tzinfo is not None:
+        return value.replace(tzinfo=reference.tzinfo)
+    if value.tzinfo is not None and reference.tzinfo is None:
+        return value.replace(tzinfo=None)
+    return value
+
+
+def _skip_candidate_reason(
+    snapshot: ProxySessionSnapshot,
+    *,
+    now: datetime,
+    refresh_active: bool,
+    retry_cooldown: bool,
+    retry_retired: bool,
+    only_risk_retired: bool,
+) -> str | None:
+    risk_retired = (
+        snapshot.status == STATUS_RETIRED
+        and is_risk_metadata_retire_reason(snapshot.retire_reason)
+    )
+    if only_risk_retired and not risk_retired:
+        return "not retired by legacy risk metadata gate"
+    if snapshot.status == STATUS_ACTIVE and not refresh_active:
+        return "active session preserved"
+    if snapshot.status == STATUS_COOLDOWN and not retry_cooldown:
+        if snapshot.cooldown_until is None:
+            return "session is in cooldown"
+        cooldown_until = _datetime_for_compare(snapshot.cooldown_until, now)
+        compare_now = _datetime_for_compare(now, snapshot.cooldown_until)
+        if cooldown_until > compare_now:
+            return "session is in cooldown"
+    if snapshot.status == STATUS_RETIRED and not risk_retired and not retry_retired:
+        return "retired session skipped"
+    return None
+
+
+def _candidate_indices(start: int, end: int, *, shuffle: bool, seed: int | None) -> list[int]:
+    indices = list(range(start, end + 1))
+    if shuffle:
+        random.Random(seed).shuffle(indices)
+    return indices
 
 
 def _run_canary(
@@ -347,6 +395,38 @@ def main() -> None:
         default=12,
         help="Timeout in seconds for --fast-ipapi-egress.",
     )
+    parser.add_argument(
+        "--refresh-active",
+        action="store_true",
+        help="Re-probe active sessions instead of preserving known-good sessions.",
+    )
+    parser.add_argument(
+        "--retry-cooldown",
+        action="store_true",
+        help="Re-probe sessions before their cooldown expires.",
+    )
+    parser.add_argument(
+        "--retry-retired",
+        action="store_true",
+        help="Re-probe all retired sessions, including duplicate exits.",
+    )
+    parser.add_argument(
+        "--only-risk-retired",
+        action="store_true",
+        help="Only probe sessions retired by the legacy third-party risk metadata gate.",
+    )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Probe candidate indexes in random order to sample a wider exit pool.",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Seed for --shuffle.")
+    parser.add_argument(
+        "--stop-after-active",
+        type=int,
+        default=0,
+        help="Stop once this many active sessions exist for the base username.",
+    )
     parser.add_argument("--skip-google-canary", action="store_true", help="Skip Google canary.")
     parser.add_argument(
         "--canary-prompt",
@@ -388,7 +468,12 @@ def main() -> None:
     )
 
     records = []
-    for index in range(args.start, args.end + 1):
+    for index in _candidate_indices(args.start, args.end, shuffle=args.shuffle, seed=args.seed):
+        if (
+            args.stop_after_active > 0
+            and store.count_active_sessions(base_username) >= args.stop_after_active
+        ):
+            break
         proxy_username = format_sticky_username(base_username, index, args.suffix_template)
         session_name = f"user{index}"
         snapshot = store.upsert_proxy_session(
@@ -396,6 +481,23 @@ def main() -> None:
             session_name=session_name,
             proxy_username=proxy_username,
         )
+        skip_reason = _skip_candidate_reason(
+            snapshot,
+            now=utc_now(),
+            refresh_active=args.refresh_active,
+            retry_cooldown=args.retry_cooldown,
+            retry_retired=args.retry_retired,
+            only_risk_retired=args.only_risk_retired,
+        )
+        if skip_reason:
+            records.append(
+                {
+                    "session": _snapshot_json(snapshot),
+                    "iplark": None,
+                    "skipped": skip_reason,
+                }
+            )
+            continue
         candidate_config = build_proxy_config_for_session(base_config, proxy_username)
 
         iplark_result = None
@@ -458,7 +560,11 @@ def main() -> None:
 
     print(
         json.dumps(
-            {"base_username": base_username, "records": records},
+            {
+                "base_username": base_username,
+                "active_sessions": store.count_active_sessions(base_username),
+                "records": records,
+            },
             ensure_ascii=False,
             indent=2,
         )

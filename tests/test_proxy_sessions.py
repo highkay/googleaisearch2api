@@ -19,6 +19,7 @@ from googleaisearch2api.proxy_sessions import (
     format_sticky_username,
     google_block_has_ip_mismatch,
     hash_ip_vector,
+    is_risk_metadata_retire_reason,
     normalize_ip_vector,
     parse_google_block_ips,
     resolve_proxy_base_username,
@@ -86,6 +87,13 @@ def test_ip_vector_hash_is_stable_and_deduplicated() -> None:
 
     assert first == second
     assert hash_ip_vector(first) == hash_ip_vector(second)
+
+
+def test_risk_metadata_retire_reasons_are_retryable() -> None:
+    assert is_risk_metadata_retire_reason("iplark flagged public proxy/threat")
+    assert is_risk_metadata_retire_reason("iplark score 34 below threshold 70")
+    assert is_risk_metadata_retire_reason("iplark score missing")
+    assert not is_risk_metadata_retire_reason("duplicate egress with session 1")
 
 
 def test_proxy_session_selector_uses_active_session_without_hardcoded_country(

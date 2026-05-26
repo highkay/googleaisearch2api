@@ -23,6 +23,12 @@ STATUS_ACTIVE = "active"
 STATUS_COOLDOWN = "cooldown"
 STATUS_RETIRED = "retired"
 SELECTABLE_STATUSES = {STATUS_ACTIVE}
+RISK_METADATA_RETIRE_REASON_PREFIXES = (
+    "iplark flagged public proxy/threat",
+    "iplark score ",
+    "iplark score missing",
+    "ipapi score ",
+)
 
 _IP_TOKEN_RE = re.compile(r"[0-9A-Fa-f:.]{3,}")
 
@@ -163,6 +169,11 @@ def parse_google_block_ips(message: str) -> list[str]:
 
 def google_block_has_ip_mismatch(ips: list[str]) -> bool:
     return len(set(ips)) >= 2
+
+
+def is_risk_metadata_retire_reason(reason: str | None) -> bool:
+    text = (reason or "").strip().lower()
+    return any(text.startswith(prefix) for prefix in RISK_METADATA_RETIRE_REASON_PREFIXES)
 
 
 class ProxySessionStore:
@@ -540,6 +551,24 @@ class ProxySessionStore:
         summary = {status: int(count) for status, count in rows}
         summary["total"] = sum(summary.values())
         return summary
+
+    def count_active_sessions(self, proxy_base_username: str) -> int:
+        now = utc_now()
+        with self._session_factory() as session:
+            return int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(ProxySessionRow)
+                    .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+                    .where(ProxySessionRow.status == STATUS_ACTIVE)
+                    .where(ProxySessionRow.duplicate_of_session_id.is_(None))
+                    .where(
+                        (ProxySessionRow.cooldown_until.is_(None))
+                        | (ProxySessionRow.cooldown_until <= now)
+                    )
+                )
+                or 0
+            )
 
     def list_proxy_sessions(self, limit: int = 20) -> list[ProxySessionSnapshot]:
         with self._session_factory() as session:

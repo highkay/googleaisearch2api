@@ -1,0 +1,143 @@
+import importlib.util
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from googleaisearch2api.proxy_sessions import (
+    STATUS_ACTIVE,
+    STATUS_COOLDOWN,
+    STATUS_RETIRED,
+    ProxySessionSnapshot,
+)
+
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "probe_proxy_sessions.py"
+_SPEC = importlib.util.spec_from_file_location("probe_proxy_sessions", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_SCRIPT = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_SCRIPT)
+
+_candidate_indices = _SCRIPT._candidate_indices
+_skip_candidate_reason = _SCRIPT._skip_candidate_reason
+
+
+def _snapshot(
+    *,
+    status: str,
+    retire_reason: str | None = None,
+    cooldown_until: datetime | None = None,
+) -> ProxySessionSnapshot:
+    return ProxySessionSnapshot(
+        id=1,
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+        status=status,
+        epoch=0,
+        primary_ip="203.0.113.10",
+        ip_vector_hash="hash",
+        iplark_min_quality_score=34,
+        google_canary_status="",
+        google_canary_error=None,
+        google_canary_checked_at=None,
+        request_success_count=0,
+        request_block_count=0,
+        request_error_count=0,
+        canary_success_count=0,
+        canary_block_count=0,
+        duplicate_of_session_id=None,
+        last_selected_at=None,
+        last_success_at=None,
+        last_blocked_at=None,
+        cooldown_until=cooldown_until,
+        retire_reason=retire_reason,
+    )
+
+
+def test_skip_candidate_preserves_active_and_cooldown_sessions() -> None:
+    now = datetime(2026, 5, 26, tzinfo=UTC)
+    active = _snapshot(status=STATUS_ACTIVE)
+    cooldown = _snapshot(status=STATUS_COOLDOWN, cooldown_until=now + timedelta(hours=1))
+
+    assert (
+        _skip_candidate_reason(
+            active,
+            now=now,
+            refresh_active=False,
+            retry_cooldown=False,
+            retry_retired=False,
+            only_risk_retired=False,
+        )
+        == "active session preserved"
+    )
+    assert (
+        _skip_candidate_reason(
+            cooldown,
+            now=now,
+            refresh_active=False,
+            retry_cooldown=False,
+            retry_retired=False,
+            only_risk_retired=False,
+        )
+        == "session is in cooldown"
+    )
+    assert (
+        _skip_candidate_reason(
+            active,
+            now=now,
+            refresh_active=True,
+            retry_cooldown=False,
+            retry_retired=False,
+            only_risk_retired=False,
+        )
+        is None
+    )
+
+
+def test_skip_candidate_retries_legacy_risk_retired_only() -> None:
+    now = datetime(2026, 5, 26, tzinfo=UTC)
+    risk_retired = _snapshot(
+        status=STATUS_RETIRED,
+        retire_reason="iplark flagged public proxy/threat",
+    )
+    duplicate_retired = _snapshot(
+        status=STATUS_RETIRED,
+        retire_reason="duplicate egress with session 1",
+    )
+
+    assert (
+        _skip_candidate_reason(
+            risk_retired,
+            now=now,
+            refresh_active=False,
+            retry_cooldown=False,
+            retry_retired=False,
+            only_risk_retired=False,
+        )
+        is None
+    )
+    assert (
+        _skip_candidate_reason(
+            duplicate_retired,
+            now=now,
+            refresh_active=False,
+            retry_cooldown=False,
+            retry_retired=False,
+            only_risk_retired=False,
+        )
+        == "retired session skipped"
+    )
+    assert (
+        _skip_candidate_reason(
+            duplicate_retired,
+            now=now,
+            refresh_active=False,
+            retry_cooldown=False,
+            retry_retired=False,
+            only_risk_retired=True,
+        )
+        == "not retired by legacy risk metadata gate"
+    )
+
+
+def test_candidate_indices_can_shuffle_with_stable_seed() -> None:
+    assert _candidate_indices(1, 5, shuffle=False, seed=None) == [1, 2, 3, 4, 5]
+    assert _candidate_indices(1, 5, shuffle=True, seed=7) == [5, 1, 4, 2, 3]
