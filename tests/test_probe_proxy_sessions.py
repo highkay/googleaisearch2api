@@ -202,6 +202,26 @@ def test_skip_known_google_blocked_ip_uses_own_google_failure_history() -> None:
     assert store.events[0]["event_type"] == "known_google_blocked_ip_skipped"
 
 
+def test_skip_known_google_blocked_ip_handles_retired_duplicate_candidate() -> None:
+    blocked = _snapshot(
+        status=STATUS_COOLDOWN,
+        id=1,
+        proxy_username="openai.user1",
+        primary_ip="203.0.113.10",
+    )
+    store = _FakeKnownBlockedStore(blocked)
+
+    result = _skip_known_google_blocked_ip(
+        store,
+        _snapshot(status=STATUS_RETIRED, id=2, proxy_username="openai.user2"),
+        base_username="openai",
+        enabled=True,
+    )
+
+    assert result.status == STATUS_COOLDOWN
+    assert store.events[0]["event_type"] == "known_google_blocked_ip_skipped"
+
+
 def test_skip_known_google_blocked_ip_can_be_disabled() -> None:
     store = _FakeKnownBlockedStore(
         _snapshot(status=STATUS_COOLDOWN, id=1, proxy_username="openai.user1")

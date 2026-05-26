@@ -614,14 +614,6 @@ def main() -> None:
                 candidate_config,
                 checks=max(args.egress_checks, 1),
             )
-        if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
-            records.append(
-                {
-                    "session": _snapshot_json(snapshot),
-                    "iplark": asdict(iplark_result) if iplark_result else None,
-                }
-            )
-            continue
 
         snapshot = _skip_known_google_blocked_ip(
             store,
