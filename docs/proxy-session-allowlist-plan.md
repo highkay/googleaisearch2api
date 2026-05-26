@@ -375,22 +375,23 @@ IPLARK_BAD_CACHE_TTL_HOURS=24
 
 ### 7.1 canary prompt
 
-每次 canary 使用唯一 nonce，避免把 echo 当成功：
+默认 canary 使用稳定算术题，避免把 prompt echo 或泛化短回答当成功：
 
 ```text
-Return exactly this token and nothing else: gai-canary-20260526-{uuid}
+What is nineteen plus twenty-three? Reply with only the number.
 ```
 
 成功条件：
 
 - 没有触发 `GoogleAiBlockedError`。
-- 返回正文包含 nonce 或能明确回答。
+- 返回正文归一化后等于 `42`；默认要求连续 2 次通过。
 - `final_url` 不是 `/sorry/`。
 - `body_excerpt` 不含 unusual traffic/captcha/not a robot。
 
 失败条件：
 
 - `GoogleAiBlockedError`：立即 `canary_block_count += 1`，session cooldown。
+- 返回 prompt echo、`You said` 或非预期答案：不进入 active，session cooldown。
 - timeout/runtime error：不立即 retired，先 cooldown 短周期后重试。
 
 ### 7.2 block IP 解析
@@ -571,8 +572,8 @@ PROXY_SESSION_BLOCK_COOLDOWN_HOURS=12
 新增脚本：
 
 ```powershell
-uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 20 --egress --iplark
-uv run python scripts/probe_proxy_sessions.py --base-username JP --start 1 --end 20 --google-canary
+uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 20
+uv run python scripts/probe_proxy_sessions.py --base-username JP --start 1 --end 20 --fast-ipapi-egress --shuffle --stop-after-active 3
 ```
 
 脚本行为：
@@ -658,7 +659,7 @@ uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 -
 Google canary 只小批量跑：
 
 ```powershell
-uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 5 --google-canary
+uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 5 --canary-repeats 2
 ```
 
 验收：
@@ -672,7 +673,7 @@ uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 -
 在 GHCR 镜像内验证：
 
 ```powershell
-docker run --rm ghcr.io/... uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 3 --egress --iplark
+docker run --rm ghcr.io/... uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 3 --canary-repeats 2
 ```
 
 重点验证：

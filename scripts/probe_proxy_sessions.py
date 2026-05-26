@@ -36,6 +36,10 @@ from googleaisearch2api.proxy_sessions import (
 )
 from googleaisearch2api.store import ConfigStore
 
+DEFAULT_CANARY_PROMPT = "What is nineteen plus twenty-three? Reply with only the number."
+DEFAULT_CANARY_EXPECTED_ANSWER = "42"
+DEFAULT_CANARY_REPEATS = 2
+
 
 def _snapshot_json(snapshot: ProxySessionSnapshot) -> dict:
     payload = asdict(snapshot)
@@ -89,58 +93,95 @@ def _candidate_indices(start: int, end: int, *, shuffle: bool, seed: int | None)
     return indices
 
 
+def _normalize_canary_answer(text: str) -> str:
+    normalized = " ".join(text.strip().split()).strip("`'\" ")
+    while len(normalized) > 1 and normalized.endswith("."):
+        normalized = normalized[:-1].strip().strip("`'\" ")
+    return normalized.casefold()
+
+
+def _canary_answer_matches(actual: str, expected: str) -> bool:
+    expected = expected.strip()
+    if not expected:
+        return True
+    return _normalize_canary_answer(actual) == _normalize_canary_answer(expected)
+
+
 def _run_canary(
     store: ProxySessionStore,
     snapshot: ProxySessionSnapshot,
     config: ServiceConfig,
     prompt: str,
     expected_answer: str,
+    repeats: int,
 ) -> ProxySessionSnapshot:
+    expected = expected_answer.strip()
+    attempts = max(repeats, 1)
     runner = GoogleAiRunner()
     try:
-        result = runner.run_prompt(config, prompt)
-    except GoogleAiBlockedError as exc:
-        block_ips = parse_google_block_ips(str(exc))
+        for attempt in range(1, attempts + 1):
+            try:
+                result = runner.run_prompt(config, prompt)
+            except GoogleAiBlockedError as exc:
+                block_ips = parse_google_block_ips(str(exc))
+                store.record_event(
+                    proxy_session_id=snapshot.id,
+                    event_type="google_canary_blocked",
+                    message=str(exc),
+                    raw_json={
+                        "attempt": attempt,
+                        "attempts": attempts,
+                        "block_ips": block_ips,
+                        "ip_mismatch": google_block_has_ip_mismatch(block_ips),
+                    },
+                )
+                return store.mark_canary_blocked(
+                    snapshot.id,
+                    error_message=str(exc),
+                    block_ips=block_ips,
+                )
+            except Exception as exc:
+                return store.mark_session_cooldown(
+                    snapshot.id,
+                    reason=f"google canary failed on attempt {attempt}/{attempts}: {exc!r}",
+                )
+
+            actual = result.answer_text.strip()
+            if not _canary_answer_matches(actual, expected):
+                store.record_event(
+                    proxy_session_id=snapshot.id,
+                    event_type="google_canary_unexpected_answer",
+                    message=f"expected={expected!r} actual={actual!r}",
+                    raw_json={
+                        "attempt": attempt,
+                        "attempts": attempts,
+                        "expected": expected,
+                        "actual": actual,
+                        "final_url": result.final_url,
+                        "page_title": result.page_title,
+                        "body_excerpt": result.body_excerpt,
+                    },
+                )
+                return store.mark_session_cooldown(
+                    snapshot.id,
+                    reason=(
+                        "google canary returned unexpected answer: "
+                        f"expected={expected!r} actual={actual!r}"
+                    ),
+                )
+
         store.record_event(
             proxy_session_id=snapshot.id,
-            event_type="google_canary_blocked",
-            message=str(exc),
+            event_type="google_canary_success",
+            message=f"passed {attempts} canary attempt(s)",
             raw_json={
-                "block_ips": block_ips,
-                "ip_mismatch": google_block_has_ip_mismatch(block_ips),
+                "attempts": attempts,
+                "expected": expected,
             },
         )
-        return store.mark_canary_blocked(
-            snapshot.id,
-            error_message=str(exc),
-            block_ips=block_ips,
-        )
-    except Exception as exc:
-        return store.mark_session_cooldown(snapshot.id, reason=f"google canary failed: {exc!r}")
+        return store.mark_canary_success(snapshot.id)
     finally:
         runner.close()
-    expected = expected_answer.strip()
-    if expected and result.answer_text.strip() != expected:
-        store.record_event(
-            proxy_session_id=snapshot.id,
-            event_type="google_canary_unexpected_answer",
-            message=f"expected={expected!r} actual={result.answer_text.strip()!r}",
-            raw_json={
-                "expected": expected,
-                "actual": result.answer_text.strip(),
-                "final_url": result.final_url,
-                "page_title": result.page_title,
-                "body_excerpt": result.body_excerpt,
-            },
-        )
-        return store.mark_session_cooldown(
-            snapshot.id,
-            reason=(
-                "google canary returned unexpected answer: "
-                f"expected={expected!r} actual={result.answer_text.strip()!r}"
-            ),
-        )
-    return store.mark_canary_success(snapshot.id)
 
 
 def _run_iplark(
@@ -430,17 +471,29 @@ def main() -> None:
     parser.add_argument("--skip-google-canary", action="store_true", help="Skip Google canary.")
     parser.add_argument(
         "--canary-prompt",
-        default="What is OpenAI Responses API? Answer in one short sentence.",
+        default=DEFAULT_CANARY_PROMPT,
+        help="Google canary prompt. Default asks for a deterministic short answer.",
     )
     parser.add_argument(
         "--canary-expected-answer",
-        default="",
-        help="When set, only mark canary successful if the answer text exactly matches this value.",
+        default=DEFAULT_CANARY_EXPECTED_ANSWER,
+        help=(
+            "Only mark canary successful if the normalized answer matches this value. "
+            "Set to an empty string to accept any non-blocked answer."
+        ),
+    )
+    parser.add_argument(
+        "--canary-repeats",
+        type=int,
+        default=DEFAULT_CANARY_REPEATS,
+        help="Require this many consecutive successful Google canary answers before activation.",
     )
     args = parser.parse_args()
 
     if args.end < args.start:
         raise SystemExit("--end must be >= --start")
+    if args.canary_repeats < 1:
+        raise SystemExit("--canary-repeats must be >= 1")
 
     settings = get_settings()
     configure_logging(settings.app_log_level)
@@ -549,6 +602,7 @@ def main() -> None:
                 candidate_config,
                 args.canary_prompt,
                 args.canary_expected_answer,
+                args.canary_repeats,
             )
 
         records.append(

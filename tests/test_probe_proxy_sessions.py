@@ -1,6 +1,7 @@
 import importlib.util
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from googleaisearch2api.proxy_sessions import (
     STATUS_ACTIVE,
@@ -16,6 +17,8 @@ _SCRIPT = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_SCRIPT)
 
 _candidate_indices = _SCRIPT._candidate_indices
+_canary_answer_matches = _SCRIPT._canary_answer_matches
+_run_canary = _SCRIPT._run_canary
 _skip_candidate_reason = _SCRIPT._skip_candidate_reason
 
 
@@ -141,3 +144,97 @@ def test_skip_candidate_retries_legacy_risk_retired_only() -> None:
 def test_candidate_indices_can_shuffle_with_stable_seed() -> None:
     assert _candidate_indices(1, 5, shuffle=False, seed=None) == [1, 2, 3, 4, 5]
     assert _candidate_indices(1, 5, shuffle=True, seed=7) == [5, 1, 4, 2, 3]
+
+
+def test_canary_answer_match_normalizes_trailing_period_and_whitespace() -> None:
+    assert _canary_answer_matches("  42.\n", "42")
+    assert _canary_answer_matches("`42`", "42")
+    assert not _canary_answer_matches(
+        "You said: What is nineteen plus twenty-three?",
+        "42",
+    )
+    assert _canary_answer_matches("any non-blocked answer", "")
+
+
+class _FakeCanaryRunner:
+    def __init__(self, answers: list[str]) -> None:
+        self._answers = answers
+        self.prompts: list[str] = []
+        self.closed = False
+
+    def run_prompt(self, _config: object, prompt: str) -> SimpleNamespace:
+        self.prompts.append(prompt)
+        answer = self._answers.pop(0)
+        return SimpleNamespace(
+            answer_text=answer,
+            final_url="https://www.google.com/search?udm=50",
+            page_title="Google AI",
+            body_excerpt=answer,
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeCanaryStore:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+        self.cooldown_reasons: list[str] = []
+        self.success_count = 0
+
+    def record_event(self, **kwargs: object) -> None:
+        self.events.append(kwargs)
+
+    def mark_canary_success(self, _proxy_session_id: int) -> ProxySessionSnapshot:
+        self.success_count += 1
+        return _snapshot(status=STATUS_ACTIVE)
+
+    def mark_session_cooldown(
+        self,
+        _proxy_session_id: int,
+        *,
+        reason: str,
+    ) -> ProxySessionSnapshot:
+        self.cooldown_reasons.append(reason)
+        return _snapshot(status=STATUS_COOLDOWN)
+
+
+def test_run_canary_requires_all_repeated_expected_answers(monkeypatch) -> None:
+    runner = _FakeCanaryRunner(["42", "42."])
+    monkeypatch.setattr(_SCRIPT, "GoogleAiRunner", lambda: runner)
+    store = _FakeCanaryStore()
+
+    result = _run_canary(
+        store,
+        _snapshot(status=STATUS_ACTIVE),
+        object(),
+        "What is nineteen plus twenty-three? Reply with only the number.",
+        "42",
+        2,
+    )
+
+    assert result.status == STATUS_ACTIVE
+    assert store.success_count == 1
+    assert len(runner.prompts) == 2
+    assert runner.closed
+
+
+def test_run_canary_rejects_prompt_echo_before_activation(monkeypatch) -> None:
+    runner = _FakeCanaryRunner(["You said: What is nineteen plus twenty-three?"])
+    monkeypatch.setattr(_SCRIPT, "GoogleAiRunner", lambda: runner)
+    store = _FakeCanaryStore()
+
+    result = _run_canary(
+        store,
+        _snapshot(status=STATUS_ACTIVE),
+        object(),
+        "What is nineteen plus twenty-three? Reply with only the number.",
+        "42",
+        2,
+    )
+
+    assert result.status == STATUS_COOLDOWN
+    assert store.success_count == 0
+    assert len(runner.prompts) == 1
+    assert "unexpected answer" in store.cooldown_reasons[0]
+    assert runner.closed
