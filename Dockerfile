@@ -31,6 +31,7 @@ RUN set -eux; \
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+COPY scripts ./scripts
 COPY .env.example ./
 
 RUN HTTP_PROXY="${HTTP_PROXY}" \
