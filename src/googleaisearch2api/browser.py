@@ -22,14 +22,28 @@ ANSWER_SELECTORS = [
     "div.pWvJNd",
     "div.Zkbeff",
     "div.CKgc1d",
+]
+
+FALLBACK_ANSWER_SELECTORS = [
     "div.WzWwpc.vve6Ce.CZntF",
     "section",
 ]
 
 DISCLAIMER_MARKERS = [
     "AI 的回答未必正确无误，请注意核查",
+    "AI can make mistakes, so double-check responses",
     "AI's response may contain mistakes",
     "AI responses may contain mistakes",
+    "AI Mode response is ready",
+]
+
+ANSWER_READY_MARKERS = [
+    "AI Mode response is ready",
+]
+
+NON_ANSWER_PREFIXES = [
+    "What's on your mind?",
+    "Search Results\nWhat's on your mind?",
 ]
 
 BLOCKED_MARKERS = [
@@ -50,29 +64,60 @@ DEFAULT_CHROME_USER_AGENT = (
 )
 
 EXTRACT_SCRIPT = """
-({ query, selectors }) => {
-  const clean = (value) => (value || "").trim();
-  const root = selectors
-    .map((selector) => document.querySelector(selector))
-    .find((element) => element && clean(element.innerText).length > 80);
-  const section =
-    (root && root.closest("section")) || document.querySelector("section") || document.body;
-  let answerText = root ? clean(root.innerText) : "";
-  if (query && answerText.startsWith(query)) {
-    answerText = clean(answerText.slice(query.length));
-  }
-  const citations = [];
+({ answerSelectors, fallbackSelectors, readyMarkers }) => {
+  const clean = (value) =>
+    (value || "")
+      .replace(/\\u00a0/g, " ")
+      .replace(/[ \\t]+/g, " ")
+      .replace(/\\n{3,}/g, "\\n\\n")
+      .trim();
+  const isVisible = (element) => {
+    const style = window.getComputedStyle(element);
+    return (
+      element.getClientRects().length > 0 &&
+      style.display !== "none" &&
+      style.visibility !== "hidden"
+    );
+  };
+  const bodyText = clean(document.body.innerText);
+  const answerReady = readyMarkers.some((marker) => bodyText.includes(marker));
+  const candidates = [];
   const seen = new Set();
+  const addCandidates = (selectors, source) => {
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((element) => {
+        if (seen.has(element) || !isVisible(element)) {
+          return;
+        }
+        seen.add(element);
+        const text = clean(element.innerText);
+        if (!text) {
+          return;
+        }
+        candidates.push({ element, selector, source, text });
+      });
+    });
+  };
+  addCandidates(answerSelectors, "answer");
+  if (answerReady) {
+    addCandidates(fallbackSelectors, "fallback");
+  }
+  const root = candidates[0] || null;
+  const section =
+    (root && root.element.closest("section")) || document.querySelector("section") || document.body;
+  const answerText = root ? root.text : "";
+  const citations = [];
+  const seenUrls = new Set();
   section.querySelectorAll("a[href]").forEach((anchor) => {
     const href = anchor.href;
     const title = clean(anchor.innerText || anchor.getAttribute("aria-label") || "");
-    if (!href || seen.has(href) || !/^https?:/i.test(href)) {
+    if (!href || seenUrls.has(href) || !/^https?:/i.test(href)) {
       return;
     }
     if (href.includes("policies.google.com") || href.includes("support.google.com/legal")) {
       return;
     }
-    seen.add(href);
+    seenUrls.add(href);
     citations.push({
       title: title || new URL(href).hostname,
       url: href,
@@ -80,10 +125,17 @@ EXTRACT_SCRIPT = """
   });
   return {
     answerText,
+    candidates: candidates.map((candidate) => ({
+      text: candidate.text,
+      selector: candidate.selector,
+      source: candidate.source,
+    })),
+    matchedSelector: root ? root.selector : "",
+    answerReady,
     citations: citations.slice(0, 10),
     finalUrl: location.href,
     pageTitle: document.title,
-    bodyExcerpt: clean(document.body.innerText).slice(0, 800),
+    bodyExcerpt: bodyText.slice(0, 800),
   };
 }
 """
@@ -102,14 +154,65 @@ class GoogleAiTimeoutError(GoogleAiRuntimeError):
 
 
 def clean_answer_text(answer_text: str, query: str) -> str:
-    cleaned = (answer_text or "").strip()
-    if query and cleaned.startswith(query):
-        cleaned = cleaned[len(query) :].strip()
+    cleaned = (answer_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    query = (query or "").strip()
+    cleaned = _strip_prompt_echo(cleaned, query)
     for marker in DISCLAIMER_MARKERS:
         marker_index = cleaned.find(marker)
         if marker_index >= 0:
             cleaned = cleaned[:marker_index].strip()
     return cleaned.strip()
+
+
+def _strip_prompt_echo(answer_text: str, query: str) -> str:
+    if not query:
+        return answer_text.strip()
+    if answer_text.startswith(query):
+        return answer_text[len(query) :].strip()
+
+    echo_label = "You said:"
+    if not answer_text.lower().startswith(echo_label.lower()):
+        return answer_text.strip()
+
+    after_label = answer_text[len(echo_label) :].lstrip()
+    if after_label.startswith(query):
+        return after_label[len(query) :].strip()
+
+    normalized_after = _normalize_for_compare(after_label)
+    normalized_query = _normalize_for_compare(query)
+    if normalized_after == normalized_query:
+        return ""
+    if normalized_query and normalized_after.startswith(f"{normalized_query} "):
+        return normalized_after[len(normalized_query) :].strip()
+    return answer_text.strip()
+
+
+def _normalize_for_compare(value: str) -> str:
+    return " ".join((value or "").split())
+
+
+def _is_likely_answer_text(answer_text: str) -> bool:
+    normalized = _normalize_for_compare(answer_text).lower()
+    if not normalized:
+        return False
+    for prefix in NON_ANSWER_PREFIXES:
+        if normalized.startswith(_normalize_for_compare(prefix).lower()):
+            return False
+    return True
+
+
+def _select_answer_text(payload: dict, query: str) -> str:
+    candidates = payload.get("candidates") or []
+    if not candidates and payload.get("answerText"):
+        candidates = [{"text": payload.get("answerText", "")}]
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        cleaned = clean_answer_text(str(candidate.get("text") or ""), query)
+        if _is_likely_answer_text(cleaned):
+            return cleaned
+    return ""
 
 
 def filter_citations(citations: list[dict]) -> list[Citation]:
@@ -377,21 +480,33 @@ class GoogleAiRunner:
         payload = page.evaluate(
             EXTRACT_SCRIPT,
             {
-                "query": prompt,
-                "selectors": ANSWER_SELECTORS,
+                "answerSelectors": ANSWER_SELECTORS,
+                "fallbackSelectors": FALLBACK_ANSWER_SELECTORS,
+                "readyMarkers": ANSWER_READY_MARKERS,
             },
         )
-        payload["answerText"] = clean_answer_text(payload.get("answerText", ""), prompt)
+        payload["answerText"] = _select_answer_text(payload, prompt)
         return payload
 
     def _wait_for_answer(self, page, prompt: str, timeout_ms: int) -> GoogleAiResult:
         deadline = time.monotonic() + max(timeout_ms, 1_000) / 1000
         last_payload: dict | None = None
+        last_answer_text = ""
+        stable_answer_polls = 0
         while time.monotonic() < deadline:
             self._ensure_not_blocked(page, stage="waiting for the answer")
             payload = self._extract_payload(page, prompt)
             answer_text = payload.get("answerText", "").strip()
-            if len(answer_text) >= 60:
+            if _is_likely_answer_text(answer_text):
+                if answer_text == last_answer_text:
+                    stable_answer_polls += 1
+                else:
+                    stable_answer_polls = 0
+                    last_answer_text = answer_text
+
+            if _is_likely_answer_text(answer_text) and (
+                payload.get("answerReady") or stable_answer_polls >= 1
+            ):
                 return GoogleAiResult(
                     answer_text=answer_text,
                     citations=filter_citations(payload.get("citations", [])),
@@ -399,6 +514,9 @@ class GoogleAiRunner:
                     page_title=payload.get("pageTitle", page.title()),
                     body_excerpt=payload.get("bodyExcerpt", ""),
                 )
+            if not _is_likely_answer_text(answer_text):
+                last_answer_text = ""
+                stable_answer_polls = 0
             last_payload = payload
             page.wait_for_timeout(1_000)
 

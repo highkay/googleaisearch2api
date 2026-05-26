@@ -14,6 +14,72 @@ def test_clean_answer_text_removes_prompt_and_disclaimer() -> None:
     assert clean_answer_text(raw, query) == "The answer is here."
 
 
+def test_clean_answer_text_removes_you_said_prompt_echo() -> None:
+    query = "What is 2+2? Reply with only the number."
+    raw = f"You said:\n{query}\n4\nAI can make mistakes, so double-check responses"
+    assert clean_answer_text(raw, query) == "4"
+
+
+def test_clean_answer_text_rejects_exact_you_said_echo() -> None:
+    query = "Return a JSON object with current search results."
+    assert clean_answer_text(f"You said:\n{query}", query) == ""
+
+
+class _FakePage:
+    url = "https://www.google.com/search?udm=50"
+
+    def __init__(self) -> None:
+        self.waits: list[int] = []
+
+    def title(self) -> str:
+        return "Google Search"
+
+    def wait_for_timeout(self, timeout_ms: int) -> None:
+        self.waits.append(timeout_ms)
+
+
+class _PayloadRunner(GoogleAiRunner):
+    def __init__(self, payloads: list[dict]) -> None:
+        super().__init__()
+        self.payloads = payloads
+
+    def _ensure_not_blocked(self, page, stage: str) -> None:
+        return None
+
+    def _extract_payload(self, page, prompt: str) -> dict:
+        payload = self.payloads.pop(0)
+        payload["answerText"] = clean_answer_text(payload.get("answerText", ""), prompt)
+        return payload
+
+
+def test_wait_for_answer_skips_prompt_echo_and_accepts_ready_short_answer() -> None:
+    query = "This is a long prompt that used to trip the eighty character length gate."
+    runner = _PayloadRunner(
+        [
+            {
+                "answerText": f"You said:\n{query}",
+                "answerReady": False,
+                "citations": [],
+                "finalUrl": "https://www.google.com/search?udm=50",
+                "pageTitle": "Google Search",
+                "bodyExcerpt": f"You said:\n{query}",
+            },
+            {
+                "answerText": "READY\nAI can make mistakes, so double-check responses",
+                "answerReady": True,
+                "citations": [],
+                "finalUrl": "https://www.google.com/search?udm=50",
+                "pageTitle": "Google Search",
+                "bodyExcerpt": f"You said:\n{query}\nREADY",
+            },
+        ]
+    )
+
+    result = runner._wait_for_answer(_FakePage(), query, 5_000)
+
+    assert result.answer_text == "READY"
+
+
 def test_filter_citations_deduplicates_empty_entries() -> None:
     citations = filter_citations(
         [
