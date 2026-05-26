@@ -8,7 +8,7 @@ from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiRunner
 from googleaisearch2api.config import ServiceConfig, get_settings
 from googleaisearch2api.db import create_db_engine, create_session_factory, create_tables
 from googleaisearch2api.egress import probe_egress
-from googleaisearch2api.iplark import IplarkProbeResult, probe_iplark_ip
+from googleaisearch2api.iplark import IplarkProbeResult, probe_ipapi_is_ip, probe_iplark_ip
 from googleaisearch2api.logging import configure_logging
 from googleaisearch2api.proxy_sessions import (
     DEFAULT_STICKY_SUFFIX_TEMPLATE,
@@ -92,6 +92,7 @@ def _run_iplark(
     direct_config: ServiceConfig,
     *,
     min_quality_score: int,
+    risk_source: str,
 ) -> tuple[ProxySessionSnapshot, IplarkProbeResult | None]:
     if not snapshot.primary_ip:
         snapshot = store.mark_session_cooldown(
@@ -100,7 +101,10 @@ def _run_iplark(
         )
         return snapshot, None
     try:
-        result = probe_iplark_ip(snapshot.primary_ip, direct_config)
+        if risk_source == "ipapi":
+            result = probe_ipapi_is_ip(snapshot.primary_ip)
+        else:
+            result = probe_iplark_ip(snapshot.primary_ip, direct_config)
     except Exception as exc:
         store.record_event(
             proxy_session_id=snapshot.id,
@@ -199,6 +203,12 @@ def main() -> None:
     )
     parser.add_argument("--egress-checks", type=int, default=2, help="Egress checks per session.")
     parser.add_argument("--min-quality-score", type=int, default=70, help="IPLark score threshold.")
+    parser.add_argument(
+        "--risk-source",
+        choices=["auto", "ipapi"],
+        default="auto",
+        help="IP risk source. auto uses IPLark with fallback; ipapi skips IPLark browser probing.",
+    )
     parser.add_argument("--skip-egress", action="store_true", help="Skip egress probing.")
     parser.add_argument("--skip-iplark", action="store_true", help="Skip IPLark probing.")
     parser.add_argument("--skip-google-canary", action="store_true", help="Skip Google canary.")
@@ -264,6 +274,7 @@ def main() -> None:
                 snapshot,
                 direct_config,
                 min_quality_score=args.min_quality_score,
+                risk_source=args.risk_source,
             )
         if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
             records.append(
