@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from urllib.parse import urlparse
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -210,15 +211,19 @@ def _published_date_is_in_range(published_date: str, date_range: tuple[str, str]
     return start_date <= published_date <= end_date
 
 
+def _published_date_is_future(published_date: str) -> bool:
+    try:
+        return date.fromisoformat(published_date) > date.today()
+    except ValueError:
+        return False
+
+
 def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
     prompt_text = _normalize(prompt)
     if not _prompt_requests_json_results(prompt_text):
         return answer
 
     date_range = _extract_requested_date_range(prompt)
-    if date_range is None:
-        return answer
-
     try:
         payload = json.loads(answer.strip())
     except json.JSONDecodeError:
@@ -231,12 +236,16 @@ def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
     for item in payload["results"]:
         if isinstance(item, dict):
             published_date = str(item.get("published_date") or "").strip()
-            if _DATE_RE.match(published_date) and not _published_date_is_in_range(
-                published_date,
-                date_range,
-            ):
-                changed = True
-                continue
+            if _DATE_RE.match(published_date):
+                if _published_date_is_future(published_date):
+                    changed = True
+                    continue
+                if date_range is not None and not _published_date_is_in_range(
+                    published_date,
+                    date_range,
+                ):
+                    changed = True
+                    continue
         filtered_results.append(item)
 
     if not changed:
@@ -277,6 +286,8 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
         if not _DATE_RE.match(str(item.get("published_date") or "").strip()):
             return AnswerQuality(False, "answer JSON result has an invalid published_date")
         published_date = str(item.get("published_date") or "").strip()
+        if _published_date_is_future(published_date):
+            return AnswerQuality(False, "answer JSON result published_date is in the future")
         if date_range is not None and not _published_date_is_in_range(
             published_date,
             date_range,

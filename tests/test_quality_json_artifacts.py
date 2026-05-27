@@ -37,3 +37,16 @@ def test_rejects_empty_json_results() -> None:
 
     assert quality.ok is False
     assert quality.reason == "answer JSON results list is empty"
+
+
+def test_rejects_json_result_with_future_published_date() -> None:
+    quality = assess_google_answer_quality(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。最多返回 5 条',
+        '{"results":[{"title":"未来新闻","content":"尚未发生的内容。","source":"财联社",'
+        '"url":"https://example.com/future","published_date":"2999-01-01"}]}',
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer JSON result published_date is in the future"

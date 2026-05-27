@@ -137,3 +137,19 @@ def test_normalize_answer_for_prompt_filters_out_of_range_json_results() -> None
         '"source": "财联社", "url": "https://example.com/today", '
         '"published_date": "2026-05-27"}]}'
     )
+
+
+def test_normalize_answer_for_prompt_filters_future_json_results() -> None:
+    answer = normalize_answer_for_prompt(
+        '只返回一个 JSON 对象，输出格式固定为 {"results":[]}',
+        '{"results":[{"title":"未来新闻","content":"尚未发生的内容。","source":"财联社",'
+        '"url":"https://example.com/future","published_date":"2999-01-01"},'
+        '{"title":"已发布新闻","content":"已发生的内容。","source":"新浪财经",'
+        '"url":"https://example.com/past","published_date":"2020-01-01"}]}',
+    )
+
+    assert answer == (
+        '{"results": [{"title": "已发布新闻", "content": "已发生的内容。", '
+        '"source": "新浪财经", "url": "https://example.com/past", '
+        '"published_date": "2020-01-01"}]}'
+    )
