@@ -109,3 +109,16 @@ def test_rejects_json_results_with_duplicate_urls() -> None:
 
     assert quality.ok is False
     assert quality.reason == "answer JSON result URL is duplicated"
+
+
+def test_rejects_json_result_with_non_specific_url() -> None:
+    quality = assess_google_answer_quality(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。最多返回 5 条',
+        '{"results":[{"title":"汇总页","content":"只给出了媒体首页。","source":"财联社",'
+        '"url":"https://www.cls.cn/","published_date":"2026-05-27"}]}',
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer JSON result URL is not specific"

@@ -77,6 +77,26 @@ cls.cn
     )
 
 
+def test_extract_duck_answer_text_removes_leading_query_before_inline_items() -> None:
+    answer = extract_duck_answer_text(
+        """
+Duck.ai
+User request:
+台积电 3nm 涨价 最多返回 5 条。
+台积电 3nm 涨价 AI A股 受益 供应链 半导体 受益 股 相关新闻 2024 2025
+台积电，突传重磅！ — 证券时报网 — 2024-07-07 — https://www.stcn.com/article/detail/1250957.html
+为什么相关：报道引用机构供应链访查，称台积电将对3nm家族涨价。
+""",
+        "User request:\n台积电 3nm 涨价 最多返回 5 条。",
+    )
+
+    assert answer == (
+        "台积电，突传重磅！ — 证券时报网 — 2024-07-07 — "
+        "https://www.stcn.com/article/detail/1250957.html\n"
+        "为什么相关：报道引用机构供应链访查，称台积电将对3nm家族涨价。"
+    )
+
+
 def test_extract_duck_answer_text_keeps_only_json_results_for_json_prompt() -> None:
     answer = extract_duck_answer_text(
         """

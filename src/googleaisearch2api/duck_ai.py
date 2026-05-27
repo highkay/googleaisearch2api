@@ -57,6 +57,8 @@ Use one concrete publisher name in each source field, matching the URL host.
 Do not combine multiple publishers, reprints, or aggregate labels in source fields.
 Do not include the raw search query, standalone hostnames, raw search result listings,
 or duplicate URLs.
+Use one specific page URL for each result; do not use homepages, topic pages, or
+date ranges as publication dates.
 Do not output placeholder URLs such as example.com.
 If you cannot verify a real source URL, return an empty results list instead of invented results.
 
@@ -356,15 +358,26 @@ def _strip_leading_search_query_line(lines: list[str]) -> list[str]:
     if len(lines) < 2:
         return lines
     first_line = lines[0]
-    next_line = lines[1]
-    if (
-        len(first_line) <= 140
-        and " " in first_line
-        and not re.search(r"https?://|[：:。！？!?]", first_line)
-        and re.search(r"^(标题|Title|来源|Source|[-*\d]+[.)、])", next_line)
+    following_lines = lines[1:4]
+    if _looks_like_search_query_line(first_line) and any(
+        _looks_like_answer_item_start(line) for line in following_lines
     ):
         return lines[1:]
     return lines
+
+
+def _looks_like_search_query_line(line: str) -> bool:
+    return (
+        len(line) <= 140
+        and " " in line
+        and not re.search(r"https?://|[：:。！？!?—–-]", line)
+    )
+
+
+def _looks_like_answer_item_start(line: str) -> bool:
+    if re.search(r"https?://", line):
+        return True
+    return bool(re.search(r"^(标题|Title|来源|Source|[-*\d]+[.)、])", line))
 
 
 def _prompt_requests_json_results(prompt: str) -> bool:

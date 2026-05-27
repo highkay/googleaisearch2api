@@ -18,6 +18,11 @@ _JSON_RESULTS_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_YEAR_DATE_RANGE_RE = re.compile(
+    r"\b\d{4}(?:-\d{2}-\d{2})?\s*(?:至|到|~|—|–|\s+-\s+|through|to)\s*"
+    r"\d{4}(?:-\d{2}-\d{2})?\b",
+    re.IGNORECASE,
+)
 _DATE_RANGE_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2})\s*(?:至|到|~|—|–|\s+-\s+|through|to)\s*"
     r"(\d{4}-\d{2}-\d{2})",
@@ -164,6 +169,12 @@ _COMPOSITE_JSON_SOURCE_LABEL_SEPARATORS = (
     "｜",
     "、",
 )
+_AGGREGATE_RAW_SOURCE_LABEL_PHRASES = (
+    *_AGGREGATE_JSON_SOURCE_LABEL_PHRASES,
+    "多家",
+    "汇编",
+    "专题",
+)
 _SEARCH_RESULTS_TAIL_MARKERS = {
     "search results",
     "搜索结果",
@@ -267,6 +278,12 @@ def _is_usable_result_url(value: object) -> bool:
     return True
 
 
+def _is_specific_result_url(value: object) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    path = parsed.path.strip("/")
+    return bool(path or parsed.query)
+
+
 def _extract_raw_urls(answer: str) -> list[str]:
     urls: list[str] = []
     for match in _RAW_URL_RE.finditer(answer):
@@ -276,12 +293,53 @@ def _extract_raw_urls(answer: str) -> list[str]:
     return urls
 
 
+def _contains_non_specific_raw_url(answer: str) -> bool:
+    return any(not _is_specific_result_url(url) for url in _extract_raw_urls(answer))
+
+
 def _contains_duplicate_raw_url(answer: str) -> bool:
     seen: set[str] = set()
     for url in _extract_raw_urls(answer):
         if url in seen:
             return True
         seen.add(url)
+    return False
+
+
+def _iter_raw_source_labels(answer: str) -> list[str]:
+    labels: list[str] = []
+    for raw_line in answer.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(("来源：", "来源:")):
+            labels.append(line.split("：", 1)[-1].split(":", 1)[-1].strip())
+            continue
+        if "http://" not in line and "https://" not in line:
+            continue
+        parts = re.split(r"\s+[—–-]\s+", line)
+        if len(parts) >= 4:
+            labels.append(parts[1].strip())
+    return labels
+
+
+def _contains_aggregate_raw_source_label(answer: str) -> bool:
+    for source in _iter_raw_source_labels(answer):
+        normalized = _normalize(source)
+        if any(phrase in normalized for phrase in _AGGREGATE_RAW_SOURCE_LABEL_PHRASES):
+            return True
+        if any(separator in source for separator in _COMPOSITE_JSON_SOURCE_LABEL_SEPARATORS):
+            return True
+    return False
+
+
+def _contains_non_specific_raw_date(answer: str) -> bool:
+    for raw_line in answer.splitlines():
+        line = raw_line.strip()
+        if ("http://" in line or "https://" in line) and (
+            _YEAR_DATE_RANGE_RE.search(line) or "多篇" in line
+        ):
+            return True
     return False
 
 
@@ -391,6 +449,8 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
         if not _is_usable_result_url(item.get("url")):
             return AnswerQuality(False, "answer JSON result has an unusable URL")
         url = str(item.get("url") or "").strip()
+        if not _is_specific_result_url(url):
+            return AnswerQuality(False, "answer JSON result URL is not specific")
         if url in seen_urls:
             return AnswerQuality(False, "answer JSON result URL is duplicated")
         seen_urls.add(url)
@@ -457,6 +517,17 @@ def assess_search_answer_quality(
 
     if _standalone_hostname_count(raw_answer) >= 2:
         return AnswerQuality(False, "answer contains standalone hostnames")
+
+    if _contains_aggregate_raw_source_label(raw_answer):
+        return AnswerQuality(False, "answer contains aggregate source labels")
+
+    if _contains_non_specific_raw_date(raw_answer):
+        return AnswerQuality(False, "answer contains non-specific publication dates")
+
+    if _prompt_requests_multiple_items(prompt_text) and _contains_non_specific_raw_url(
+        raw_answer
+    ):
+        return AnswerQuality(False, "answer contains non-specific URLs")
 
     if _contains_duplicate_raw_url(raw_answer):
         return AnswerQuality(False, "answer contains duplicate URLs")

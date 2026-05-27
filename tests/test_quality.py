@@ -112,6 +112,45 @@ def test_rejects_raw_answer_with_duplicate_urls() -> None:
     assert quality.reason == "answer contains duplicate URLs"
 
 
+def test_rejects_raw_answer_with_aggregate_source_label() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+台积电3nm产能与涨价相关报道汇总 — 财联社 / 多家财经媒体汇编 — 2024-07-08 — https://www.cls.cn/detail/1726012
+为什么相关：来源字段不是单一具体发布方。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains aggregate source labels"
+
+
+def test_rejects_raw_answer_with_non_specific_publication_date() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+台积电3nm产能与涨价相关报道汇总 — 财联社 — 2024–2026（多篇） — https://www.cls.cn/detail/1726012
+为什么相关：日期不是单篇新闻的发布时间。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains non-specific publication dates"
+
+
+def test_rejects_raw_answer_with_non_specific_url_for_result_list() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+台积电3nm产能与涨价相关报道 — 财联社 — 2024-07-08 — https://www.cls.cn/
+为什么相关：首页不是单篇报道链接。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains non-specific URLs"
+
+
 def test_rejects_malformed_stock_code_for_stock_prompts() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条",
