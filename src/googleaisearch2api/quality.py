@@ -90,6 +90,23 @@ _ALLOWED_GOOGLE_SOURCE_HOSTS = {
     "patents.google.com",
     "scholar.google.com",
 }
+_PLACEHOLDER_RESULT_HOSTS = {
+    "0.0.0.0",
+    "127.0.0.1",
+    "::1",
+    "example.com",
+    "example.net",
+    "example.org",
+    "localhost",
+}
+_PLACEHOLDER_RESULT_HOST_SUFFIXES = (
+    ".example.com",
+    ".example.net",
+    ".example.org",
+    ".invalid",
+    ".localhost",
+    ".test",
+)
 _GENERIC_CLARIFICATION_PHRASES = (
     "what would you like to know",
     "could you please clarify",
@@ -111,6 +128,21 @@ _STOCK_PROMPT_PHRASES = (
     "证券",
     "ticker",
     "stock",
+)
+_GENERIC_JSON_SOURCE_LABEL_PHRASES = (
+    "综合行业报道",
+    "综合行业资讯",
+    "综合报道",
+    "综合消息",
+    "行业报道",
+    "行业快报",
+    "行业研究报告",
+    "产业研究报告",
+    "市场分析",
+    "战略观察",
+    "research report",
+    "market analysis",
+    "industry report",
 )
 
 
@@ -184,12 +216,21 @@ def _is_usable_result_url(value: object) -> bool:
     parsed = urlparse(str(value or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return False
-    host = parsed.hostname or ""
+    host = (parsed.hostname or "").casefold()
+    if host in _PLACEHOLDER_RESULT_HOSTS:
+        return False
+    if any(host.endswith(suffix) for suffix in _PLACEHOLDER_RESULT_HOST_SUFFIXES):
+        return False
     if host in _GOOGLE_UTILITY_HOSTS:
         return False
     if host.endswith(".google.com") and host not in _ALLOWED_GOOGLE_SOURCE_HOSTS:
         return False
     return True
+
+
+def _is_generic_json_source_label(value: object) -> bool:
+    source = _normalize(str(value or ""))
+    return any(phrase in source for phrase in _GENERIC_JSON_SOURCE_LABEL_PHRASES)
 
 
 def _extract_requested_date_range(prompt: str) -> tuple[str, str] | None:
@@ -299,6 +340,8 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
         source = str(item.get("source") or "").strip()
         if _INTERNAL_SOURCE_LABEL_RE.match(source):
             return AnswerQuality(False, "answer JSON result source is an internal label")
+        if _is_generic_json_source_label(source):
+            return AnswerQuality(False, "answer JSON result source is generic")
 
     return AnswerQuality(True)
 

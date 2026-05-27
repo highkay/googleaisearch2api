@@ -82,7 +82,9 @@ def test_accepts_valid_json_results_without_citations() -> None:
         "只返回一个 JSON 对象，输出格式固定为 "
         '{"results":[{"title":"","content":"","source":"","url":"",'
         '"published_date":"YYYY-MM-DD"}]}',
-        '{"results":[{"title":"新闻标题","content":"直接相关内容","source":"东方财富","url":"https://example.com/news","published_date":"2026-05-27"}]}',
+        '{"results":[{"title":"新闻标题","content":"直接相关内容","source":"东方财富",'
+        '"url":"https://finance.eastmoney.com/a/202605270001.html",'
+        '"published_date":"2026-05-27"}]}',
     )
 
     assert quality.ok is True
@@ -115,7 +117,8 @@ def test_rejects_json_result_outside_requested_date_range() -> None:
         "时间范围必须限制在 2026-05-27 至 2026-05-27。只返回一个 JSON 对象，"
         '输出格式固定为 {"results":[]}',
         '{"results":[{"title":"唯特偶公告","content":"一季度报告。","source":"新浪财经",'
-        '"url":"https://example.com/news","published_date":"2026-04-22"}]}',
+        '"url":"https://finance.sina.com.cn/stock/2026-04-22/doc-news.shtml",'
+        '"published_date":"2026-04-22"}]}',
     )
 
     assert quality.ok is False
@@ -127,14 +130,16 @@ def test_normalize_answer_for_prompt_filters_out_of_range_json_results() -> None
         "时间范围必须限制在 2026-05-27 至 2026-05-27。只返回一个 JSON 对象，"
         '输出格式固定为 {"results":[]}',
         '{"results":[{"title":"旧公告","content":"一季度报告。","source":"新浪财经",'
-        '"url":"https://example.com/old","published_date":"2026-04-22"},'
+        '"url":"https://finance.sina.com.cn/stock/2026-04-22/doc-old.shtml",'
+        '"published_date":"2026-04-22"},'
         '{"title":"当天新闻","content":"当天事件。","source":"财联社",'
-        '"url":"https://example.com/today","published_date":"2026-05-27"}]}',
+        '"url":"https://www.cls.cn/detail/202605270001",'
+        '"published_date":"2026-05-27"}]}',
     )
 
     assert answer == (
         '{"results": [{"title": "当天新闻", "content": "当天事件。", '
-        '"source": "财联社", "url": "https://example.com/today", '
+        '"source": "财联社", "url": "https://www.cls.cn/detail/202605270001", '
         '"published_date": "2026-05-27"}]}'
     )
 
@@ -143,13 +148,15 @@ def test_normalize_answer_for_prompt_filters_future_json_results() -> None:
     answer = normalize_answer_for_prompt(
         '只返回一个 JSON 对象，输出格式固定为 {"results":[]}',
         '{"results":[{"title":"未来新闻","content":"尚未发生的内容。","source":"财联社",'
-        '"url":"https://example.com/future","published_date":"2999-01-01"},'
+        '"url":"https://www.cls.cn/detail/299901010001","published_date":"2999-01-01"},'
         '{"title":"已发布新闻","content":"已发生的内容。","source":"新浪财经",'
-        '"url":"https://example.com/past","published_date":"2020-01-01"}]}',
+        '"url":"https://finance.sina.com.cn/stock/2020-01-01/doc-news.shtml",'
+        '"published_date":"2020-01-01"}]}',
     )
 
     assert answer == (
         '{"results": [{"title": "已发布新闻", "content": "已发生的内容。", '
-        '"source": "新浪财经", "url": "https://example.com/past", '
+        '"source": "新浪财经", '
+        '"url": "https://finance.sina.com.cn/stock/2020-01-01/doc-news.shtml", '
         '"published_date": "2020-01-01"}]}'
     )

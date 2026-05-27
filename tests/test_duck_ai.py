@@ -8,6 +8,7 @@ def test_build_duck_search_prompt_forces_direct_search_answer() -> None:
     assert "Do not ask whether to search." in prompt
     assert "only include ticker symbols you are confident are real" in prompt
     assert "real six-digit A-share codes" in prompt
+    assert "Do not output placeholder URLs such as example.com." in prompt
     assert "台积电 3nm 涨价 最多返回 5 条" in prompt
 
 
@@ -54,14 +55,15 @@ Return JSON with results.
 唯特偶 A股 股票代码 上市公司 2026-05-27
 money.finance.sina.com.cn
 quote.eastmoney.com
-{"results":[{"title":"唯特偶","content":"股票代码为301319。","source":"新浪财经","url":"https://example.com","published_date":"2026-05-27"}]}
+{"results":[{"title":"唯特偶","content":"股票代码为301319。","source":"新浪财经","url":"https://finance.sina.com.cn/stock/2026-05-27/doc-news.shtml","published_date":"2026-05-27"}]}
 """,
         "User request:\nReturn JSON with results.",
     )
 
     assert answer == (
         '{"results": [{"title": "唯特偶", "content": "股票代码为301319。", '
-        '"source": "新浪财经", "url": "https://example.com", '
+        '"source": "新浪财经", '
+        '"url": "https://finance.sina.com.cn/stock/2026-05-27/doc-news.shtml", '
         '"published_date": "2026-05-27"}]}'
     )
 

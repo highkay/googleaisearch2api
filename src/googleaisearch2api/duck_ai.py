@@ -44,6 +44,9 @@ If the user asks for a fixed output format, follow it exactly.
 For stock answers, only include ticker symbols you are confident are real.
 For A-share answers, use only real six-digit A-share codes; omit uncertain codes.
 Do not output placeholder codes such as 0x, N/A, or unknown.
+For source URLs, use only real public web pages from named sources.
+Do not output placeholder URLs such as example.com.
+If you cannot verify a real source URL, return an empty results list instead of invented results.
 
 User request:
 {prompt}"""
