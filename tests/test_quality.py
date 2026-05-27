@@ -350,6 +350,49 @@ def test_accepts_valid_json_results_without_citations() -> None:
     assert quality.ok is True
 
 
+def test_accepts_embedded_json_results_object() -> None:
+    quality = assess_google_answer_quality(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}',
+        'json\n{"results":[{"title":"新闻标题","content":"直接相关内容",'
+        '"source":"东方财富","url":"https://finance.eastmoney.com/a/202605270001.html",'
+        '"published_date":"2026-05-27"}]}\nUse code with caution.',
+    )
+
+    assert quality.ok is True
+
+
+def test_normalize_answer_for_prompt_extracts_embedded_json_results_object() -> None:
+    answer = normalize_answer_for_prompt(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}',
+        'json\n{"results":[{"title":"新闻标题","content":"直接相关内容",'
+        '"source":"东方财富","url":"https://finance.eastmoney.com/a/202605270001.html",'
+        '"published_date":"2026-05-27"}]}\nUse code with caution.',
+    )
+
+    assert answer == (
+        '{"results": [{"title": "新闻标题", "content": "直接相关内容", '
+        '"source": "东方财富", '
+        '"url": "https://finance.eastmoney.com/a/202605270001.html", '
+        '"published_date": "2026-05-27"}]}'
+    )
+
+
+def test_accepts_empty_json_results_when_prompt_allows_empty() -> None:
+    quality = assess_google_answer_quality(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。若找不到足够直接相关的结果，返回 '
+        '{"results": []}。',
+        '{"results":[]}',
+    )
+
+    assert quality.ok is True
+
+
 def test_rejects_non_json_when_prompt_requires_json_results() -> None:
     quality = assess_google_answer_quality(
         '只返回一个 JSON 对象，输出格式固定为 {"results":[]}',
@@ -402,6 +445,23 @@ def test_normalize_answer_for_prompt_filters_out_of_range_json_results() -> None
         '"source": "财联社", "url": "https://www.cls.cn/detail/202605270001", '
         '"published_date": "2026-05-27"}]}'
     )
+
+
+def test_normalize_all_out_of_range_json_results_to_allowed_empty_results() -> None:
+    prompt = (
+        "时间范围必须限制在 2026-05-27 至 2026-05-27。只返回一个 JSON 对象，"
+        '输出格式固定为 {"results":[]}。若找不到足够直接相关的结果，返回 '
+        '{"results": []}。'
+    )
+    answer = normalize_answer_for_prompt(
+        prompt,
+        '{"results":[{"title":"旧公告","content":"一季度报告。","source":"新浪财经",'
+        '"url":"https://finance.sina.com.cn/stock/2026-04-22/doc-old.shtml",'
+        '"published_date":"2026-04-22"}]}',
+    )
+
+    assert answer == '{"results": []}'
+    assert assess_google_answer_quality(prompt, answer).ok is True
 
 
 def test_normalize_answer_for_prompt_filters_future_json_results() -> None:

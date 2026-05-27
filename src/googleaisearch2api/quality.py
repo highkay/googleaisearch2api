@@ -5,6 +5,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 from urllib.parse import unquote, urlparse
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -15,6 +16,16 @@ _MULTI_ITEM_REQUEST_RE = re.compile(
 )
 _JSON_RESULTS_REQUEST_RE = re.compile(
     r"json\s*(对象|object)|\"results\"|输出格式固定|return\s+(only\s+)?a\s+json",
+    re.IGNORECASE,
+)
+_EMPTY_JSON_RESULTS_RE = re.compile(
+    r"\"results\"\s*:\s*\[\s*\]|empty\s+results(?:\s+list)?",
+    re.IGNORECASE,
+)
+_NO_RESULT_CONDITION_RE = re.compile(
+    r"找不到|未找到|没有|无足够|不足够|不足|没有足够|"
+    r"no\s+(?:directly\s+)?(?:relevant\s+)?results|no\s+results|"
+    r"if\s+(?:you\s+)?(?:cannot|can't|do\s+not)\s+find|not\s+found",
     re.IGNORECASE,
 )
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -363,6 +374,57 @@ def _prompt_requests_multiple_items(prompt_text: str) -> bool:
 
 def _prompt_requests_json_results(prompt_text: str) -> bool:
     return bool(_JSON_RESULTS_REQUEST_RE.search(prompt_text)) and "results" in prompt_text
+
+
+def _prompt_allows_empty_json_results(prompt: str) -> bool:
+    return bool(
+        _EMPTY_JSON_RESULTS_RE.search(prompt)
+        and _NO_RESULT_CONDITION_RE.search(prompt)
+    )
+
+
+def _iter_json_object_candidates(text: str) -> Sequence[str]:
+    candidates: list[str] = []
+    for start_index, char in enumerate(text):
+        if char != "{":
+            continue
+
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start_index, len(text)):
+            current = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    in_string = False
+                continue
+
+            if current == '"':
+                in_string = True
+            elif current == "{":
+                depth += 1
+            elif current == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append(text[start_index : index + 1])
+                    break
+
+    return candidates
+
+
+def _extract_json_results_payload(answer: str) -> tuple[dict[str, Any], str] | None:
+    for candidate in _iter_json_object_candidates(answer.strip()):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+            return payload, candidate
+    return None
 
 
 def _is_usable_result_url(value: object) -> bool:
@@ -722,15 +784,13 @@ def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
         return _normalize_raw_answer_for_prompt(prompt_text, answer)
 
     date_range = _extract_requested_date_range(prompt)
-    try:
-        payload = json.loads(answer.strip())
-    except json.JSONDecodeError:
+    parsed = _extract_json_results_payload(answer)
+    if parsed is None:
         return answer
-    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-        return answer
+    payload, candidate = parsed
 
     filtered_results: list[object] = []
-    changed = False
+    changed = candidate != answer.strip()
     for item in payload["results"]:
         if isinstance(item, dict):
             published_date = str(item.get("published_date") or "").strip()
@@ -756,18 +816,17 @@ def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
 
 def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
     prompt_text = _normalize(prompt)
-    try:
-        payload = json.loads(answer.strip())
-    except json.JSONDecodeError:
+    parsed = _extract_json_results_payload(answer)
+    if parsed is None:
         return AnswerQuality(False, "answer is not valid JSON for requested results")
-
-    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-        return AnswerQuality(False, "answer JSON does not contain a results list")
+    payload, candidate = parsed
 
     if not payload["results"]:
+        if _prompt_allows_empty_json_results(prompt):
+            return AnswerQuality(True)
         return AnswerQuality(False, "answer JSON results list is empty")
 
-    if _contains_malformed_stock_code(prompt_text, answer):
+    if _contains_malformed_stock_code(prompt_text, candidate):
         return AnswerQuality(False, "answer contains malformed stock code")
 
     date_range = _extract_requested_date_range(prompt)
