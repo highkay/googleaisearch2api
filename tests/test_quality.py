@@ -1,4 +1,4 @@
-from googleaisearch2api.quality import assess_google_answer_quality
+from googleaisearch2api.quality import assess_google_answer_quality, normalize_answer_for_prompt
 from googleaisearch2api.schemas import Citation
 
 
@@ -61,3 +61,32 @@ def test_rejects_json_result_with_internal_source_label() -> None:
 
     assert quality.ok is False
     assert quality.reason == "answer JSON result source is an internal label"
+
+
+def test_rejects_json_result_outside_requested_date_range() -> None:
+    quality = assess_google_answer_quality(
+        "时间范围必须限制在 2026-05-27 至 2026-05-27。只返回一个 JSON 对象，"
+        '输出格式固定为 {"results":[]}',
+        '{"results":[{"title":"唯特偶公告","content":"一季度报告。","source":"新浪财经",'
+        '"url":"https://example.com/news","published_date":"2026-04-22"}]}',
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer JSON result published_date is outside requested date range"
+
+
+def test_normalize_answer_for_prompt_filters_out_of_range_json_results() -> None:
+    answer = normalize_answer_for_prompt(
+        "时间范围必须限制在 2026-05-27 至 2026-05-27。只返回一个 JSON 对象，"
+        '输出格式固定为 {"results":[]}',
+        '{"results":[{"title":"旧公告","content":"一季度报告。","source":"新浪财经",'
+        '"url":"https://example.com/old","published_date":"2026-04-22"},'
+        '{"title":"当天新闻","content":"当天事件。","source":"财联社",'
+        '"url":"https://example.com/today","published_date":"2026-05-27"}]}',
+    )
+
+    assert answer == (
+        '{"results": [{"title": "当天新闻", "content": "当天事件。", '
+        '"source": "财联社", "url": "https://example.com/today", '
+        '"published_date": "2026-05-27"}]}'
+    )

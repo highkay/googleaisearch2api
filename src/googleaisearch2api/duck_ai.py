@@ -25,6 +25,15 @@ DUCK_RATE_LIMIT_MARKERS = [
     "try again later",
     "please try again later",
 ]
+FOLLOW_UP_TAIL_MARKERS = [
+    "\u5982\u679c\u60a8\u60f3\u8fdb\u4e00\u6b65\u4e86\u89e3",
+    "\u5982\u679c\u4f60\u60f3\u8fdb\u4e00\u6b65\u4e86\u89e3",
+    "\u82e5\u9700\u6211",
+    "\u5982\u9700\u6211",
+    "\u5982\u679c\u9700\u8981\uff0c\u6211\u53ef\u4ee5",
+    "Would you like me to",
+    "I can also help",
+]
 DUCK_SEARCH_PROMPT_TEMPLATE = """You are being used as a search answer engine.
 Answer the user's request directly with concrete, useful findings.
 Do not return only search suggestions.
@@ -315,7 +324,7 @@ def extract_duck_answer_text(body_text: str, prompt: str, *, limit: int = 3000) 
         if json_answer:
             return json_answer[:limit]
 
-    return answer[:limit]
+    return _strip_follow_up_tail(answer)[:limit]
 
 
 def _prompt_requests_json_results(prompt: str) -> bool:
@@ -359,6 +368,17 @@ def _extract_json_results_object(text: str) -> str:
                     break
 
     return ""
+
+
+def _strip_follow_up_tail(answer: str) -> str:
+    end_index: int | None = None
+    for marker in FOLLOW_UP_TAIL_MARKERS:
+        marker_index = answer.find(marker)
+        if marker_index >= 0 and (end_index is None or marker_index < end_index):
+            end_index = marker_index
+    if end_index is None:
+        return answer
+    return answer[:end_index].strip()
 
 
 def _normalize_text(value: str) -> str:

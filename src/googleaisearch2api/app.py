@@ -58,13 +58,13 @@ from .proxy_sessions import (
     google_block_has_ip_mismatch,
     parse_google_block_ips,
 )
-from .quality import assess_google_answer_quality
+from .quality import assess_search_answer_quality, normalize_answer_for_prompt
 from .query_adapter import (
     build_prompt_from_query_request,
     build_query_response,
     iter_query_stream,
 )
-from .schemas import ChatCompletionsRequest, QueryRequest, ResponsesRequest
+from .schemas import ChatCompletionsRequest, GoogleAiResult, QueryRequest, ResponsesRequest
 from .store import ConfigStore
 
 security = HTTPBearer(auto_error=False)
@@ -80,6 +80,13 @@ class Services:
     duck_circuit: DuckAiCircuitBreaker
     proxy_session_store: ProxySessionStore
     proxy_selector: ProxySessionSelector
+
+
+def _normalize_result_for_prompt(prompt: str, result: GoogleAiResult) -> GoogleAiResult:
+    normalized_answer = normalize_answer_for_prompt(prompt, result.answer_text)
+    if normalized_answer == result.answer_text:
+        return result
+    return result.model_copy(update={"answer_text": normalized_answer})
 
 
 class DuckAiCircuitBreaker:
@@ -305,8 +312,9 @@ def _run_google_ai(
                 prompt,
                 blocked_retry_count=0 if selection is not None else None,
             )
+            result = _normalize_result_for_prompt(prompt, result)
             duration_ms = int((time.perf_counter() - started_at) * 1000)
-            quality = assess_google_answer_quality(prompt, result.answer_text, result.citations)
+            quality = assess_search_answer_quality(prompt, result.answer_text, result.citations)
             if not quality.ok:
                 message = f"Google answer failed quality check: {quality.reason}"
                 services.store.finish_request_error(request_id, message, duration_ms)
@@ -495,7 +503,13 @@ def _run_duck_ai(
             prompt,
             blocked_retry_count=0,
         )
+        result = _normalize_result_for_prompt(prompt, result)
         duration_ms = int((time.perf_counter() - started_at) * 1000)
+        quality = assess_search_answer_quality(prompt, result.answer_text, result.citations)
+        if not quality.ok:
+            message = f"Duck.ai answer failed quality check: {quality.reason}"
+            services.store.finish_request_error(request_id, message, duration_ms)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
         services.store.finish_request_success(request_id, result, duration_ms)
         services.duck_circuit.record_success()
         if selection is not None:
@@ -504,6 +518,8 @@ def _run_duck_ai(
                 engine="duck",
             )
         return effective_config, model_name, request_id, result
+    except HTTPException:
+        raise
     except BrowserPoolSaturatedError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_error(request_id, str(exc), duration_ms)

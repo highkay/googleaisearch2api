@@ -62,3 +62,16 @@ quote.eastmoney.com
         '"source": "新浪财经", "url": "https://example.com", '
         '"published_date": "2026-05-27"}]}'
     )
+
+
+def test_extract_duck_answer_text_removes_follow_up_tail() -> None:
+    answer = extract_duck_answer_text(
+        """
+Duck.ai
+台积电 3nm 涨价可能利好半导体设备和材料供应链。
+若需我把每家公司的最新财务数据补充成表格，请告诉我。
+""",
+        "台积电 3nm 涨价 最多返回 5 条",
+    )
+
+    assert answer == "台积电 3nm 涨价可能利好半导体设备和材料供应链。"

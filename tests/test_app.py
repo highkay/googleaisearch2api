@@ -385,7 +385,14 @@ def test_query_auto_falls_back_to_duck_when_google_list_answer_is_too_short(
             test_app,
             answer_text="台积电 3nm 涨价将推动半导体供应链重估。",
         )
-        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback list.")
+        duck_answer = (
+            "1. 中微公司：刻蚀设备受益于先进制程扩产和国产替代。"
+            "2. 北方华创：薄膜沉积、刻蚀和清洗设备覆盖关键环节。"
+            "3. 沪硅产业：大硅片需求可能随先进制程供应链景气提升。"
+            "4. 雅克科技：电子特气和前驱体材料与晶圆制造资本开支相关。"
+            "5. 华海清科：CMP 设备环节受益于先进节点工艺复杂度提升。"
+        )
+        duck_pool = _install_fake_duck_pool(test_app, answer_text=duck_answer)
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -397,7 +404,7 @@ def test_query_auto_falls_back_to_duck_when_google_list_answer_is_too_short(
         recent = test_app.state.services.store.list_recent_requests(limit=2)
 
     assert response.status_code == 200
-    assert response.json()["answer"] == "Duck fallback list."
+    assert response.json()["answer"] == duck_answer
     assert google_pool.prompts == [
         "User request:\n台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条"
     ]

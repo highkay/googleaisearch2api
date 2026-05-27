@@ -17,6 +17,12 @@ _JSON_RESULTS_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATE_RANGE_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})\s*(?:至|到|~|—|–|\s+-\s+|through|to)\s*"
+    r"(\d{4}-\d{2}-\d{2})",
+    re.IGNORECASE,
+)
+_SINGLE_DAY_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*(?:当天|当日)")
 _INTERNAL_SOURCE_LABEL_RE = re.compile(r"^[A-Za-z]+Result$")
 _GOOGLE_UTILITY_HOSTS = {
     "accounts.google.com",
@@ -85,7 +91,63 @@ def _is_usable_result_url(value: object) -> bool:
     return True
 
 
-def _assess_json_results_answer(answer: str) -> AnswerQuality:
+def _extract_requested_date_range(prompt: str) -> tuple[str, str] | None:
+    range_match = _DATE_RANGE_RE.search(prompt)
+    if range_match:
+        start_date, end_date = range_match.groups()
+        return (start_date, end_date) if start_date <= end_date else (end_date, start_date)
+
+    single_day_match = _SINGLE_DAY_RE.search(prompt)
+    if single_day_match:
+        date = single_day_match.group(1)
+        return date, date
+
+    return None
+
+
+def _published_date_is_in_range(published_date: str, date_range: tuple[str, str]) -> bool:
+    start_date, end_date = date_range
+    return start_date <= published_date <= end_date
+
+
+def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
+    prompt_text = _normalize(prompt)
+    if not _prompt_requests_json_results(prompt_text):
+        return answer
+
+    date_range = _extract_requested_date_range(prompt)
+    if date_range is None:
+        return answer
+
+    try:
+        payload = json.loads(answer.strip())
+    except json.JSONDecodeError:
+        return answer
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return answer
+
+    filtered_results: list[object] = []
+    changed = False
+    for item in payload["results"]:
+        if isinstance(item, dict):
+            published_date = str(item.get("published_date") or "").strip()
+            if _DATE_RE.match(published_date) and not _published_date_is_in_range(
+                published_date,
+                date_range,
+            ):
+                changed = True
+                continue
+        filtered_results.append(item)
+
+    if not changed:
+        return answer
+
+    normalized_payload = dict(payload)
+    normalized_payload["results"] = filtered_results
+    return json.dumps(normalized_payload, ensure_ascii=False)
+
+
+def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
     try:
         payload = json.loads(answer.strip())
     except json.JSONDecodeError:
@@ -94,6 +156,7 @@ def _assess_json_results_answer(answer: str) -> AnswerQuality:
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         return AnswerQuality(False, "answer JSON does not contain a results list")
 
+    date_range = _extract_requested_date_range(prompt)
     for item in payload["results"]:
         if not isinstance(item, dict):
             return AnswerQuality(False, "answer JSON result item is not an object")
@@ -104,6 +167,15 @@ def _assess_json_results_answer(answer: str) -> AnswerQuality:
             return AnswerQuality(False, "answer JSON result has an unusable URL")
         if not _DATE_RE.match(str(item.get("published_date") or "").strip()):
             return AnswerQuality(False, "answer JSON result has an invalid published_date")
+        published_date = str(item.get("published_date") or "").strip()
+        if date_range is not None and not _published_date_is_in_range(
+            published_date,
+            date_range,
+        ):
+            return AnswerQuality(
+                False,
+                "answer JSON result published_date is outside requested date range",
+            )
         source = str(item.get("source") or "").strip()
         if _INTERNAL_SOURCE_LABEL_RE.match(source):
             return AnswerQuality(False, "answer JSON result source is an internal label")
@@ -111,7 +183,7 @@ def _assess_json_results_answer(answer: str) -> AnswerQuality:
     return AnswerQuality(True)
 
 
-def assess_google_answer_quality(
+def assess_search_answer_quality(
     prompt: str,
     answer: str,
     citations: Sequence[object] | None = None,
@@ -137,7 +209,7 @@ def assess_google_answer_quality(
         return AnswerQuality(False, "answer is a generic clarification")
 
     if _prompt_requests_json_results(prompt_text):
-        return _assess_json_results_answer(raw_answer)
+        return _assess_json_results_answer(prompt, raw_answer)
 
     if _prompt_requests_multiple_items(prompt_text) and len(answer_text) < 120:
         return AnswerQuality(False, "answer is too short for the requested list")
@@ -146,3 +218,11 @@ def assess_google_answer_quality(
         return AnswerQuality(False, "short answer has no usable citations")
 
     return AnswerQuality(True)
+
+
+def assess_google_answer_quality(
+    prompt: str,
+    answer: str,
+    citations: Sequence[object] | None = None,
+) -> AnswerQuality:
+    return assess_search_answer_quality(prompt, answer, citations)
