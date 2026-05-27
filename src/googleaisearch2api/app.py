@@ -306,7 +306,7 @@ def _run_google_ai(
                 blocked_retry_count=0 if selection is not None else None,
             )
             duration_ms = int((time.perf_counter() - started_at) * 1000)
-            quality = assess_google_answer_quality(prompt, result.answer_text)
+            quality = assess_google_answer_quality(prompt, result.answer_text, result.citations)
             if not quality.ok:
                 message = f"Google answer failed quality check: {quality.reason}"
                 services.store.finish_request_error(request_id, message, duration_ms)

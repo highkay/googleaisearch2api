@@ -215,6 +215,20 @@ def _select_answer_text(payload: dict, query: str) -> str:
     return ""
 
 
+def _is_google_utility_url(url: str) -> bool:
+    host = urlsplit(url).netloc.lower()
+    if not host:
+        return False
+    return host in {
+        "accounts.google.com",
+        "myactivity.google.com",
+        "policies.google.com",
+    } or (
+        host.endswith(".google.com")
+        and not host.startswith(("books.", "news.", "patents.", "scholar."))
+    )
+
+
 def filter_citations(citations: list[dict]) -> list[Citation]:
     filtered: list[Citation] = []
     seen: set[str] = set()
@@ -222,6 +236,8 @@ def filter_citations(citations: list[dict]) -> list[Citation]:
         title = (item.get("title") or "").strip()
         url = (item.get("url") or "").strip()
         if not url or url in seen:
+            continue
+        if _is_google_utility_url(url):
             continue
         seen.add(url)
         filtered.append(Citation(title=title or url, url=url))

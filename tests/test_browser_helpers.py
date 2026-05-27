@@ -93,6 +93,21 @@ def test_filter_citations_deduplicates_empty_entries() -> None:
     assert citations[0].title == "OpenAI"
 
 
+def test_filter_citations_removes_google_utility_links() -> None:
+    citations = filter_citations(
+        [
+            {
+                "title": "See my AI Mode history",
+                "url": "https://myactivity.google.com/search-services/history/search?product=83",
+            },
+            {"title": "Google support", "url": "https://support.google.com/websearch"},
+            {"title": "Report", "url": "https://example.com/report"},
+        ]
+    )
+
+    assert [citation.url for citation in citations] == ["https://example.com/report"]
+
+
 def test_resolve_browser_user_agent_normalizes_headless_chrome() -> None:
     config = ServiceConfig(browser_headless=True)
     user_agent = resolve_browser_user_agent(config)

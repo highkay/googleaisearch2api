@@ -376,6 +376,39 @@ def test_query_auto_falls_back_to_duck_when_google_answer_quality_fails(
     assert "quality check" in (recent[1].error_message or "")
 
 
+def test_query_auto_falls_back_to_duck_when_google_list_answer_is_too_short(
+    test_app,
+) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "auto")
+        google_pool = _install_fake_pool(
+            test_app,
+            answer_text="台积电 3nm 涨价将推动半导体供应链重估。",
+        )
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback list.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={
+                "model": "google-search",
+                "query": "台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条",
+            },
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Duck fallback list."
+    assert google_pool.prompts == [
+        "User request:\n台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条"
+    ]
+    assert duck_pool.prompts == [
+        "User request:\n台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条"
+    ]
+    assert [record.engine for record in recent] == ["duck", "google"]
+    assert [record.status for record in recent] == ["ok", "error"]
+    assert "too short for the requested list" in (recent[1].error_message or "")
+
+
 def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:
     with TestClient(test_app) as client:
         test_app.state.services.store.update_config(
