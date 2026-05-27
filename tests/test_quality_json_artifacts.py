@@ -199,3 +199,23 @@ def test_normalize_answer_for_prompt_keeps_all_bad_json_results() -> None:
     )
 
     assert normalize_answer_for_prompt(prompt, answer) == answer
+
+
+def test_normalize_answer_for_prompt_returns_allowed_empty_when_all_json_results_bad() -> None:
+    prompt = (
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。若找不到足够直接相关的结果，返回 '
+        '{"results": []}。最多返回 5 条'
+    )
+    answer = (
+        '{"results":[{"title":"天岳先进(688234) 行情走势",'
+        '"content":"天岳先进在科创板上市，股票代码为688234。",'
+        '"source":"Google Finance","url":"google.com",'
+        '"published_date":"2026-05-27"}]}'
+    )
+
+    normalized = normalize_answer_for_prompt(prompt, answer)
+
+    assert normalized == '{"results": []}'
+    assert assess_google_answer_quality(prompt, normalized).ok is True

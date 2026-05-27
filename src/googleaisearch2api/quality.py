@@ -854,7 +854,11 @@ def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
 
     if not changed:
         return answer
-    if not filtered_results and any(reason != "date" for reason in filter_reasons):
+    if (
+        not filtered_results
+        and any(reason != "date" for reason in filter_reasons)
+        and not _prompt_allows_empty_json_results(prompt)
+    ):
         return answer
 
     normalized_payload = dict(payload)
