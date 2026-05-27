@@ -8,6 +8,7 @@ def test_build_duck_search_prompt_forces_direct_search_answer() -> None:
     assert "Do not ask whether to search." in prompt
     assert "only include ticker symbols you are confident are real" in prompt
     assert "real six-digit A-share codes" in prompt
+    assert "Use one concrete publisher name in each source field" in prompt
     assert "Do not output placeholder URLs such as example.com." in prompt
     assert "台积电 3nm 涨价 最多返回 5 条" in prompt
 
@@ -44,6 +45,36 @@ Hide Reasoning
     )
 
     assert answer == '{"results": []}'
+
+
+def test_extract_duck_answer_text_removes_raw_search_result_ui_noise() -> None:
+    answer = extract_duck_answer_text(
+        """
+Duck.ai
+User request:
+台积电 3nm 涨价 最多返回 5 条。
+台积电 3nm 涨价 AI A股 受益 股 供应链 半导体 相关新闻 2024 2025
+cls.cn
+stcn.com
+标题：AI浪潮下台积电涨价传导顺畅，大客户争相预订先进制程产能
+来源：财联社
+日期：2024-07-08
+链接：https://www.cls.cn/detail/1726012
+为什么相关：报道指出台积电先进制程涨价谈判正在推进。
+Search Results
+AI浪潮下台积电涨价传导顺畅大客户争相预订先进制程产能
+cls.cn
+""",
+        "User request:\n台积电 3nm 涨价 最多返回 5 条。",
+    )
+
+    assert answer == (
+        "标题：AI浪潮下台积电涨价传导顺畅，大客户争相预订先进制程产能\n"
+        "来源：财联社\n"
+        "日期：2024-07-08\n"
+        "链接：https://www.cls.cn/detail/1726012\n"
+        "为什么相关：报道指出台积电先进制程涨价谈判正在推进。"
+    )
 
 
 def test_extract_duck_answer_text_keeps_only_json_results_for_json_prompt() -> None:

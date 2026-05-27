@@ -30,6 +30,11 @@ _MALFORMED_STOCK_CODE_RE = re.compile(
     re.IGNORECASE,
 )
 _CITATION_MARKER_ARTIFACT_RE = re.compile(r"\[\s*\d+\s*\]")
+_RAW_URL_RE = re.compile(r"https?://[^\s<>\]\)）\"']+")
+_DOMAIN_ONLY_LINE_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$",
+    re.IGNORECASE,
+)
 _FOLLOW_UP_TAIL_PHRASES = (
     "如果您想进一步了解",
     "如果你想进一步了解",
@@ -144,6 +149,25 @@ _GENERIC_JSON_SOURCE_LABEL_PHRASES = (
     "market analysis",
     "industry report",
 )
+_AGGREGATE_JSON_SOURCE_LABEL_PHRASES = (
+    "综合",
+    "汇总",
+    "整理",
+    "转载",
+    "multiple sources",
+    "various sources",
+)
+_COMPOSITE_JSON_SOURCE_LABEL_SEPARATORS = (
+    " / ",
+    "/",
+    "|",
+    "｜",
+    "、",
+)
+_SEARCH_RESULTS_TAIL_MARKERS = {
+    "search results",
+    "搜索结果",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +199,21 @@ def _standalone_source_label_count(answer: str) -> int:
         1
         for line in answer.splitlines()
         if _is_standalone_source_label(line.strip())
+    )
+
+
+def _standalone_hostname_count(answer: str) -> int:
+    return sum(
+        1
+        for line in answer.splitlines()
+        if _DOMAIN_ONLY_LINE_RE.match(line.strip())
+    )
+
+
+def _contains_search_results_tail(answer: str) -> bool:
+    return any(
+        line.strip().casefold() in _SEARCH_RESULTS_TAIL_MARKERS
+        for line in answer.splitlines()
     )
 
 
@@ -228,9 +267,35 @@ def _is_usable_result_url(value: object) -> bool:
     return True
 
 
+def _extract_raw_urls(answer: str) -> list[str]:
+    urls: list[str] = []
+    for match in _RAW_URL_RE.finditer(answer):
+        url = match.group(0).rstrip(".,，。；;:：、")
+        if _is_usable_result_url(url):
+            urls.append(url)
+    return urls
+
+
+def _contains_duplicate_raw_url(answer: str) -> bool:
+    seen: set[str] = set()
+    for url in _extract_raw_urls(answer):
+        if url in seen:
+            return True
+        seen.add(url)
+    return False
+
+
 def _is_generic_json_source_label(value: object) -> bool:
     source = _normalize(str(value or ""))
     return any(phrase in source for phrase in _GENERIC_JSON_SOURCE_LABEL_PHRASES)
+
+
+def _is_aggregate_json_source_label(value: object) -> bool:
+    raw_source = str(value or "").strip()
+    source = _normalize(raw_source)
+    if any(phrase in source for phrase in _AGGREGATE_JSON_SOURCE_LABEL_PHRASES):
+        return True
+    return any(separator in raw_source for separator in _COMPOSITE_JSON_SOURCE_LABEL_SEPARATORS)
 
 
 def _extract_requested_date_range(prompt: str) -> tuple[str, str] | None:
@@ -314,6 +379,7 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
         return AnswerQuality(False, "answer contains malformed stock code")
 
     date_range = _extract_requested_date_range(prompt)
+    seen_urls: set[str] = set()
     for item in payload["results"]:
         if not isinstance(item, dict):
             return AnswerQuality(False, "answer JSON result item is not an object")
@@ -324,6 +390,10 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
             return AnswerQuality(False, "answer JSON result contains citation marker artifacts")
         if not _is_usable_result_url(item.get("url")):
             return AnswerQuality(False, "answer JSON result has an unusable URL")
+        url = str(item.get("url") or "").strip()
+        if url in seen_urls:
+            return AnswerQuality(False, "answer JSON result URL is duplicated")
+        seen_urls.add(url)
         if not _DATE_RE.match(str(item.get("published_date") or "").strip()):
             return AnswerQuality(False, "answer JSON result has an invalid published_date")
         published_date = str(item.get("published_date") or "").strip()
@@ -342,6 +412,8 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
             return AnswerQuality(False, "answer JSON result source is an internal label")
         if _is_generic_json_source_label(source):
             return AnswerQuality(False, "answer JSON result source is generic")
+        if _is_aggregate_json_source_label(source):
+            return AnswerQuality(False, "answer JSON result source is aggregate")
 
     return AnswerQuality(True)
 
@@ -377,8 +449,17 @@ def assess_search_answer_quality(
     if _contains_follow_up_tail(answer_text):
         return AnswerQuality(False, "answer contains a follow-up prompt tail")
 
+    if _contains_search_results_tail(raw_answer):
+        return AnswerQuality(False, "answer contains search results UI tail")
+
     if _standalone_source_label_count(raw_answer) >= 2:
         return AnswerQuality(False, "answer contains standalone source labels")
+
+    if _standalone_hostname_count(raw_answer) >= 2:
+        return AnswerQuality(False, "answer contains standalone hostnames")
+
+    if _contains_duplicate_raw_url(raw_answer):
+        return AnswerQuality(False, "answer contains duplicate URLs")
 
     if _contains_malformed_stock_code(prompt_text, raw_answer):
         return AnswerQuality(False, "answer contains malformed stock code")

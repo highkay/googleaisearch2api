@@ -79,3 +79,33 @@ def test_rejects_json_result_with_generic_source_label() -> None:
 
     assert quality.ok is False
     assert quality.reason == "answer JSON result source is generic"
+
+
+def test_rejects_json_result_with_aggregate_source_label() -> None:
+    quality = assess_google_answer_quality(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。最多返回 5 条',
+        '{"results":[{"title":"聚合来源","content":"来源字段拼接了多个发布方。",'
+        '"source":"每日经济新闻 / 新浪财经转载",'
+        '"url":"https://finance.sina.com.cn/stock/2026-05-27/doc-news.shtml",'
+        '"published_date":"2026-05-27"}]}',
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer JSON result source is aggregate"
+
+
+def test_rejects_json_results_with_duplicate_urls() -> None:
+    quality = assess_google_answer_quality(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。最多返回 5 条',
+        '{"results":[{"title":"第一条","content":"同一网页的第一条。","source":"凤凰网财经",'
+        '"url":"https://finance.ifeng.com/c/8b1M0339ZZB","published_date":"2024-07-07"},'
+        '{"title":"第二条","content":"同一网页拆成第二条。","source":"凤凰网财经",'
+        '"url":"https://finance.ifeng.com/c/8b1M0339ZZB","published_date":"2024-07-07"}]}',
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer JSON result URL is duplicated"

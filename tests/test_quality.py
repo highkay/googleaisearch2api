@@ -57,6 +57,61 @@ def test_rejects_multiple_standalone_source_labels() -> None:
     assert quality.reason == "answer contains standalone source labels"
 
 
+def test_rejects_raw_answer_with_search_results_tail() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+标题：AI浪潮下台积电涨价传导顺畅
+来源：财联社
+日期：2024-07-08
+链接：https://www.cls.cn/detail/1726012
+为什么相关：报道说明先进制程涨价可能传导至供应链。
+Search Results
+AI浪潮下台积电涨价传导顺畅
+cls.cn
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains search results UI tail"
+
+
+def test_rejects_raw_answer_with_standalone_hostnames() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+标题：AI浪潮下台积电涨价传导顺畅
+cls.cn
+标题：台积电，突传重磅！
+stcn.com
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains standalone hostnames"
+
+
+def test_rejects_raw_answer_with_duplicate_urls() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+标题：台积电，突传重磅！
+来源：证券时报网
+日期：2024-07-07
+链接：https://www.stcn.com/article/detail/1250957.html
+为什么相关：报道说明 3nm 产能紧张与涨价预期。
+标题：AI推动下半导体涨价潮
+来源：证券时报网
+日期：2024-07-07
+链接：https://www.stcn.com/article/detail/1250957.html
+为什么相关：同一个网页被拆成重复结果。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains duplicate URLs"
+
+
 def test_rejects_malformed_stock_code_for_stock_prompts() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条",

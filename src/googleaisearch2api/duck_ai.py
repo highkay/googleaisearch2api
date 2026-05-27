@@ -25,6 +25,14 @@ DUCK_RATE_LIMIT_MARKERS = [
     "try again later",
     "please try again later",
 ]
+DOMAIN_ONLY_LINE_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$",
+    re.IGNORECASE,
+)
+SEARCH_RESULTS_TAIL_MARKERS = {
+    "Search Results",
+    "搜索结果",
+}
 FOLLOW_UP_TAIL_MARKERS = [
     "\u5982\u679c\u60a8\u60f3\u8fdb\u4e00\u6b65\u4e86\u89e3",
     "\u5982\u679c\u4f60\u60f3\u8fdb\u4e00\u6b65\u4e86\u89e3",
@@ -45,6 +53,10 @@ For stock answers, only include ticker symbols you are confident are real.
 For A-share answers, use only real six-digit A-share codes; omit uncertain codes.
 Do not output placeholder codes such as 0x, N/A, or unknown.
 For source URLs, use only real public web pages from named sources.
+Use one concrete publisher name in each source field, matching the URL host.
+Do not combine multiple publishers, reprints, or aggregate labels in source fields.
+Do not include the raw search query, standalone hostnames, raw search result listings,
+or duplicate URLs.
 Do not output placeholder URLs such as example.com.
 If you cannot verify a real source URL, return an empty results list instead of invented results.
 
@@ -322,10 +334,15 @@ def extract_duck_answer_text(body_text: str, prompt: str, *, limit: int = 3000) 
         line = raw_line.strip()
         if not line:
             continue
+        if line in SEARCH_RESULTS_TAIL_MARKERS:
+            break
         if any(pattern.search(line) for pattern in skip_patterns):
+            continue
+        if DOMAIN_ONLY_LINE_RE.match(line):
             continue
         lines.append(line)
 
+    lines = _strip_leading_search_query_line(lines)
     answer = _normalize_text("\n".join(lines))
     if _prompt_requests_json_results(prompt):
         json_answer = _extract_json_results_object(answer)
@@ -333,6 +350,21 @@ def extract_duck_answer_text(body_text: str, prompt: str, *, limit: int = 3000) 
             return json_answer[:limit]
 
     return _strip_follow_up_tail(answer)[:limit]
+
+
+def _strip_leading_search_query_line(lines: list[str]) -> list[str]:
+    if len(lines) < 2:
+        return lines
+    first_line = lines[0]
+    next_line = lines[1]
+    if (
+        len(first_line) <= 140
+        and " " in first_line
+        and not re.search(r"https?://|[：:。！？!?]", first_line)
+        and re.search(r"^(标题|Title|来源|Source|[-*\d]+[.)、])", next_line)
+    ):
+        return lines[1:]
+    return lines
 
 
 def _prompt_requests_json_results(prompt: str) -> bool:
