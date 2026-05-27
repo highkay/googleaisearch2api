@@ -206,6 +206,46 @@ _NON_CHINESE_RAW_LINK_LABELS = (
     "リンク：",
     "リンク:",
 )
+_RAW_RESULT_DETAIL_PREFIXES = (
+    "标题：",
+    "标题:",
+    "来源：",
+    "来源:",
+    "日期：",
+    "日期:",
+    "date:",
+    "Date:",
+    "链接：",
+    "链接:",
+    "link:",
+    "Link:",
+    "url:",
+    "URL:",
+    "リンク：",
+    "リンク:",
+    "为什么相关：",
+    "为什么相关:",
+    "相关性：",
+    "相关性:",
+    "relevance:",
+    "Relevance:",
+    "why relevant:",
+    "Why relevant:",
+)
+_RAW_RESULT_COMPLETION_PREFIXES = (
+    "为什么相关：",
+    "为什么相关:",
+    "相关性：",
+    "相关性:",
+    "relevance:",
+    "Relevance:",
+    "why relevant:",
+    "Why relevant:",
+)
+_RAW_RESULT_SOURCE_PREFIXES = (
+    "来源：",
+    "来源:",
+)
 _KNOWN_SOURCE_HOST_ALIASES = {
     "cls.cn": ("财联社", "cls"),
     "stcn.com": ("证券时报", "证券时报网", "stcn"),
@@ -481,6 +521,105 @@ def _contains_non_specific_raw_date(answer: str) -> bool:
     return False
 
 
+def _raw_line_starts_result_detail(line: str) -> bool:
+    return line.startswith(_RAW_RESULT_DETAIL_PREFIXES)
+
+
+def _raw_line_starts_new_result(line: str, next_line: str) -> bool:
+    if line.startswith(("标题：", "标题:")):
+        return True
+    if re.match(r"^\s*(?:[-*]|\d+[.、])\s*\S", line):
+        return True
+    if _raw_line_starts_result_detail(line):
+        return False
+    return next_line.startswith(_RAW_RESULT_SOURCE_PREFIXES)
+
+
+def _raw_line_completes_result(line: str) -> bool:
+    return line.startswith(_RAW_RESULT_COMPLETION_PREFIXES)
+
+
+def _split_raw_result_blocks(answer: str) -> list[str]:
+    answer = answer.strip()
+    if not answer:
+        return []
+
+    blocks = [
+        block.strip()
+        for block in re.split(r"\n\s*\n+", answer)
+        if block.strip()
+    ]
+    if len(blocks) > 1:
+        return blocks
+
+    lines = [line.strip() for line in answer.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return [answer]
+
+    blocks = []
+    current: list[str] = []
+    current_is_complete = False
+    for index, line in enumerate(lines):
+        next_line = lines[index + 1] if index + 1 < len(lines) else ""
+        if current_is_complete and _raw_line_starts_new_result(line, next_line):
+            blocks.append("\n".join(current).strip())
+            current = [line]
+            current_is_complete = False
+        else:
+            current.append(line)
+
+        if _raw_line_completes_result(line):
+            current_is_complete = True
+
+    if current:
+        blocks.append("\n".join(current).strip())
+
+    return blocks if len(blocks) > 1 else [answer]
+
+
+def _raw_result_block_has_filterable_defect(prompt_text: str, block: str) -> bool:
+    if _contains_aggregate_raw_source_label(block):
+        return True
+    if _contains_non_chinese_raw_link_label(block):
+        return True
+    if _contains_raw_source_host_mismatch(block):
+        return True
+    if _contains_non_specific_raw_date(block):
+        return True
+    if _contains_non_specific_raw_url(block):
+        return True
+    return _contains_malformed_stock_code(prompt_text, block)
+
+
+def _normalize_raw_answer_for_prompt(prompt_text: str, answer: str) -> str:
+    if not _prompt_requests_multiple_items(prompt_text):
+        return answer
+
+    blocks = _split_raw_result_blocks(answer)
+    if len(blocks) <= 1:
+        return answer
+
+    filtered_blocks: list[str] = []
+    seen_urls: set[str] = set()
+    changed = False
+    for block in blocks:
+        urls = _extract_raw_urls(block)
+        has_duplicate_url = bool(urls) and any(url in seen_urls for url in urls)
+        if has_duplicate_url or _raw_result_block_has_filterable_defect(
+            prompt_text,
+            block,
+        ):
+            changed = True
+            continue
+        filtered_blocks.append(block)
+        seen_urls.update(urls)
+
+    if not changed or not filtered_blocks:
+        return answer
+
+    return "\n\n".join(filtered_blocks)
+
+
 def _is_generic_json_source_label(value: object) -> bool:
     source = _normalize(str(value or ""))
     return any(phrase in source for phrase in _GENERIC_JSON_SOURCE_LABEL_PHRASES)
@@ -523,7 +662,7 @@ def _published_date_is_future(published_date: str) -> bool:
 def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
     prompt_text = _normalize(prompt)
     if not _prompt_requests_json_results(prompt_text):
-        return answer
+        return _normalize_raw_answer_for_prompt(prompt_text, answer)
 
     date_range = _extract_requested_date_range(prompt)
     try:

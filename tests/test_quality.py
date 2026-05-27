@@ -125,6 +125,33 @@ def test_rejects_raw_answer_with_aggregate_source_label() -> None:
     assert quality.reason == "answer contains aggregate source labels"
 
 
+def test_normalize_answer_for_prompt_filters_bad_raw_result_blocks() -> None:
+    prompt = (
+        "台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条。"
+        "请直接返回可读的搜索摘要，每条包含标题、来源、日期、链接和一句为什么相关。"
+        "不要返回 JSON。"
+    )
+    answer = """
+AI浪潮下台积电涨价传导顺畅 大客户争相预订先进制程产能
+来源：财联社
+日期：2024-07-08
+链接：https://www.cls.cn/detail/1726012
+为什么相关：这篇报道明确提到台积电先进制程涨价、AI 大客户预订产能以及供应链传导，
+对 A 股半导体设备和材料线索有直接参考价值。
+（行业综述）台积电3nm产能与价格影响
+来源：证券时报（专题合集）
+日期：2024-07-07
+链接：https://www.stcn.com/special/taishijidian_3nm
+为什么相关：专题页汇集多篇内容，不是单篇可核验新闻。
+"""
+
+    normalized = normalize_answer_for_prompt(prompt, answer)
+
+    assert "https://www.cls.cn/detail/1726012" in normalized
+    assert "taishijidian_3nm" not in normalized
+    assert assess_google_answer_quality(prompt, normalized).ok is True
+
+
 def test_allows_raw_answer_with_single_reprint_note() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价",
