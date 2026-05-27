@@ -1,7 +1,7 @@
 # Proxy Session Allowlist 落地方案
 
-状态：2026-05-26 调查完成，进入实现拆分前方案。
-目标：把动态粘性代理从“直接使用基础代理用户名随机出口”改成“按当前代理用户名派生 `<base>.userN` 会话、出口发现、Google canary 晋级、运行时反馈淘汰”的闭环，降低 Google unusual traffic 阻断率。
+状态：2026-05-27 进入双引擎运行验证：Google 与 Duck.ai 分开验证、分开反馈，Google 增加成功质量门禁。
+目标：把动态粘性代理从“直接使用基础代理用户名随机出口”改成“按当前代理用户名派生 `<base>.userN` 会话、出口发现、Duck.ai 可用性初筛、Google canary 晋级、运行时反馈淘汰”的闭环，降低 Google unusual traffic 阻断率，同时保留 Duck.ai 作为宽松但独立的备用引擎。
 
 ## 1. 已验证事实
 
@@ -71,23 +71,25 @@ Google canary 结果：
 
 1. Console 增加 `Resin 粘性会话` 开关；不勾选时完全保持一般代理路径，勾选后才启用 `.userN` 会话清单。
 2. 不再把基础代理用户名直接投入 Google 请求；启用 Resin 粘性会话后只使用按当前 base prefix 派生出的 `<base>.userN`。
-3. 出口发现、风险元数据、Google canary 都是非热路径；线上用户请求只做一次本地 DB 会话选择。
-4. 第三方评分和风险标签只作为观测元数据，不作为准入门槛；Google canary 和真实请求成功才是晋级 active 的硬门槛。
+3. 出口发现、风险元数据、Duck.ai canary、Google canary 都是非热路径；线上用户请求只做一次本地 DB 会话选择。
+4. 第三方评分和风险标签只作为观测元数据，不作为准入门槛；Google canary 和 Google 真实请求成功才是晋级 Google active 的硬门槛。
 5. Google 一旦返回 unusual traffic，立即 cooldown 当前 session 和其出口 IP 向量，不等待累计失败。
-6. 重复出口不重复投入；同一个出口向量只保留一个表现最好的 session。
-7. 不记录代理密码，不把 prompt 发给 IP 风险服务。
+6. Duck.ai 成功只更新 Duck.ai 可用性清单，不把 session 提升为 Google active；Duck.ai 限流或异常也不污染 Google cooldown。
+7. 重复出口不重复投入；同一个出口向量只保留一个表现最好的 session。
+8. 不记录代理密码，不把 prompt 发给 IP 风险服务。
 
 ## 3. 总体架构
 
-新增 6 个组件：
+新增 7 个组件：
 
 | 组件 | 职责 | 热路径 |
 | --- | --- | --- |
 | `ProxySessionStore` | 保存 session、IP 观测、评分、事件、统计 | 是，读 active 会话 |
 | `EgressProbe` | 通过候选 `.userN` 访问 IP echo 服务，得到出口向量 | 否 |
 | `IplarkProbe` | 无代理 headless 浏览器打开 `iplark.com/{ip}`，监听 JSON 响应 | 否 |
+| `DuckCanaryProbe` | 使用同一候选 `.userN` 跑 Duck.ai 宽松 canary，建立备用引擎清单 | 否 |
 | `GoogleCanaryProbe` | 使用同一候选 `.userN` 跑真实 Google AI nonce prompt | 否 |
-| `ProxySessionSelector` | 从 active 会话中选一个，改写本次 `ServiceConfig.browser_proxy_username` | 是 |
+| `ProxySessionSelector` | 按 engine 从 Google active 或 Duck.ai ok 会话中选一个，改写本次 `ServiceConfig.browser_proxy_username` | 是 |
 | `ProxySessionFeedback` | 请求成功/阻断/超时后更新统计、cooldown 或 retire | 是 |
 
 状态机：
@@ -96,6 +98,7 @@ Google canary 结果：
 new
   -> egress_checked
   -> risk_checked
+  -> duck_canary_ok
   -> canary_passed -> active
   -> cooldown
   -> retired
@@ -136,12 +139,18 @@ CREATE TABLE proxy_sessions (
   google_canary_status TEXT NOT NULL DEFAULT 'unknown',
   google_canary_error TEXT,
   google_canary_checked_at DATETIME,
+  duck_canary_status TEXT NOT NULL DEFAULT 'unknown',
+  duck_canary_error TEXT,
+  duck_canary_checked_at DATETIME,
 
   request_success_count INTEGER NOT NULL DEFAULT 0,
   request_block_count INTEGER NOT NULL DEFAULT 0,
   request_error_count INTEGER NOT NULL DEFAULT 0,
   canary_success_count INTEGER NOT NULL DEFAULT 0,
   canary_block_count INTEGER NOT NULL DEFAULT 0,
+  duck_canary_success_count INTEGER NOT NULL DEFAULT 0,
+  duck_canary_rate_limit_count INTEGER NOT NULL DEFAULT 0,
+  duck_canary_error_count INTEGER NOT NULL DEFAULT 0,
   duplicate_of_session_id INTEGER,
 
   last_checked_at DATETIME,
@@ -436,6 +445,24 @@ canary_success_count += 1
 last_success_at=now
 ```
 
+### 7.4 Google 成功质量门禁
+
+Google 请求没有抛出 `GoogleAiBlockedError` 仍不等于可用。线上已经观察到“回答正文等于 prompt，只是前面多了 `You said`”这类异常，所以 Google 成功反馈前必须先检查正文质量：
+
+- 空正文、明显 prompt echo、`You said`/`你说` 前缀，判定为失败。
+- 短泛化追问，例如“你想了解哪方面”“请具体说明”，判定为失败。
+- 质量失败的 Google 请求写入 request log error，并记录 session request error，但不记为 `request_success_count`。
+- 在 `search_engine=auto` 下，Google 质量失败按 502 处理，允许回退到 Duck.ai。
+
+### 7.5 Duck.ai canary
+
+Duck.ai 作为备用引擎单独维护可用性：
+
+- Duck canary 成功：`duck_canary_status=ok`，只增加 `duck_canary_success_count`，不增加 Google `request_success_count`，不把 session 提升为 `active`。
+- Duck canary 限流：`duck_canary_status=rate_limited`，只增加 `duck_canary_rate_limit_count`，不让 session 进入 Google cooldown。
+- Duck canary 其他异常：`duck_canary_status=error`，只增加 `duck_canary_error_count`。
+- 如果 session 已因 Google block 进入 `cooldown`，但 Duck canary 为 `ok` 且不是 duplicate/retired，Duck.ai selector 仍可选择它。
+
 ## 8. 运行时接入
 
 ### 8.1 选择时机
@@ -444,11 +471,17 @@ last_success_at=now
 
 1. 从 store 读取基础 `ServiceConfig`。
 2. 如果 `resin_sticky_session_enabled=False`，直接使用基础 config，保持一般代理行为。
-3. 如果 `resin_sticky_session_enabled=True`，调用 `ProxySessionSelector.select(config)` 选择 active session。
+3. 如果 `resin_sticky_session_enabled=True`，Google 调用 `ProxySessionSelector.select(config, engine="google")` 选择 active session。
 4. 用 `config.model_copy(deep=True, update={"browser_proxy_username": selected.proxy_username})` 得到本次请求配置。
 5. `start_request()` 使用“已改写后的 config”记录日志，并记录 `resin_sticky_session_enabled`。
 6. 调用 `BrowserPool.execute(selected_config, prompt)`。
-7. 只有 Resin 粘性会话开启时，根据成功/异常调用 `ProxySessionFeedback`。
+7. 成功正文通过质量门禁后，才调用 Google `ProxySessionFeedback` 记录成功；阻断、质量失败、timeout/runtime error 都按异常路径反馈。
+
+在 `app._run_duck_ai()` 中：
+
+1. Duck.ai 同样尊重 `resin_sticky_session_enabled`。
+2. 启用后调用 `ProxySessionSelector.select(config, engine="duck")`，选择 `duck_canary_status=ok` 的 session。
+3. Duck.ai 请求成功只写 Duck.ai 反馈，不把 session 标记为 Google active。
 
 这样不需要改 Google runner 的核心浏览器逻辑。
 
@@ -508,6 +541,13 @@ PROXY_SESSION_BLOCK_COOLDOWN_HOURS=12
 - `last_selected_at = now`
 - 如果当前 session 是 `risk_checked` 但人工 probe 成功，也可晋级 active。
 
+一次 Duck.ai 请求成功：
+
+- `duck_canary_success_count += 1`
+- `duck_canary_status = ok`
+- `last_success_at = now`
+- 不更新 Google `request_success_count`，不改变 `status=active/cooldown`。
+
 ### 8.5 阻断反馈
 
 捕获 `GoogleAiBlockedError`：
@@ -556,6 +596,7 @@ PROXY_SESSION_BLOCK_COOLDOWN_HOURS=12
 
 - `Base.metadata.create_all(engine)`
 - `_ensure_request_log_proxy_columns(engine)`
+- `_ensure_proxy_session_columns(engine)`，用于给旧 SQLite 增加 Duck.ai canary 列。
 
 新增 store 方法：
 
@@ -566,6 +607,9 @@ PROXY_SESSION_BLOCK_COOLDOWN_HOURS=12
 - `mark_proxy_session_cooldown()`
 - `finish_request_success_with_proxy()`
 - `finish_request_error_with_proxy()`
+- `mark_duck_canary_success()`
+- `mark_duck_canary_rate_limited()`
+- `mark_duck_canary_error()`
 
 ### 9.3 第三阶段：探针脚本
 
@@ -574,6 +618,8 @@ PROXY_SESSION_BLOCK_COOLDOWN_HOURS=12
 ```powershell
 uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 20
 uv run python scripts/probe_proxy_sessions.py --base-username JP --start 1 --end 20 --fast-ipapi-egress --shuffle --stop-after-active 3
+uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 20 --skip-google-canary
+uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 20 --skip-duck-canary --canary-repeats 2
 ```
 
 脚本行为：
@@ -581,9 +627,10 @@ uv run python scripts/probe_proxy_sessions.py --base-username JP --start 1 --end
 1. 逐个生成 `.userN`。
 2. egress 探测出口向量。
 3. 查风险元数据；查询失败也继续。
-4. 候选跑 Google canary。
-5. 写入 SQLite。
-6. 打印 active/cooldown/retired 汇总。
+4. 候选先跑 Duck.ai canary，记录宽松备用引擎可用性。
+5. 再跑 Google canary；已知 Google block IP/prefix 可被跳过，但不影响 Duck.ai 清单构建。
+6. 写入 SQLite。
+7. 打印 active/cooldown/retired 汇总，以及 Duck.ai canary 状态。
 
 ### 9.4 第四阶段：热路径接入
 
@@ -639,6 +686,9 @@ uv run pytest
 - 候选生成测试必须覆盖至少 `US`、`JP`、`openai` 三个 base prefix，证明没有写死国家或厂商。
 - 无 active 且 fallback disabled 返回 503。
 - `GoogleAiBlockedError` 后 session cooldown，下一次选择不同 session。
+- Google 返回 prompt echo、`You said` 或短泛化追问时不计成功，auto 模式回退 Duck.ai。
+- Duck.ai 成功不会把 session 晋级为 Google active，也不会增加 Google 成功计数。
+- Duck.ai selector 可使用 `duck_canary_status=ok` 但 Google 处于 cooldown 的 session。
 - `RequestLogRow` 写入 session/IP/score/block IP。
 - 重复出口只保留一个 active。
 
@@ -668,6 +718,18 @@ uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 -
 - 错误里的 Google IP 被解析进 DB。
 - 通过 canary 的 session 才进入 active。
 
+Duck.ai canary 单独跑：
+
+```powershell
+uv run python scripts/probe_proxy_sessions.py --base-username openai --start 1 --end 5 --skip-google-canary
+```
+
+验收：
+
+- Duck.ai 成功写入 `duck_canary_status=ok`。
+- Duck.ai 限流或异常不触发 Google cooldown。
+- 即使 Google 已知 block 的 IP/prefix 被保护跳过，Duck.ai 清单仍可继续发现。
+
 ### 10.3 容器验证
 
 在 GHCR 镜像内验证：
@@ -687,13 +749,15 @@ docker run --rm ghcr.io/... uv run python scripts/probe_proxy_sessions.py --base
 发布到 `admin@fnos` 后：
 
 1. `RESIN_STICKY_SESSION_ENABLED=false` 启动，确认 DB migrations 成功。
-2. 在容器内跑小批量 scan，得到至少 `PROXY_MIN_ACTIVE_SESSIONS` 个 active。
+2. 在容器内分别跑 Duck.ai 和 Google 小批量 scan，确认两条 canary 状态分开记录。
 3. 在 console 勾选 `Resin 粘性会话`，或设置 `RESIN_STICKY_SESSION_ENABLED=true` 后重启。
 4. 用 console probe 和 `/query` 各跑一次。
 5. 持续观察 30 分钟：
    - 502 unusual traffic 是否下降。
+   - Google 返回内容是否仍出现 prompt echo、`You said` 或短泛化追问。
+   - `search_engine=auto` 下 Google 质量失败是否回退 Duck.ai。
    - request log 是否记录 session/IP/score。
-   - block 后是否自动切换 session。
+   - Google block 后是否自动切换 Google session，Duck.ai 是否仍可使用 Duck.ai ok session。
 
 ## 11. 回滚
 

@@ -58,6 +58,7 @@ from .proxy_sessions import (
     google_block_has_ip_mismatch,
     parse_google_block_ips,
 )
+from .quality import assess_google_answer_quality
 from .query_adapter import (
     build_prompt_from_query_request,
     build_query_response,
@@ -262,7 +263,7 @@ def _run_google_ai(
         selection: ProxySessionSelection | None = None
         effective_config = config
         try:
-            selection = services.proxy_selector.select(config)
+            selection = services.proxy_selector.select(config, engine="google")
         except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
             request_id = services.store.start_request(
                 endpoint=endpoint,
@@ -305,10 +306,26 @@ def _run_google_ai(
                 blocked_retry_count=0 if selection is not None else None,
             )
             duration_ms = int((time.perf_counter() - started_at) * 1000)
+            quality = assess_google_answer_quality(prompt, result.answer_text)
+            if not quality.ok:
+                message = f"Google answer failed quality check: {quality.reason}"
+                services.store.finish_request_error(request_id, message, duration_ms)
+                _record_proxy_session_error(
+                    services,
+                    selection,
+                    blocked=False,
+                    error_message=message,
+                )
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
             services.store.finish_request_success(request_id, result, duration_ms)
             if selection is not None:
-                services.proxy_session_store.finish_request_success(selection.session.id)
+                services.proxy_session_store.finish_request_success(
+                    selection.session.id,
+                    engine="google",
+                )
             return effective_config, model_name, request_id, result
+        except HTTPException:
+            raise
         except BrowserPoolSaturatedError as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             services.store.finish_request_error(request_id, str(exc), duration_ms)
@@ -436,7 +453,7 @@ def _run_duck_ai(
         )
 
     try:
-        selection = services.proxy_selector.select(config)
+        selection = services.proxy_selector.select(config, engine="duck")
     except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
         request_id = services.store.start_request(
             endpoint=endpoint,
@@ -482,7 +499,10 @@ def _run_duck_ai(
         services.store.finish_request_success(request_id, result, duration_ms)
         services.duck_circuit.record_success()
         if selection is not None:
-            services.proxy_session_store.finish_request_success(selection.session.id)
+            services.proxy_session_store.finish_request_success(
+                selection.session.id,
+                engine="duck",
+            )
         return effective_config, model_name, request_id, result
     except BrowserPoolSaturatedError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -509,6 +529,11 @@ def _run_duck_ai(
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.duck_circuit.record_rate_limited()
         services.store.finish_request_error(request_id, str(exc), duration_ms)
+        if selection is not None:
+            services.proxy_session_store.mark_duck_canary_rate_limited(
+                selection.session.id,
+                error_message=str(exc),
+            )
         _record_proxy_session_error(
             services,
             selection,
@@ -522,6 +547,11 @@ def _run_duck_ai(
     except DuckAiTimeoutError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_error(request_id, str(exc), duration_ms)
+        if selection is not None:
+            services.proxy_session_store.mark_duck_canary_error(
+                selection.session.id,
+                error_message=str(exc),
+            )
         _record_proxy_session_error(
             services,
             selection,
@@ -535,6 +565,11 @@ def _run_duck_ai(
     except DuckAiRuntimeError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_error(request_id, str(exc), duration_ms)
+        if selection is not None:
+            services.proxy_session_store.mark_duck_canary_error(
+                selection.session.id,
+                error_message=str(exc),
+            )
         _record_proxy_session_error(
             services,
             selection,
@@ -545,6 +580,11 @@ def _run_duck_ai(
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_error(request_id, repr(exc), duration_ms)
+        if selection is not None:
+            services.proxy_session_store.mark_duck_canary_error(
+                selection.session.id,
+                error_message=repr(exc),
+            )
         _record_proxy_session_error(
             services,
             selection,

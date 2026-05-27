@@ -350,6 +350,32 @@ def test_query_auto_falls_back_to_duck_when_google_is_unavailable(test_app) -> N
     assert [record.status for record in recent] == ["ok", "error"]
 
 
+def test_query_auto_falls_back_to_duck_when_google_answer_quality_fails(
+    test_app,
+) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "auto")
+        google_pool = _install_fake_pool(
+            test_app,
+            answer_text="You said: User request:\nQuestion",
+        )
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Duck fallback."
+    assert google_pool.prompts == ["User request:\nQuestion"]
+    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert [record.engine for record in recent] == ["duck", "google"]
+    assert [record.status for record in recent] == ["ok", "error"]
+    assert "quality check" in (recent[1].error_message or "")
+
+
 def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:
     with TestClient(test_app) as client:
         test_app.state.services.store.update_config(
@@ -395,6 +421,72 @@ def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:
     assert recent[0].proxy_base_username == "openai"
     assert recent[0].proxy_username == "openai.user1"
     assert recent[0].proxy_primary_ip == "203.0.113.10"
+
+
+def test_duck_query_can_use_duck_ok_session_in_google_cooldown(test_app) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                search_engine="duck",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        snapshot = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user1",
+            proxy_username="openai.user1",
+        )
+        test_app.state.services.proxy_session_store.update_egress(
+            proxy_session_id=snapshot.id,
+            ips=["203.0.113.10"],
+            source="test",
+        )
+        test_app.state.services.proxy_session_store.update_iplark_result(
+            proxy_session_id=snapshot.id,
+            quality_score=80,
+            min_quality_score=0,
+        )
+        test_app.state.services.proxy_session_store.mark_session_cooldown(
+            snapshot.id,
+            reason="google blocked",
+        )
+        test_app.state.services.proxy_session_store.mark_duck_canary_success(snapshot.id)
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck answer.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+        sessions = {
+            item.proxy_username: item
+            for item in test_app.state.services.proxy_session_store.list_proxy_sessions(
+                limit=10
+            )
+        }
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Duck answer."
+    assert google_pool.prompts == []
+    assert duck_pool.configs[0].browser_proxy_username == "openai.user1"
+    assert recent[0].engine == "duck"
+    assert recent[0].proxy_username == "openai.user1"
+    assert sessions["openai.user1"].status == "cooldown"
+    assert sessions["openai.user1"].duck_canary_status == "ok"
+    assert sessions["openai.user1"].request_success_count == 0
 
 
 def test_query_reselects_sticky_proxy_session_after_google_block(test_app) -> None:

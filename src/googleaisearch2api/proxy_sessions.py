@@ -55,11 +55,17 @@ class ProxySessionSnapshot:
     google_canary_status: str
     google_canary_error: str | None
     google_canary_checked_at: datetime | None
+    duck_canary_status: str
+    duck_canary_error: str | None
+    duck_canary_checked_at: datetime | None
     request_success_count: int
     request_block_count: int
     request_error_count: int
     canary_success_count: int
     canary_block_count: int
+    duck_canary_success_count: int
+    duck_canary_rate_limit_count: int
+    duck_canary_error_count: int
     duplicate_of_session_id: int | None
     last_selected_at: datetime | None
     last_success_at: datetime | None
@@ -79,14 +85,20 @@ class ProxySessionSnapshot:
             primary_ip=row.primary_ip,
             ip_vector_hash=row.ip_vector_hash,
             iplark_min_quality_score=row.iplark_min_quality_score,
-            google_canary_status=row.google_canary_status,
+            google_canary_status=row.google_canary_status or "unknown",
             google_canary_error=row.google_canary_error,
             google_canary_checked_at=row.google_canary_checked_at,
+            duck_canary_status=getattr(row, "duck_canary_status", None) or "unknown",
+            duck_canary_error=getattr(row, "duck_canary_error", None),
+            duck_canary_checked_at=getattr(row, "duck_canary_checked_at", None),
             request_success_count=row.request_success_count,
             request_block_count=row.request_block_count,
             request_error_count=row.request_error_count,
             canary_success_count=row.canary_success_count,
             canary_block_count=row.canary_block_count,
+            duck_canary_success_count=getattr(row, "duck_canary_success_count", 0) or 0,
+            duck_canary_rate_limit_count=getattr(row, "duck_canary_rate_limit_count", 0) or 0,
+            duck_canary_error_count=getattr(row, "duck_canary_error_count", 0) or 0,
             duplicate_of_session_id=row.duplicate_of_session_id,
             last_selected_at=row.last_selected_at,
             last_success_at=row.last_success_at,
@@ -300,6 +312,7 @@ class ProxySessionStore:
                 raise ProxySessionUnavailableError(
                     f"Proxy session {proxy_session_id} does not exist."
                 )
+            egress_changed = row.ip_vector_hash != vector_hash
             row.primary_ip = primary_ip
             row.ip_vector_json = json.dumps(vector, ensure_ascii=False) if vector else None
             row.ip_vector_hash = vector_hash
@@ -309,6 +322,13 @@ class ProxySessionStore:
             row.duplicate_of_session_id = None
             row.last_checked_at = now
             row.updated_at = now
+            if egress_changed:
+                row.google_canary_status = "unknown"
+                row.google_canary_error = None
+                row.google_canary_checked_at = None
+                row.duck_canary_status = "unknown"
+                row.duck_canary_error = None
+                row.duck_canary_checked_at = None
 
             if vector_hash:
                 duplicate = session.scalars(
@@ -439,6 +459,71 @@ class ProxySessionStore:
             session.refresh(row)
             return ProxySessionSnapshot.from_row(row)
 
+    def mark_duck_canary_success(self, proxy_session_id: int) -> ProxySessionSnapshot:
+        now = utc_now()
+        with self._session_factory() as session:
+            row = session.get(ProxySessionRow, proxy_session_id)
+            if row is None:
+                raise ProxySessionUnavailableError(
+                    f"Proxy session {proxy_session_id} does not exist."
+                )
+            row.duck_canary_status = "ok"
+            row.duck_canary_error = None
+            row.duck_canary_checked_at = now
+            row.duck_canary_success_count = (row.duck_canary_success_count or 0) + 1
+            row.last_success_at = now
+            row.updated_at = now
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return ProxySessionSnapshot.from_row(row)
+
+    def mark_duck_canary_rate_limited(
+        self,
+        proxy_session_id: int,
+        *,
+        error_message: str,
+    ) -> ProxySessionSnapshot:
+        now = utc_now()
+        with self._session_factory() as session:
+            row = session.get(ProxySessionRow, proxy_session_id)
+            if row is None:
+                raise ProxySessionUnavailableError(
+                    f"Proxy session {proxy_session_id} does not exist."
+                )
+            row.duck_canary_status = "rate_limited"
+            row.duck_canary_error = error_message[:3000]
+            row.duck_canary_checked_at = now
+            row.duck_canary_rate_limit_count = (row.duck_canary_rate_limit_count or 0) + 1
+            row.updated_at = now
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return ProxySessionSnapshot.from_row(row)
+
+    def mark_duck_canary_error(
+        self,
+        proxy_session_id: int,
+        *,
+        error_message: str,
+    ) -> ProxySessionSnapshot:
+        now = utc_now()
+        with self._session_factory() as session:
+            row = session.get(ProxySessionRow, proxy_session_id)
+            if row is None:
+                raise ProxySessionUnavailableError(
+                    f"Proxy session {proxy_session_id} does not exist."
+                )
+            row.duck_canary_status = "error"
+            row.duck_canary_error = error_message[:3000]
+            row.duck_canary_checked_at = now
+            row.duck_canary_error_count = (row.duck_canary_error_count or 0) + 1
+            row.updated_at = now
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return ProxySessionSnapshot.from_row(row)
+
     def mark_session_cooldown(
         self,
         proxy_session_id: int,
@@ -503,16 +588,49 @@ class ProxySessionStore:
             session.refresh(row)
             return ProxySessionSnapshot.from_row(row)
 
-    def finish_request_success(self, proxy_session_id: int) -> None:
+    def select_duck_session(self, proxy_base_username: str) -> ProxySessionSnapshot | None:
+        now = utc_now()
+        with self._session_factory() as session:
+            row = session.scalars(
+                select(ProxySessionRow)
+                .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+                .where(ProxySessionRow.duck_canary_status == "ok")
+                .where(ProxySessionRow.status != STATUS_RETIRED)
+                .where(ProxySessionRow.duplicate_of_session_id.is_(None))
+                .order_by(
+                    ProxySessionRow.duck_canary_rate_limit_count.asc(),
+                    ProxySessionRow.request_error_count.asc(),
+                    ProxySessionRow.last_selected_at.asc().nullsfirst(),
+                    ProxySessionRow.duck_canary_success_count.desc(),
+                    ProxySessionRow.id.asc(),
+                )
+                .limit(1)
+            ).first()
+            if row is None:
+                return None
+            row.last_selected_at = now
+            row.updated_at = now
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return ProxySessionSnapshot.from_row(row)
+
+    def finish_request_success(self, proxy_session_id: int, *, engine: str = "google") -> None:
         now = utc_now()
         with self._session_factory() as session:
             row = session.get(ProxySessionRow, proxy_session_id)
             if row is None:
                 return
-            row.request_success_count += 1
-            row.status = STATUS_ACTIVE
             row.last_success_at = now
-            row.cooldown_until = None
+            if engine == "duck":
+                row.duck_canary_status = "ok"
+                row.duck_canary_error = None
+                row.duck_canary_checked_at = now
+                row.duck_canary_success_count = (row.duck_canary_success_count or 0) + 1
+            else:
+                row.request_success_count += 1
+                row.status = STATUS_ACTIVE
+                row.cooldown_until = None
             row.updated_at = now
             session.add(row)
             session.commit()
@@ -780,16 +898,26 @@ class ProxySessionSelector:
         self._store = store
         self._allow_fallback_to_base = allow_fallback_to_base
 
-    def select(self, config: ServiceConfig) -> ProxySessionSelection | None:
+    def select(
+        self,
+        config: ServiceConfig,
+        *,
+        engine: str = "google",
+    ) -> ProxySessionSelection | None:
         if not config.resin_sticky_session_enabled:
             return None
         base_username = resolve_proxy_base_username(config)
-        session = self._store.select_active_session(base_username)
+        if engine == "duck":
+            session = self._store.select_duck_session(base_username)
+        else:
+            session = self._store.select_active_session(base_username)
         if session is None:
             if self._allow_fallback_to_base:
                 return None
+            session_label = "Duck.ai" if engine == "duck" else "active"
             raise ProxySessionUnavailableError(
-                f"No active sticky proxy session is available for base username {base_username!r}."
+                f"No {session_label} sticky proxy session is available "
+                f"for base username {base_username!r}."
             )
         return ProxySessionSelection(
             session=session,

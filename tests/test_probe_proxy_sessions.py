@@ -20,6 +20,7 @@ _SPEC.loader.exec_module(_SCRIPT)
 _candidate_indices = _SCRIPT._candidate_indices
 _canary_answer_matches = _SCRIPT._canary_answer_matches
 _run_canary = _SCRIPT._run_canary
+_run_duck_canary = _SCRIPT._run_duck_canary
 _skip_candidate_reason = _SCRIPT._skip_candidate_reason
 _skip_known_google_blocked_ip = _SCRIPT._skip_known_google_blocked_ip
 _skip_known_google_blocked_prefix = _SCRIPT._skip_known_google_blocked_prefix
@@ -47,11 +48,17 @@ def _snapshot(
         google_canary_status="",
         google_canary_error=None,
         google_canary_checked_at=None,
+        duck_canary_status="",
+        duck_canary_error=None,
+        duck_canary_checked_at=None,
         request_success_count=0,
         request_block_count=0,
         request_error_count=0,
         canary_success_count=0,
         canary_block_count=0,
+        duck_canary_success_count=0,
+        duck_canary_rate_limit_count=0,
+        duck_canary_error_count=0,
         duplicate_of_session_id=None,
         last_selected_at=None,
         last_success_at=None,
@@ -388,7 +395,7 @@ def test_canary_answer_match_normalizes_trailing_period_and_whitespace() -> None
 
 
 class _FakeCanaryRunner:
-    def __init__(self, answers: list[str]) -> None:
+    def __init__(self, answers: list[object]) -> None:
         self._answers = answers
         self.prompts: list[str] = []
         self.closed = False
@@ -396,11 +403,14 @@ class _FakeCanaryRunner:
     def run_prompt(self, _config: object, prompt: str) -> SimpleNamespace:
         self.prompts.append(prompt)
         answer = self._answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        answer_text = str(answer)
         return SimpleNamespace(
-            answer_text=answer,
+            answer_text=answer_text,
             final_url="https://www.google.com/search?udm=50",
             page_title="Google AI",
-            body_excerpt=answer,
+            body_excerpt=answer_text,
         )
 
     def close(self) -> None:
@@ -412,6 +422,9 @@ class _FakeCanaryStore:
         self.events: list[dict] = []
         self.cooldown_reasons: list[str] = []
         self.success_count = 0
+        self.duck_success_count = 0
+        self.duck_rate_limit_errors: list[str] = []
+        self.duck_errors: list[str] = []
 
     def record_event(self, **kwargs: object) -> None:
         self.events.append(kwargs)
@@ -428,6 +441,28 @@ class _FakeCanaryStore:
     ) -> ProxySessionSnapshot:
         self.cooldown_reasons.append(reason)
         return _snapshot(status=STATUS_COOLDOWN)
+
+    def mark_duck_canary_success(self, _proxy_session_id: int) -> ProxySessionSnapshot:
+        self.duck_success_count += 1
+        return _snapshot(status=STATUS_ACTIVE)
+
+    def mark_duck_canary_rate_limited(
+        self,
+        _proxy_session_id: int,
+        *,
+        error_message: str,
+    ) -> ProxySessionSnapshot:
+        self.duck_rate_limit_errors.append(error_message)
+        return _snapshot(status=STATUS_ACTIVE)
+
+    def mark_duck_canary_error(
+        self,
+        _proxy_session_id: int,
+        *,
+        error_message: str,
+    ) -> ProxySessionSnapshot:
+        self.duck_errors.append(error_message)
+        return _snapshot(status=STATUS_ACTIVE)
 
 
 def test_run_canary_requires_all_repeated_expected_answers(monkeypatch) -> None:
@@ -468,4 +503,70 @@ def test_run_canary_rejects_prompt_echo_before_activation(monkeypatch) -> None:
     assert store.success_count == 0
     assert len(runner.prompts) == 1
     assert "unexpected answer" in store.cooldown_reasons[0]
+    assert runner.closed
+
+
+def test_run_duck_canary_records_duck_success_only(monkeypatch) -> None:
+    runner = _FakeCanaryRunner(["42"])
+    monkeypatch.setattr(_SCRIPT, "DuckAiRunner", lambda: runner)
+    store = _FakeCanaryStore()
+
+    _run_duck_canary(
+        store,
+        _snapshot(status=STATUS_COOLDOWN),
+        object(),
+        "What is nineteen plus twenty-three? Reply with only the number.",
+        "42",
+        1,
+    )
+
+    assert store.duck_success_count == 1
+    assert store.success_count == 0
+    assert store.cooldown_reasons == []
+    assert store.events[0]["event_type"] == "duck_canary_success"
+    assert runner.closed
+
+
+def test_run_duck_canary_records_rate_limit_without_google_cooldown(monkeypatch) -> None:
+    runner = _FakeCanaryRunner([_SCRIPT.DuckAiRateLimitedError("duck limited")])
+    monkeypatch.setattr(_SCRIPT, "DuckAiRunner", lambda: runner)
+    store = _FakeCanaryStore()
+
+    _run_duck_canary(
+        store,
+        _snapshot(status=STATUS_COOLDOWN),
+        object(),
+        "What is nineteen plus twenty-three? Reply with only the number.",
+        "42",
+        1,
+    )
+
+    assert store.duck_rate_limit_errors == ["duck limited"]
+    assert store.success_count == 0
+    assert store.cooldown_reasons == []
+    assert store.events[0]["event_type"] == "duck_canary_rate_limited"
+    assert runner.closed
+
+
+def test_run_duck_canary_records_unexpected_answer_without_google_cooldown(
+    monkeypatch,
+) -> None:
+    runner = _FakeCanaryRunner(["You said: What is nineteen plus twenty-three?"])
+    monkeypatch.setattr(_SCRIPT, "DuckAiRunner", lambda: runner)
+    store = _FakeCanaryStore()
+
+    _run_duck_canary(
+        store,
+        _snapshot(status=STATUS_COOLDOWN),
+        object(),
+        "What is nineteen plus twenty-three? Reply with only the number.",
+        "42",
+        1,
+    )
+
+    assert len(store.duck_errors) == 1
+    assert "unexpected answer" in store.duck_errors[0]
+    assert store.success_count == 0
+    assert store.cooldown_reasons == []
+    assert store.events[0]["event_type"] == "duck_canary_unexpected_answer"
     assert runner.closed

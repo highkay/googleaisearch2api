@@ -93,11 +93,19 @@ class ProxySessionRow(Base):
     google_canary_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    duck_canary_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    duck_canary_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duck_canary_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     request_success_count: Mapped[int] = mapped_column(Integer, default=0)
     request_block_count: Mapped[int] = mapped_column(Integer, default=0)
     request_error_count: Mapped[int] = mapped_column(Integer, default=0)
     canary_success_count: Mapped[int] = mapped_column(Integer, default=0)
     canary_block_count: Mapped[int] = mapped_column(Integer, default=0)
+    duck_canary_success_count: Mapped[int] = mapped_column(Integer, default=0)
+    duck_canary_rate_limit_count: Mapped[int] = mapped_column(Integer, default=0)
+    duck_canary_error_count: Mapped[int] = mapped_column(Integer, default=0)
     duplicate_of_session_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_selected_at: Mapped[datetime | None] = mapped_column(
@@ -154,6 +162,7 @@ def create_tables(engine) -> None:
     Base.metadata.create_all(engine)
     _ensure_service_config_columns(engine)
     _ensure_request_log_columns(engine)
+    _ensure_proxy_session_columns(engine)
 
 
 def _ensure_service_config_columns(engine) -> None:
@@ -173,6 +182,15 @@ def _ensure_request_log_columns(engine) -> None:
     _ensure_column(engine, "request_logs", "proxy_iplark_score", "INTEGER")
     _ensure_column(engine, "request_logs", "google_block_ips_json", "TEXT")
     _ensure_column(engine, "request_logs", "google_block_mismatch", "BOOLEAN DEFAULT 0")
+
+
+def _ensure_proxy_session_columns(engine) -> None:
+    _ensure_column(engine, "proxy_sessions", "duck_canary_status", "VARCHAR(32)")
+    _ensure_column(engine, "proxy_sessions", "duck_canary_error", "TEXT")
+    _ensure_column(engine, "proxy_sessions", "duck_canary_checked_at", "DATETIME")
+    _ensure_column(engine, "proxy_sessions", "duck_canary_success_count", "INTEGER DEFAULT 0")
+    _ensure_column(engine, "proxy_sessions", "duck_canary_rate_limit_count", "INTEGER DEFAULT 0")
+    _ensure_column(engine, "proxy_sessions", "duck_canary_error_count", "INTEGER DEFAULT 0")
 
 
 def _ensure_column(engine, table_name: str, column_name: str, column_sql: str) -> None:

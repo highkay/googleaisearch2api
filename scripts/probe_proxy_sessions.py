@@ -11,6 +11,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiRunner, resolve_browser_proxy
 from googleaisearch2api.config import ServiceConfig, get_settings
 from googleaisearch2api.db import create_db_engine, create_session_factory, create_tables, utc_now
+from googleaisearch2api.duck_ai import DuckAiRateLimitedError, DuckAiRunner
 from googleaisearch2api.egress import probe_egress
 from googleaisearch2api.iplark import (
     IPAPI_IS_BASE_URL,
@@ -39,6 +40,7 @@ from googleaisearch2api.store import ConfigStore
 DEFAULT_CANARY_PROMPT = "What is nineteen plus twenty-three? Reply with only the number."
 DEFAULT_CANARY_EXPECTED_ANSWER = "42"
 DEFAULT_CANARY_REPEATS = 2
+DEFAULT_DUCK_CANARY_REPEATS = 1
 
 
 def _snapshot_json(snapshot: ProxySessionSnapshot) -> dict:
@@ -182,6 +184,88 @@ def _run_canary(
             },
         )
         return store.mark_canary_success(snapshot.id)
+    finally:
+        runner.close()
+
+
+def _run_duck_canary(
+    store: ProxySessionStore,
+    snapshot: ProxySessionSnapshot,
+    config: ServiceConfig,
+    prompt: str,
+    expected_answer: str,
+    repeats: int,
+) -> ProxySessionSnapshot:
+    expected = expected_answer.strip()
+    attempts = max(repeats, 1)
+    runner = DuckAiRunner()
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                result = runner.run_prompt(config, prompt)
+            except DuckAiRateLimitedError as exc:
+                store.record_event(
+                    proxy_session_id=snapshot.id,
+                    event_type="duck_canary_rate_limited",
+                    message=str(exc),
+                    raw_json={
+                        "attempt": attempt,
+                        "attempts": attempts,
+                    },
+                )
+                return store.mark_duck_canary_rate_limited(
+                    snapshot.id,
+                    error_message=str(exc),
+                )
+            except Exception as exc:
+                store.record_event(
+                    proxy_session_id=snapshot.id,
+                    event_type="duck_canary_error",
+                    message=repr(exc),
+                    raw_json={
+                        "attempt": attempt,
+                        "attempts": attempts,
+                    },
+                )
+                return store.mark_duck_canary_error(
+                    snapshot.id,
+                    error_message=repr(exc),
+                )
+
+            actual = result.answer_text.strip()
+            if not _canary_answer_matches(actual, expected):
+                store.record_event(
+                    proxy_session_id=snapshot.id,
+                    event_type="duck_canary_unexpected_answer",
+                    message=f"expected={expected!r} actual={actual!r}",
+                    raw_json={
+                        "attempt": attempt,
+                        "attempts": attempts,
+                        "expected": expected,
+                        "actual": actual,
+                        "final_url": result.final_url,
+                        "page_title": result.page_title,
+                        "body_excerpt": result.body_excerpt,
+                    },
+                )
+                return store.mark_duck_canary_error(
+                    snapshot.id,
+                    error_message=(
+                        "duck canary returned unexpected answer: "
+                        f"expected={expected!r} actual={actual!r}"
+                    ),
+                )
+
+        store.record_event(
+            proxy_session_id=snapshot.id,
+            event_type="duck_canary_success",
+            message=f"passed {attempts} canary attempt(s)",
+            raw_json={
+                "attempts": attempts,
+                "expected": expected,
+            },
+        )
+        return store.mark_duck_canary_success(snapshot.id)
     finally:
         runner.close()
 
@@ -582,6 +666,7 @@ def main() -> None:
         help="Stop once this many active sessions exist for the base username.",
     )
     parser.add_argument("--skip-google-canary", action="store_true", help="Skip Google canary.")
+    parser.add_argument("--skip-duck-canary", action="store_true", help="Skip Duck.ai canary.")
     parser.add_argument(
         "--canary-prompt",
         default=DEFAULT_CANARY_PROMPT,
@@ -601,12 +686,33 @@ def main() -> None:
         default=DEFAULT_CANARY_REPEATS,
         help="Require this many consecutive successful Google canary answers before activation.",
     )
+    parser.add_argument(
+        "--duck-canary-prompt",
+        default=DEFAULT_CANARY_PROMPT,
+        help="Duck.ai canary prompt. Default asks for a deterministic short answer.",
+    )
+    parser.add_argument(
+        "--duck-canary-expected-answer",
+        default=DEFAULT_CANARY_EXPECTED_ANSWER,
+        help=(
+            "Only mark Duck.ai canary successful if the normalized answer matches this value. "
+            "Set to an empty string to accept any non-rate-limited answer."
+        ),
+    )
+    parser.add_argument(
+        "--duck-canary-repeats",
+        type=int,
+        default=DEFAULT_DUCK_CANARY_REPEATS,
+        help="Require this many consecutive successful Duck.ai canary answers.",
+    )
     args = parser.parse_args()
 
     if args.end < args.start:
         raise SystemExit("--end must be >= --start")
     if args.canary_repeats < 1:
         raise SystemExit("--canary-repeats must be >= 1")
+    if args.duck_canary_repeats < 1:
+        raise SystemExit("--duck-canary-repeats must be >= 1")
     if args.known_google_blocked_prefix_min_count < 1:
         raise SystemExit("--known-google-blocked-prefix-min-count must be >= 1")
 
@@ -685,22 +791,6 @@ def main() -> None:
                 checks=max(args.egress_checks, 1),
             )
 
-        checked_snapshot = _skip_known_google_blocked_ip(
-            store,
-            snapshot,
-            base_username=base_username,
-            enabled=not args.allow_known_google_blocked_ip,
-        )
-        if checked_snapshot is snapshot:
-            snapshot = _skip_known_google_blocked_prefix(
-                store,
-                snapshot,
-                base_username=base_username,
-                enabled=not args.allow_known_google_blocked_prefix,
-                min_blocked_count=args.known_google_blocked_prefix_min_count,
-            )
-        else:
-            snapshot = checked_snapshot
         if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
             records.append(
                 {
@@ -718,6 +808,41 @@ def main() -> None:
                 min_quality_score=args.min_quality_score,
                 risk_source=args.risk_source,
             )
+        if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+            records.append(
+                {
+                    "session": _snapshot_json(snapshot),
+                    "iplark": asdict(iplark_result) if iplark_result else None,
+                }
+            )
+            continue
+
+        if not args.skip_duck_canary:
+            snapshot = _run_duck_canary(
+                store,
+                snapshot,
+                candidate_config,
+                args.duck_canary_prompt,
+                args.duck_canary_expected_answer,
+                args.duck_canary_repeats,
+            )
+
+        checked_snapshot = _skip_known_google_blocked_ip(
+            store,
+            snapshot,
+            base_username=base_username,
+            enabled=not args.allow_known_google_blocked_ip,
+        )
+        if checked_snapshot is snapshot:
+            snapshot = _skip_known_google_blocked_prefix(
+                store,
+                snapshot,
+                base_username=base_username,
+                enabled=not args.allow_known_google_blocked_prefix,
+                min_blocked_count=args.known_google_blocked_prefix_min_count,
+            )
+        else:
+            snapshot = checked_snapshot
         if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
             records.append(
                 {

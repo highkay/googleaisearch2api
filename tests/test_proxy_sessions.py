@@ -15,6 +15,7 @@ from googleaisearch2api.proxy_sessions import (
     ProxySessionConfigError,
     ProxySessionSelector,
     ProxySessionStore,
+    ProxySessionUnavailableError,
     build_proxy_config_for_session,
     format_sticky_username,
     google_block_has_ip_mismatch,
@@ -119,6 +120,72 @@ def test_proxy_session_selector_uses_active_session_without_hardcoded_country(
     assert selection is not None
     assert selection.session.proxy_username == "openai.user1"
     assert selection.config.browser_proxy_username == "openai.user1"
+
+
+def test_duck_canary_success_does_not_promote_google_active_session(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    snapshot = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    store.update_egress(
+        proxy_session_id=snapshot.id,
+        ips=["203.0.113.10"],
+        source="test",
+    )
+    store.update_iplark_result(
+        proxy_session_id=snapshot.id,
+        quality_score=80,
+        min_quality_score=0,
+    )
+
+    snapshot = store.mark_duck_canary_success(snapshot.id)
+
+    assert snapshot.status == STATUS_RISK_CHECKED
+    assert snapshot.duck_canary_status == "ok"
+    assert snapshot.duck_canary_success_count == 1
+    assert snapshot.request_success_count == 0
+    assert store.count_active_sessions("openai") == 0
+
+
+def test_duck_selector_can_use_google_cooldown_session(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    snapshot = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    store.update_egress(
+        proxy_session_id=snapshot.id,
+        ips=["203.0.113.10"],
+        source="test",
+    )
+    store.update_iplark_result(
+        proxy_session_id=snapshot.id,
+        quality_score=80,
+        min_quality_score=0,
+    )
+    store.mark_session_cooldown(snapshot.id, reason="google blocked")
+    store.mark_duck_canary_success(snapshot.id)
+    selector = ProxySessionSelector(store)
+    config = ServiceConfig(
+        browser_proxy_server="http://192.0.2.1:2260",
+        browser_proxy_username="openai",
+        browser_proxy_password="pass",
+        resin_sticky_session_enabled=True,
+    )
+
+    duck_selection = selector.select(config, engine="duck")
+
+    assert duck_selection is not None
+    assert duck_selection.session.proxy_username == "openai.user1"
+    with pytest.raises(ProxySessionUnavailableError, match="No active sticky"):
+        selector.select(config, engine="google")
 
 
 def test_proxy_session_selector_prefers_real_success_before_unproven_active_session(
@@ -472,6 +539,53 @@ def test_find_google_blocked_prefix_for_ip_ignores_prefix_with_success(
     )
 
     assert found is None
+
+
+def test_google_blocked_prefix_does_not_treat_duck_success_as_google_success(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    for index, ip in enumerate(
+        ["203.0.113.10", "203.0.113.11", "203.0.113.12"],
+        start=1,
+    ):
+        session = store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name=f"user{index}",
+            proxy_username=f"openai.user{index}",
+        )
+        store.update_egress(
+            proxy_session_id=session.id,
+            ips=[ip],
+            source="test",
+        )
+        store.mark_canary_blocked(
+            session.id,
+            error_message="Google unusual traffic",
+            block_ips=[ip],
+        )
+    duck_ok = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user20",
+        proxy_username="openai.user20",
+    )
+    store.update_egress(
+        proxy_session_id=duck_ok.id,
+        ips=["203.0.113.20"],
+        source="test",
+    )
+    store.mark_duck_canary_success(duck_ok.id)
+    store.finish_request_success(duck_ok.id, engine="duck")
+
+    found = store.find_google_blocked_prefix_for_ip(
+        "openai",
+        "203.0.113.42",
+        min_blocked_count=3,
+    )
+
+    assert found is not None
+    assert found.blocked_count == 3
+    assert found.success_count == 0
 
 
 def test_risk_metadata_does_not_filter_before_google_canary(tmp_path: Path) -> None:

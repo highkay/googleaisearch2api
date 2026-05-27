@@ -248,10 +248,16 @@
                                 <div class="clip error-text">{{ item.retire_reason }}</div>
                                 {% endif %}
                                 {% if item.google_canary_status and item.google_canary_status != "unknown" %}
-                                <div class="proxy-detail">canary {{ item.google_canary_status }}</div>
+                                <div class="proxy-detail">google {{ item.google_canary_status }}</div>
                                 {% endif %}
                                 {% if item.google_canary_error %}
                                 <div class="clip error-text">{{ item.google_canary_error }}</div>
+                                {% endif %}
+                                {% if item.duck_canary_status and item.duck_canary_status != "unknown" %}
+                                <div class="proxy-detail">duck {{ item.duck_canary_status }}</div>
+                                {% endif %}
+                                {% if item.duck_canary_error %}
+                                <div class="clip error-text">{{ item.duck_canary_error }}</div>
                                 {% endif %}
                             </td>
                         </tr>
