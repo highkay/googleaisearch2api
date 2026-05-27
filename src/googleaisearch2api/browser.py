@@ -38,6 +38,11 @@ DISCLAIMER_MARKERS = [
     "AI Mode response is ready",
     "如果您想进一步了解",
     "如果你想进一步了解",
+    "如果您想深入了解",
+    "如果你想深入了解",
+    "若需我",
+    "如需我",
+    "如果需要，我可以",
     "Would you like me to",
     "I can also help",
 ]
@@ -51,6 +56,43 @@ NON_ANSWER_PREFIXES = [
     "Search Results\nWhat's on your mind?",
 ]
 INLINE_CITATION_COUNT_RE = re.compile(r"^\+ ?\d+$")
+SOURCE_LABEL_HINTS = (
+    "财联社",
+    "东方财富",
+    "新浪",
+    "腾讯",
+    "网易",
+    "搜狐",
+    "凤凰",
+    "证券时报",
+    "证券日报",
+    "中国证券报",
+    "上海证券报",
+    "第一财经",
+    "每日经济新闻",
+    "界面新闻",
+    "澎湃新闻",
+    "华尔街见闻",
+    "央视",
+    "新华社",
+    "人民网",
+    "环球网",
+    "路透",
+    "彭博",
+    "Reuters",
+    "Bloomberg",
+    "CNBC",
+)
+SOURCE_LABEL_SUFFIXES = (
+    "网",
+    "新闻",
+    "财经",
+    "时报",
+    "日报",
+    "证券报",
+    "经济报",
+    "快讯",
+)
 
 BLOCKED_MARKERS = [
     "unusual traffic",
@@ -181,6 +223,8 @@ def _strip_inline_citation_noise(answer_text: str) -> str:
         next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
         if INLINE_CITATION_COUNT_RE.match(next_line) and _is_inline_citation_label(line):
             continue
+        if _is_standalone_source_label(line):
+            continue
         cleaned_lines.append(line)
     return "\n".join(cleaned_lines)
 
@@ -191,6 +235,16 @@ def _is_inline_citation_label(line: str) -> bool:
     if "：" in line or ":" in line:
         return False
     return True
+
+
+def _is_standalone_source_label(line: str) -> bool:
+    if not _is_inline_citation_label(line):
+        return False
+    if any(punctuation in line for punctuation in "。，,；;！？?（）()"):
+        return False
+    if any(hint in line for hint in SOURCE_LABEL_HINTS):
+        return True
+    return len(line) <= 20 and line.endswith(SOURCE_LABEL_SUFFIXES)
 
 
 def _strip_prompt_echo(answer_text: str, query: str) -> str:

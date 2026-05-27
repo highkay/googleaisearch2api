@@ -24,6 +24,54 @@ _DATE_RANGE_RE = re.compile(
 )
 _SINGLE_DAY_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*(?:当天|当日)")
 _INTERNAL_SOURCE_LABEL_RE = re.compile(r"^[A-Za-z]+Result$")
+_FOLLOW_UP_TAIL_PHRASES = (
+    "如果您想进一步了解",
+    "如果你想进一步了解",
+    "如果您想深入了解",
+    "如果你想深入了解",
+    "若需我",
+    "如需我",
+    "如果需要，我可以",
+    "would you like me to",
+    "i can also help",
+)
+_SOURCE_LABEL_HINTS = (
+    "财联社",
+    "东方财富",
+    "新浪",
+    "腾讯",
+    "网易",
+    "搜狐",
+    "凤凰",
+    "证券时报",
+    "证券日报",
+    "中国证券报",
+    "上海证券报",
+    "第一财经",
+    "每日经济新闻",
+    "界面新闻",
+    "澎湃新闻",
+    "华尔街见闻",
+    "央视",
+    "新华社",
+    "人民网",
+    "环球网",
+    "路透",
+    "彭博",
+    "Reuters",
+    "Bloomberg",
+    "CNBC",
+)
+_SOURCE_LABEL_SUFFIXES = (
+    "网",
+    "新闻",
+    "财经",
+    "时报",
+    "日报",
+    "证券报",
+    "经济报",
+    "快讯",
+)
 _GOOGLE_UTILITY_HOSTS = {
     "accounts.google.com",
     "myactivity.google.com",
@@ -69,6 +117,30 @@ def _citation_url(citation: object) -> str:
 
 def _has_usable_citation(citations: Sequence[object] | None) -> bool:
     return any(_citation_url(citation).strip() for citation in citations or [])
+
+
+def _contains_follow_up_tail(answer_text: str) -> bool:
+    return any(phrase.casefold() in answer_text for phrase in _FOLLOW_UP_TAIL_PHRASES)
+
+
+def _standalone_source_label_count(answer: str) -> int:
+    return sum(
+        1
+        for line in answer.splitlines()
+        if _is_standalone_source_label(line.strip())
+    )
+
+
+def _is_standalone_source_label(line: str) -> bool:
+    if not line or len(line) > 80:
+        return False
+    if ":" in line or "：" in line:
+        return False
+    if any(punctuation in line for punctuation in "。，,；;！？?（）()"):
+        return False
+    if any(hint in line for hint in _SOURCE_LABEL_HINTS):
+        return True
+    return len(line) <= 20 and line.endswith(_SOURCE_LABEL_SUFFIXES)
 
 
 def _prompt_requests_multiple_items(prompt_text: str) -> bool:
@@ -210,6 +282,12 @@ def assess_search_answer_quality(
 
     if _prompt_requests_json_results(prompt_text):
         return _assess_json_results_answer(prompt, raw_answer)
+
+    if _contains_follow_up_tail(answer_text):
+        return AnswerQuality(False, "answer contains a follow-up prompt tail")
+
+    if _standalone_source_label_count(raw_answer) >= 2:
+        return AnswerQuality(False, "answer contains standalone source labels")
 
     if _prompt_requests_multiple_items(prompt_text) and len(answer_text) < 120:
         return AnswerQuality(False, "answer is too short for the requested list")

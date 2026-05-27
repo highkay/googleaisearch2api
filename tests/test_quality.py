@@ -30,6 +30,33 @@ def test_accepts_short_answer_with_usable_citation() -> None:
     assert quality.ok is True
 
 
+def test_rejects_follow_up_prompt_tail() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        "台积电 3nm 涨价将带动先进封装、设备和材料供应链需求。"
+        "如果您想深入了解，可以告诉我您更看重哪个方向。",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains a follow-up prompt tail"
+
+
+def test_rejects_multiple_standalone_source_labels() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+台积电 3nm 涨价将推动 A 股半导体供应链重估。
+1. 半导体设备：中微公司、北方华创受益于扩产。
+财联社
+2. 先进封装：长电科技、通富微电受益于 AI 芯片封测需求。
+东方财富
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains standalone source labels"
+
+
 def test_accepts_valid_json_results_without_citations() -> None:
     quality = assess_google_answer_quality(
         "只返回一个 JSON 对象，输出格式固定为 "

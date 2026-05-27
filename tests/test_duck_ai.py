@@ -69,7 +69,7 @@ def test_extract_duck_answer_text_removes_follow_up_tail() -> None:
         """
 Duck.ai
 台积电 3nm 涨价可能利好半导体设备和材料供应链。
-若需我把每家公司的最新财务数据补充成表格，请告诉我。
+如果您想深入了解，我可以把每家公司的最新财务数据补充成表格。
 """,
         "台积电 3nm 涨价 最多返回 5 条",
     )
