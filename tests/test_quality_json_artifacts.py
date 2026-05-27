@@ -67,6 +67,20 @@ def test_rejects_json_result_with_placeholder_url() -> None:
     assert quality.reason == "answer JSON result has an unusable URL"
 
 
+def test_rejects_json_result_with_url_artifact() -> None:
+    quality = assess_google_answer_quality(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。最多返回 5 条',
+        '{"results":[{"title":"伪新闻","content":"URL 含模型拼接痕迹。","source":"新浪财经",'
+        '"url":"https://finance.sina.com.cn/tech/2024-02-17/doc-xyz.html",'
+        '"published_date":"2024-02-17"}]}',
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer JSON result has an unusable URL"
+
+
 def test_rejects_json_result_with_generic_source_label() -> None:
     quality = assess_google_answer_quality(
         "只返回一个 JSON 对象，输出格式固定为 "

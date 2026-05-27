@@ -13,6 +13,10 @@ def test_build_duck_search_prompt_forces_direct_search_answer() -> None:
     assert "Each result must have a concrete publication date from the page" in prompt
     assert "Do not use Japanese labels such as リンク." in prompt
     assert "Do not output placeholder URLs such as example.com." in prompt
+    assert "Do not invent Reuters, Bloomberg, or other article slugs" in prompt
+    assert "Return fewer results rather than filling the requested count" in prompt
+    assert "Do not include unfinished notes" in prompt
+    assert "for JSON requests use an empty results list" in prompt
     assert "台积电 3nm 涨价 最多返回 5 条" in prompt
 
 

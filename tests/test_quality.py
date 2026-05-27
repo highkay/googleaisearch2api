@@ -254,6 +254,69 @@ def test_rejects_raw_answer_with_topic_url_for_result_list() -> None:
     assert quality.reason == "answer contains non-specific URLs"
 
 
+def test_rejects_raw_answer_with_unusable_url_artifact() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+半导体产业链跟踪 — 新浪财经 — 2024-02-17 — https://finance.sina.com.cn/tech/2024-02-17/doc-xyz.html
+为什么相关：链接路径含明显占位符，不应视为真实新闻链接。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains unusable URLs"
+
+
+def test_rejects_raw_answer_with_escaped_url_artifact() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+台积电 3nm 涨价跟踪 — 东方财富 — 2024-02-18 — https://stock.eastmoney.com/a/20240218/20240218\\_1.html
+为什么相关：URL 中的反斜杠是模型输出转义残留。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains unusable URLs"
+
+
+def test_rejects_raw_answer_with_truncated_note_tail() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+AI浪潮下台积电涨价传导顺畅 — 财联社 — 2024-07-08 — https://www.cls.cn/detail/1726012
+为什么相关：报道指出台积电先进制程涨价谈判正在推进。
+（注：
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer appears truncated"
+
+
+def test_normalize_answer_for_prompt_filters_bad_raw_url_blocks() -> None:
+    answer = normalize_answer_for_prompt(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+AI浪潮下台积电涨价传导顺畅 — 财联社 — 2024-07-08 — https://www.cls.cn/detail/1726012
+为什么相关：报道指出台积电先进制程涨价谈判正在推进。
+
+半导体产业链跟踪 — 新浪财经 — 2024-02-17 — https://finance.sina.com.cn/tech/2024-02-17/doc-xyz.html
+为什么相关：链接路径含明显占位符。
+
+台积电 3nm 涨价跟踪 — 东方财富 — 2024-02-18 — https://stock.eastmoney.com/a/20240218/20240218\\_1.html
+为什么相关：URL 中含模型转义残留。
+（注：
+""",
+    )
+
+    assert answer == (
+        "AI浪潮下台积电涨价传导顺畅 — 财联社 — 2024-07-08 — "
+        "https://www.cls.cn/detail/1726012\n"
+        "为什么相关：报道指出台积电先进制程涨价谈判正在推进。"
+    )
+
+
 def test_rejects_malformed_stock_code_for_stock_prompts() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条",

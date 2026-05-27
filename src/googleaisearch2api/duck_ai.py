@@ -67,7 +67,11 @@ similar placeholders.
 If the user writes Chinese, answer in Chinese and use Chinese field labels:
 来源, 日期, 链接, 为什么相关. Do not use Japanese labels such as リンク.
 Do not output placeholder URLs such as example.com.
-If you cannot verify a real source URL, return an empty results list instead of invented results.
+Do not invent Reuters, Bloomberg, or other article slugs from memory.
+Use only exact URLs visible in the search result or opened page.
+Return fewer results rather than filling the requested count with guessed URLs.
+Do not include unfinished notes, parenthetical comments, or trailing note sections.
+If no source URL is verifiable, return no results; for JSON requests use an empty results list.
 
 User request:
 {prompt}"""

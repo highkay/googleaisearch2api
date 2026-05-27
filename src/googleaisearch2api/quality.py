@@ -5,7 +5,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _MULTI_ITEM_REQUEST_RE = re.compile(
@@ -41,6 +41,18 @@ _MALFORMED_STOCK_CODE_RE = re.compile(
 )
 _CITATION_MARKER_ARTIFACT_RE = re.compile(r"\[\s*\d+\s*\]")
 _RAW_URL_RE = re.compile(r"https?://[^\s<>\]\)）\"']+")
+_PLACEHOLDER_URL_PATH_RE = re.compile(
+    r"(?:^|[/_-])(?:doc-?xyz|placeholder|dummy|fake)(?:[._/?#-]|$)",
+    re.IGNORECASE,
+)
+_SPAM_URL_QUERY_RE = re.compile(
+    r"\b(?:biaya|renovasi|plafon|murah|whatsapp|wa\s*\d{4,})\b",
+    re.IGNORECASE,
+)
+_TRUNCATED_TAIL_RE = re.compile(
+    r"(?:（注：|\(注:|注：|note:|[（(\[{【])\s*$",
+    re.IGNORECASE,
+)
 _DOMAIN_ONLY_LINE_RE = re.compile(
     r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$",
     re.IGNORECASE,
@@ -354,7 +366,10 @@ def _prompt_requests_json_results(prompt_text: str) -> bool:
 
 
 def _is_usable_result_url(value: object) -> bool:
-    parsed = urlparse(str(value or "").strip())
+    raw_url = str(value or "").strip()
+    if _url_has_artifacts(raw_url):
+        return False
+    parsed = urlparse(raw_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return False
     host = (parsed.hostname or "").casefold()
@@ -367,6 +382,21 @@ def _is_usable_result_url(value: object) -> bool:
     if host.endswith(".google.com") and host not in _ALLOWED_GOOGLE_SOURCE_HOSTS:
         return False
     return True
+
+
+def _url_has_artifacts(value: object) -> bool:
+    raw_url = str(value or "").strip()
+    if not raw_url:
+        return True
+    if "\\" in raw_url:
+        return True
+    parsed = urlparse(raw_url)
+    path = unquote(parsed.path).casefold()
+    query = unquote(parsed.query.replace("+", " ")).casefold()
+    return bool(
+        _PLACEHOLDER_URL_PATH_RE.search(path)
+        or _SPAM_URL_QUERY_RE.search(query)
+    )
 
 
 def _is_specific_result_url(value: object) -> bool:
@@ -382,10 +412,17 @@ def _is_specific_result_url(value: object) -> bool:
     return not (path in {"search", "s"} and query)
 
 
-def _extract_raw_urls(answer: str) -> list[str]:
+def _extract_raw_url_candidates(answer: str) -> list[str]:
     urls: list[str] = []
     for match in _RAW_URL_RE.finditer(answer):
         url = match.group(0).rstrip(".,，。；;:：、")
+        urls.append(url)
+    return urls
+
+
+def _extract_raw_urls(answer: str) -> list[str]:
+    urls: list[str] = []
+    for url in _extract_raw_url_candidates(answer):
         if _is_usable_result_url(url):
             urls.append(url)
     return urls
@@ -399,6 +436,10 @@ def _clean_raw_source_label(source: str) -> str:
 
 def _contains_non_specific_raw_url(answer: str) -> bool:
     return any(not _is_specific_result_url(url) for url in _extract_raw_urls(answer))
+
+
+def _contains_unusable_raw_url(answer: str) -> bool:
+    return any(not _is_usable_result_url(url) for url in _extract_raw_url_candidates(answer))
 
 
 def _contains_duplicate_raw_url(answer: str) -> bool:
@@ -521,6 +562,20 @@ def _contains_non_specific_raw_date(answer: str) -> bool:
     return False
 
 
+def _appears_truncated(answer: str) -> bool:
+    lines = [line.strip() for line in answer.splitlines() if line.strip()]
+    if not lines:
+        return False
+    last_line = lines[-1]
+    if _TRUNCATED_TAIL_RE.search(last_line):
+        return True
+    if last_line.startswith(
+        ("（注", "(注", "注：", "注:", "Note:", "note:")
+    ) and len(last_line) <= 20:
+        return True
+    return False
+
+
 def _raw_line_starts_result_detail(line: str) -> bool:
     return line.startswith(_RAW_RESULT_DETAIL_PREFIXES)
 
@@ -585,6 +640,8 @@ def _raw_result_block_has_filterable_defect(prompt_text: str, block: str) -> boo
     if _contains_raw_source_host_mismatch(block):
         return True
     if _contains_non_specific_raw_date(block):
+        return True
+    if _contains_unusable_raw_url(block):
         return True
     if _contains_non_specific_raw_url(block):
         return True
@@ -789,6 +846,9 @@ def assess_search_answer_quality(
     if _contains_search_results_tail(raw_answer):
         return AnswerQuality(False, "answer contains search results UI tail")
 
+    if _appears_truncated(raw_answer):
+        return AnswerQuality(False, "answer appears truncated")
+
     if _standalone_source_label_count(raw_answer) >= 2:
         return AnswerQuality(False, "answer contains standalone source labels")
 
@@ -806,6 +866,9 @@ def assess_search_answer_quality(
 
     if _contains_non_specific_raw_date(raw_answer):
         return AnswerQuality(False, "answer contains non-specific publication dates")
+
+    if _contains_unusable_raw_url(raw_answer):
+        return AnswerQuality(False, "answer contains unusable URLs")
 
     if _prompt_requests_multiple_items(prompt_text) and _contains_non_specific_raw_url(
         raw_answer
