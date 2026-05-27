@@ -317,7 +317,12 @@ def _run_google_ai(
             quality = assess_search_answer_quality(prompt, result.answer_text, result.citations)
             if not quality.ok:
                 message = f"Google answer failed quality check: {quality.reason}"
-                services.store.finish_request_error(request_id, message, duration_ms)
+                services.store.finish_request_error(
+                    request_id,
+                    message,
+                    duration_ms,
+                    result=result,
+                )
                 _record_proxy_session_error(
                     services,
                     selection,
@@ -508,7 +513,12 @@ def _run_duck_ai(
         quality = assess_search_answer_quality(prompt, result.answer_text, result.citations)
         if not quality.ok:
             message = f"Duck.ai answer failed quality check: {quality.reason}"
-            services.store.finish_request_error(request_id, message, duration_ms)
+            services.store.finish_request_error(
+                request_id,
+                message,
+                duration_ms,
+                result=result,
+            )
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
         services.store.finish_request_success(request_id, result, duration_ms)
         services.duck_circuit.record_success()

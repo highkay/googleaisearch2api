@@ -235,6 +235,7 @@ class ConfigStore:
         error_message: str,
         duration_ms: int,
         *,
+        result: GoogleAiResult | None = None,
         google_block_ips: list[str] | None = None,
         google_block_mismatch: bool = False,
     ) -> None:
@@ -244,6 +245,13 @@ class ConfigStore:
                 return
             row.status = "error"
             row.error_message = _sanitize_logged_text(error_message, limit=3000)
+            if result is not None:
+                row.response_preview = _sanitize_logged_text(result.answer_text, limit=3000)
+                row.final_url = _sanitize_logged_url(result.final_url)
+                row.citations_json = json.dumps(
+                    [citation.model_dump() for citation in result.citations],
+                    ensure_ascii=False,
+                )
             row.duration_ms = duration_ms
             if google_block_ips is not None:
                 row.google_block_ips_json = json.dumps(google_block_ips, ensure_ascii=False)

@@ -158,3 +158,38 @@ def test_request_logs_redact_secrets_and_trim_old_rows(tmp_path: Path) -> None:
     assert "***" in recent[1].response_preview
     assert "private+prompt" not in recent[1].final_url
     assert "q=" not in recent[1].final_url
+
+
+def test_finish_request_error_can_record_rejected_result(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    config = store.get_config()
+    request_id = store.start_request(
+        endpoint="/v1/chat/completions",
+        model_name=config.default_model,
+        prompt_preview="stock query",
+        client_ip="127.0.0.1",
+        stream=False,
+        config=config,
+    )
+
+    store.finish_request_error(
+        request_id,
+        "Google answer failed quality check: answer is not valid JSON",
+        duration_ms=42,
+        result=GoogleAiResult(
+            answer_text="api_key=AIzaVerySecretValue1234567890 malformed answer",
+            citations=[Citation(title="Example", url="https://example.com/source")],
+            final_url="https://www.google.com/search?udm=50&aep=11&q=private+prompt&hl=en",
+            page_title="Google Search",
+        ),
+    )
+
+    recent = store.list_recent_requests(limit=1)
+
+    assert recent[0].status == "error"
+    assert recent[0].response_preview == "api_key=AIza***7890 malformed answer"
+    assert recent[0].final_url is not None
+    assert "private+prompt" not in recent[0].final_url
+    assert "q=" not in recent[0].final_url
+    assert recent[0].citations[0].title == "Example"
+    assert recent[0].citations[0].url == "https://example.com/source"

@@ -28,6 +28,7 @@ _MALFORMED_STOCK_CODE_RE = re.compile(
     r"[（(][^）)]{0,40}\b\d{6}\b\s*/\s*0x[a-z0-9]*\s*[）)]",
     re.IGNORECASE,
 )
+_CITATION_MARKER_ARTIFACT_RE = re.compile(r"\[\s*\d+\s*\]")
 _FOLLOW_UP_TAIL_PHRASES = (
     "如果您想进一步了解",
     "如果你想进一步了解",
@@ -166,6 +167,10 @@ def _contains_malformed_stock_code(prompt_text: str, answer: str) -> bool:
     return bool(_MALFORMED_STOCK_CODE_RE.search(answer))
 
 
+def _contains_citation_marker_artifact(value: object) -> bool:
+    return bool(_CITATION_MARKER_ARTIFACT_RE.search(str(value or "")))
+
+
 def _prompt_requests_multiple_items(prompt_text: str) -> bool:
     return bool(_MULTI_ITEM_REQUEST_RE.search(prompt_text))
 
@@ -243,6 +248,7 @@ def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
 
 
 def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
+    prompt_text = _normalize(prompt)
     try:
         payload = json.loads(answer.strip())
     except json.JSONDecodeError:
@@ -251,6 +257,9 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         return AnswerQuality(False, "answer JSON does not contain a results list")
 
+    if _contains_malformed_stock_code(prompt_text, answer):
+        return AnswerQuality(False, "answer contains malformed stock code")
+
     date_range = _extract_requested_date_range(prompt)
     for item in payload["results"]:
         if not isinstance(item, dict):
@@ -258,6 +267,8 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
         for field in ("title", "content", "source", "url", "published_date"):
             if not str(item.get(field) or "").strip():
                 return AnswerQuality(False, f"answer JSON result is missing {field}")
+        if _contains_citation_marker_artifact(item.get("content")):
+            return AnswerQuality(False, "answer JSON result contains citation marker artifacts")
         if not _is_usable_result_url(item.get("url")):
             return AnswerQuality(False, "answer JSON result has an unusable URL")
         if not _DATE_RE.match(str(item.get("published_date") or "").strip()):
