@@ -24,6 +24,14 @@ DUCK_RATE_LIMIT_MARKERS = [
     "try again later",
     "please try again later",
 ]
+DUCK_SEARCH_PROMPT_TEMPLATE = """You are being used as a search answer engine.
+Answer the user's request directly with concrete, useful findings.
+Do not return only search suggestions.
+Do not ask whether to search.
+If the user asks for a fixed output format, follow it exactly.
+
+User request:
+{prompt}"""
 
 
 class DuckAiRuntimeError(RuntimeError):
@@ -36,6 +44,10 @@ class DuckAiRateLimitedError(DuckAiRuntimeError):
 
 class DuckAiTimeoutError(DuckAiRuntimeError):
     pass
+
+
+def build_duck_search_prompt(prompt: str) -> str:
+    return DUCK_SEARCH_PROMPT_TEMPLATE.format(prompt=prompt.strip())
 
 
 class DuckAiRunner:
@@ -57,6 +69,7 @@ class DuckAiRunner:
         prompt = prompt.strip()
         if not prompt:
             raise DuckAiRuntimeError("Prompt is empty.")
+        submitted_prompt = build_duck_search_prompt(prompt)
 
         with self._lock:
             for attempt in range(2):
@@ -67,7 +80,7 @@ class DuckAiRunner:
                     context = self._new_context(config)
                     page = context.new_page()
                     page.set_default_timeout(config.browser_timeout_ms)
-                    return self._run_prompt_once(page, config, prompt)
+                    return self._run_prompt_once(page, config, submitted_prompt)
                 except (DuckAiRateLimitedError, DuckAiTimeoutError, DuckAiRuntimeError):
                     raise
                 except PatchrightError as exc:
@@ -282,6 +295,8 @@ def extract_duck_answer_text(body_text: str, prompt: str, *, limit: int = 3000) 
         re.compile(r"^\u6240\u6709\u804a\u5929\u8bb0\u5f55\u5747\u4e3a"),
         re.compile(r"^DuckDuckGo \u5df2\u533f\u540d\u5904\u7406"),
         re.compile(r"^(\u5de5\u5177|\u5feb\u901f|\u804a\u5929)$"),
+        re.compile(r"^(Searching the web|Search the web|Hide Reasoning)", re.IGNORECASE),
+        re.compile(r"^(\u6b63\u5728\u641c\u7d22|\u9690\u85cf\u63a8\u7406)"),
     ]
 
     lines: list[str] = []
