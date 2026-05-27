@@ -257,6 +257,9 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         return AnswerQuality(False, "answer JSON does not contain a results list")
 
+    if not payload["results"]:
+        return AnswerQuality(False, "answer JSON results list is empty")
+
     if _contains_malformed_stock_code(prompt_text, answer):
         return AnswerQuality(False, "answer contains malformed stock code")
 

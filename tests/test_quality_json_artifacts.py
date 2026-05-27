@@ -25,3 +25,15 @@ def test_rejects_json_result_with_citation_marker_artifact() -> None:
 
     assert quality.ok is False
     assert quality.reason == "answer JSON result contains citation marker artifacts"
+
+
+def test_rejects_empty_json_results() -> None:
+    quality = assess_google_answer_quality(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。最多返回 5 条',
+        '{"results":[]}',
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer JSON results list is empty"
