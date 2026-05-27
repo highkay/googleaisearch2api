@@ -752,6 +752,50 @@ def _is_aggregate_json_source_label(value: object) -> bool:
     return any(separator in raw_source for separator in _COMPOSITE_JSON_SOURCE_LABEL_SEPARATORS)
 
 
+def _json_result_item_filter_reason(
+    prompt_text: str,
+    item: object,
+    date_range: tuple[str, str] | None,
+    seen_urls: set[str],
+) -> str | None:
+    if not isinstance(item, dict):
+        return "quality"
+
+    for field in ("title", "content", "source", "url", "published_date"):
+        if not str(item.get(field) or "").strip():
+            return "quality"
+    if _contains_citation_marker_artifact(item.get("content")):
+        return "quality"
+    if not _is_usable_result_url(item.get("url")):
+        return "quality"
+    url = str(item.get("url") or "").strip()
+    if not _is_specific_result_url(url):
+        return "quality"
+    if url in seen_urls:
+        return "quality"
+    published_date = str(item.get("published_date") or "").strip()
+    if not _DATE_RE.match(published_date):
+        return "quality"
+    if _published_date_is_future(published_date):
+        return "date"
+    if date_range is not None and not _published_date_is_in_range(
+        published_date,
+        date_range,
+    ):
+        return "date"
+    source = str(item.get("source") or "").strip()
+    if _INTERNAL_SOURCE_LABEL_RE.match(source):
+        return "quality"
+    if _is_generic_json_source_label(source):
+        return "quality"
+    if _is_aggregate_json_source_label(source):
+        return "quality"
+    item_text = json.dumps(item, ensure_ascii=False)
+    if _contains_malformed_stock_code(prompt_text, item_text):
+        return "quality"
+    return None
+
+
 def _extract_requested_date_range(prompt: str) -> tuple[str, str] | None:
     range_match = _DATE_RANGE_RE.search(prompt)
     if range_match:
@@ -790,23 +834,27 @@ def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
     payload, candidate = parsed
 
     filtered_results: list[object] = []
+    filter_reasons: list[str] = []
     changed = candidate != answer.strip()
+    seen_urls: set[str] = set()
     for item in payload["results"]:
-        if isinstance(item, dict):
-            published_date = str(item.get("published_date") or "").strip()
-            if _DATE_RE.match(published_date):
-                if _published_date_is_future(published_date):
-                    changed = True
-                    continue
-                if date_range is not None and not _published_date_is_in_range(
-                    published_date,
-                    date_range,
-                ):
-                    changed = True
-                    continue
+        filter_reason = _json_result_item_filter_reason(
+            prompt_text,
+            item,
+            date_range,
+            seen_urls,
+        )
+        if filter_reason is not None:
+            filter_reasons.append(filter_reason)
+            changed = True
+            continue
         filtered_results.append(item)
+        if isinstance(item, dict):
+            seen_urls.add(str(item.get("url") or "").strip())
 
     if not changed:
+        return answer
+    if not filtered_results and any(reason != "date" for reason in filter_reasons):
         return answer
 
     normalized_payload = dict(payload)

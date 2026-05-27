@@ -1,4 +1,9 @@
-from googleaisearch2api.quality import assess_google_answer_quality
+import json
+
+from googleaisearch2api.quality import (
+    assess_google_answer_quality,
+    normalize_answer_for_prompt,
+)
 
 
 def test_rejects_json_result_with_malformed_stock_code_for_stock_prompts() -> None:
@@ -149,3 +154,48 @@ def test_rejects_json_result_with_topic_url() -> None:
 
     assert quality.ok is False
     assert quality.reason == "answer JSON result URL is not specific"
+
+
+def test_normalize_answer_for_prompt_filters_bad_json_result_items() -> None:
+    prompt = (
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。最多返回 5 条'
+    )
+    answer = (
+        '{"results":['
+        '{"title":"第一条","content":"第一条可追溯结果。","source":"凤凰网财经",'
+        '"url":"https://finance.ifeng.com/c/8b1M0339ZZB","published_date":"2026-05-27"},'
+        '{"title":"重复条","content":"同一网页被拆成第二条。","source":"凤凰网财经",'
+        '"url":"https://finance.ifeng.com/c/8b1M0339ZZB","published_date":"2026-05-27"},'
+        '{"title":"聚合来源","content":"来源字段拼接了多个发布方。",'
+        '"source":"东方财富数据中心 / 彭博社金融数据",'
+        '"url":"https://data.eastmoney.com/zjlx/600487.html","published_date":"2026-05-27"},'
+        '{"title":"汇总页","content":"只给出了媒体首页。","source":"财联社",'
+        '"url":"https://www.cls.cn/","published_date":"2026-05-27"},'
+        '{"title":"第二条","content":"第二条可追溯结果。","source":"新浪财经",'
+        '"url":"https://finance.sina.com.cn/stock/2026-05-27/doc-valid.shtml",'
+        '"published_date":"2026-05-27"}]}'
+    )
+
+    normalized = normalize_answer_for_prompt(prompt, answer)
+    payload = json.loads(normalized)
+
+    assert [item["title"] for item in payload["results"]] == ["第一条", "第二条"]
+    assert assess_google_answer_quality(prompt, normalized).ok is True
+
+
+def test_normalize_answer_for_prompt_keeps_all_bad_json_results() -> None:
+    prompt = (
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。最多返回 5 条'
+    )
+    answer = (
+        '{"results":[{"title":"聚合来源","content":"来源字段拼接了多个发布方。",'
+        '"source":"每日经济新闻 / 新浪财经转载",'
+        '"url":"https://finance.sina.com.cn/stock/2026-05-27/doc-news.shtml",'
+        '"published_date":"2026-05-27"}]}'
+    )
+
+    assert normalize_answer_for_prompt(prompt, answer) == answer
