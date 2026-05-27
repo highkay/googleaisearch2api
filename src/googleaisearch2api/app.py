@@ -58,7 +58,11 @@ from .proxy_sessions import (
     google_block_has_ip_mismatch,
     parse_google_block_ips,
 )
-from .quality import assess_search_answer_quality, normalize_answer_for_prompt
+from .quality import (
+    answer_has_empty_json_results,
+    assess_search_answer_quality,
+    normalize_answer_for_prompt,
+)
 from .query_adapter import (
     build_prompt_from_query_request,
     build_query_response,
@@ -87,6 +91,19 @@ def _normalize_result_for_prompt(prompt: str, result: GoogleAiResult) -> GoogleA
     if normalized_answer == result.answer_text:
         return result
     return result.model_copy(update={"answer_text": normalized_answer})
+
+
+def _auto_empty_json_result_error(
+    engine_label: str,
+    prompt: str,
+    result: GoogleAiResult,
+    config: ServiceConfig,
+) -> str | None:
+    if config.search_engine != "auto":
+        return None
+    if not answer_has_empty_json_results(prompt, result.answer_text):
+        return None
+    return f"{engine_label} returned empty JSON results in auto mode"
 
 
 class DuckAiCircuitBreaker:
@@ -330,6 +347,23 @@ def _run_google_ai(
                     error_message=message,
                 )
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
+            empty_json_message = _auto_empty_json_result_error(
+                "Google",
+                prompt,
+                result,
+                config,
+            )
+            if empty_json_message is not None:
+                services.store.finish_request_error(
+                    request_id,
+                    empty_json_message,
+                    duration_ms,
+                    result=result,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=empty_json_message,
+                )
             services.store.finish_request_success(request_id, result, duration_ms)
             if selection is not None:
                 services.proxy_session_store.finish_request_success(
@@ -520,6 +554,23 @@ def _run_duck_ai(
                 result=result,
             )
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
+        empty_json_message = _auto_empty_json_result_error(
+            "Duck.ai",
+            prompt,
+            result,
+            config,
+        )
+        if empty_json_message is not None:
+            services.store.finish_request_error(
+                request_id,
+                empty_json_message,
+                duration_ms,
+                result=result,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=empty_json_message,
+            )
         services.store.finish_request_success(request_id, result, duration_ms)
         services.duck_circuit.record_success()
         if selection is not None:

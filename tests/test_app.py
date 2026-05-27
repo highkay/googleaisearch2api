@@ -416,6 +416,70 @@ def test_query_auto_falls_back_to_duck_when_google_list_answer_is_too_short(
     assert "too short for the requested list" in (recent[1].error_message or "")
 
 
+def test_query_auto_falls_back_to_duck_when_google_json_results_are_empty(
+    test_app,
+) -> None:
+    prompt = (
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"","published_date":"YYYY-MM-DD"}]}。'
+        '若找不到足够直接相关的结果，返回 {"results": []}。'
+        "问题：PingAn 000001.SZ 最新公告 新闻 催化 风险 最多返回 5 条"
+    )
+    duck_answer = (
+        '{"results":[{"title":"平安银行公告","content":"平安银行发布公告。",'
+        '"source":"证券时报","url":"https://www.stcn.com/article/detail/1234567.html",'
+        '"published_date":"2026-05-27"}]}'
+    )
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "auto")
+        google_pool = _install_fake_pool(test_app, answer_text='{"results": []}')
+        duck_pool = _install_fake_duck_pool(test_app, answer_text=duck_answer)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": prompt},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == duck_answer
+    assert google_pool.prompts == [f"User request:\n{prompt}"]
+    assert duck_pool.prompts == [f"User request:\n{prompt}"]
+    assert [record.engine for record in recent] == ["duck", "google"]
+    assert [record.status for record in recent] == ["ok", "error"]
+    assert "empty JSON results" in (recent[1].error_message or "")
+
+
+def test_query_auto_rejects_when_both_engines_return_empty_json_results(
+    test_app,
+) -> None:
+    prompt = (
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"","published_date":"YYYY-MM-DD"}]}。'
+        '若找不到足够直接相关的结果，返回 {"results": []}。'
+        "问题：PingAn 000001.SZ 最新公告 新闻 催化 风险 最多返回 5 条"
+    )
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "auto")
+        google_pool = _install_fake_pool(test_app, answer_text='{"results": []}')
+        duck_pool = _install_fake_duck_pool(test_app, answer_text='{"results": []}')
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": prompt},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+
+    assert response.status_code == 502
+    assert "Both search engines failed" in response.json()["detail"]
+    assert "Google returned empty JSON results in auto mode" in response.json()["detail"]
+    assert "Duck.ai returned empty JSON results in auto mode" in response.json()["detail"]
+    assert google_pool.prompts == [f"User request:\n{prompt}"]
+    assert duck_pool.prompts == [f"User request:\n{prompt}"]
+    assert [record.engine for record in recent] == ["duck", "google"]
+    assert [record.status for record in recent] == ["error", "error"]
+
+
 def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:
     with TestClient(test_app) as client:
         test_app.state.services.store.update_config(

@@ -427,6 +427,17 @@ def _extract_json_results_payload(answer: str) -> tuple[dict[str, Any], str] | N
     return None
 
 
+def answer_has_empty_json_results(prompt: str, answer: str) -> bool:
+    prompt_text = _normalize(prompt)
+    if not _prompt_requests_json_results(prompt_text):
+        return False
+    parsed = _extract_json_results_payload(answer)
+    if parsed is None:
+        return False
+    payload, _ = parsed
+    return not payload["results"]
+
+
 def _is_usable_result_url(value: object) -> bool:
     raw_url = str(value or "").strip()
     if _url_has_artifacts(raw_url):
