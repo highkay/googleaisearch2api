@@ -125,6 +125,21 @@ def test_rejects_raw_answer_with_aggregate_source_label() -> None:
     assert quality.reason == "answer contains aggregate source labels"
 
 
+def test_allows_raw_answer_with_single_reprint_note() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价",
+        """
+台积电将对3-5nm AI芯片涨价5%-10%
+来源：电子技术应用（ChinaAET，转载自芯智讯）
+日期：2024-07-08
+链接：https://chinaaet.com/article/3000166304
+相关性：报道给出3nm和5nm先进制程针对AI产品的涨价幅度，并说明先进封装需求对产业链的影响。
+""",
+    )
+
+    assert quality.ok is True
+
+
 def test_rejects_raw_answer_with_non_specific_publication_date() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",

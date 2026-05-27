@@ -175,7 +175,11 @@ _COMPOSITE_JSON_SOURCE_LABEL_SEPARATORS = (
     "、",
 )
 _AGGREGATE_RAW_SOURCE_LABEL_PHRASES = (
-    *_AGGREGATE_JSON_SOURCE_LABEL_PHRASES,
+    "综合",
+    "汇总",
+    "整理",
+    "multiple sources",
+    "various sources",
     "多家",
     "汇编",
     "专题",
