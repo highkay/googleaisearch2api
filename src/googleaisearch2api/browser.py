@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from textwrap import shorten
@@ -35,6 +36,10 @@ DISCLAIMER_MARKERS = [
     "AI's response may contain mistakes",
     "AI responses may contain mistakes",
     "AI Mode response is ready",
+    "如果您想进一步了解",
+    "如果你想进一步了解",
+    "Would you like me to",
+    "I can also help",
 ]
 
 ANSWER_READY_MARKERS = [
@@ -45,6 +50,7 @@ NON_ANSWER_PREFIXES = [
     "What's on your mind?",
     "Search Results\nWhat's on your mind?",
 ]
+INLINE_CITATION_COUNT_RE = re.compile(r"^\+ ?\d+$")
 
 BLOCKED_MARKERS = [
     "unusual traffic",
@@ -161,7 +167,30 @@ def clean_answer_text(answer_text: str, query: str) -> str:
         marker_index = cleaned.find(marker)
         if marker_index >= 0:
             cleaned = cleaned[:marker_index].strip()
-    return cleaned.strip()
+    return _strip_inline_citation_noise(cleaned).strip()
+
+
+def _strip_inline_citation_noise(answer_text: str) -> str:
+    lines = [line.strip() for line in answer_text.splitlines()]
+    cleaned_lines: list[str] = []
+    for index, line in enumerate(lines):
+        if not line:
+            continue
+        if INLINE_CITATION_COUNT_RE.match(line):
+            continue
+        next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        if INLINE_CITATION_COUNT_RE.match(next_line) and _is_inline_citation_label(line):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
+def _is_inline_citation_label(line: str) -> bool:
+    if len(line) > 80:
+        return False
+    if "：" in line or ":" in line:
+        return False
+    return True
 
 
 def _strip_prompt_echo(answer_text: str, query: str) -> str:

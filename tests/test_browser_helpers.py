@@ -25,6 +25,24 @@ def test_clean_answer_text_rejects_exact_you_said_echo() -> None:
     assert clean_answer_text(f"You said:\n{query}", query) == ""
 
 
+def test_clean_answer_text_removes_inline_citation_noise() -> None:
+    raw = """
+台积电 3nm 涨价利好 A 股半导体供应链。
+财联社
+ +3
+中微公司 (605507)：国内刻蚀设备龙头，受益于先进制程扩产。
+新浪新闻_手机新浪网
+ +2
+如果您想进一步了解，我们可以探讨：
+这些企业的估值弹性
+"""
+
+    assert clean_answer_text(raw, "") == (
+        "台积电 3nm 涨价利好 A 股半导体供应链。\n"
+        "中微公司 (605507)：国内刻蚀设备龙头，受益于先进制程扩产。"
+    )
+
+
 class _FakePage:
     url = "https://www.google.com/search?udm=50"
 

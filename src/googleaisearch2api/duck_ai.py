@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 
@@ -308,7 +309,56 @@ def extract_duck_answer_text(body_text: str, prompt: str, *, limit: int = 3000) 
             continue
         lines.append(line)
 
-    return _normalize_text("\n".join(lines))[:limit]
+    answer = _normalize_text("\n".join(lines))
+    if _prompt_requests_json_results(prompt):
+        json_answer = _extract_json_results_object(answer)
+        if json_answer:
+            return json_answer[:limit]
+
+    return answer[:limit]
+
+
+def _prompt_requests_json_results(prompt: str) -> bool:
+    normalized = (prompt or "").lower()
+    return "json" in normalized and "results" in normalized
+
+
+def _extract_json_results_object(text: str) -> str:
+    for start_index, char in enumerate(text):
+        if char != "{":
+            continue
+
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start_index, len(text)):
+            current = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    in_string = False
+                continue
+
+            if current == '"':
+                in_string = True
+            elif current == "{":
+                depth += 1
+            elif current == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start_index : index + 1]
+                    try:
+                        payload = json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
+                    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                        return json.dumps(payload, ensure_ascii=False)
+                    break
+
+    return ""
 
 
 def _normalize_text(value: str) -> str:

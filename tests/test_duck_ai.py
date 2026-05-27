@@ -41,3 +41,24 @@ Hide Reasoning
     )
 
     assert answer == '{"results": []}'
+
+
+def test_extract_duck_answer_text_keeps_only_json_results_for_json_prompt() -> None:
+    answer = extract_duck_answer_text(
+        """
+Duck.ai
+User request:
+Return JSON with results.
+唯特偶 A股 股票代码 上市公司 2026-05-27
+money.finance.sina.com.cn
+quote.eastmoney.com
+{"results":[{"title":"唯特偶","content":"股票代码为301319。","source":"新浪财经","url":"https://example.com","published_date":"2026-05-27"}]}
+""",
+        "User request:\nReturn JSON with results.",
+    )
+
+    assert answer == (
+        '{"results": [{"title": "唯特偶", "content": "股票代码为301319。", '
+        '"source": "新浪财经", "url": "https://example.com", '
+        '"published_date": "2026-05-27"}]}'
+    )
