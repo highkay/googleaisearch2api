@@ -6,6 +6,8 @@ def test_build_duck_search_prompt_forces_direct_search_answer() -> None:
 
     assert "Do not return only search suggestions." in prompt
     assert "Do not ask whether to search." in prompt
+    assert "only include ticker symbols you are confident are real" in prompt
+    assert "real six-digit A-share codes" in prompt
     assert "台积电 3nm 涨价 最多返回 5 条" in prompt
 
 

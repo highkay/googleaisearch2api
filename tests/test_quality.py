@@ -57,6 +57,26 @@ def test_rejects_multiple_standalone_source_labels() -> None:
     assert quality.reason == "answer contains standalone source labels"
 
 
+def test_rejects_malformed_stock_code_for_stock_prompts() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条",
+        "汇顶科技（603160 / 0x） — AI 终端需求提升，间接受益。",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains malformed stock code"
+
+
+def test_allows_hex_text_for_non_stock_prompts() -> None:
+    quality = assess_google_answer_quality(
+        "解释一下十六进制地址",
+        "十六进制字面量通常以 0x 开头，例如 0x10 表示十进制的 16。",
+        [Citation(title="Hex docs", url="https://example.com/hex")],
+    )
+
+    assert quality.ok is True
+
+
 def test_accepts_valid_json_results_without_citations() -> None:
     quality = assess_google_answer_quality(
         "只返回一个 JSON 对象，输出格式固定为 "

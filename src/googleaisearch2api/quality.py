@@ -24,6 +24,10 @@ _DATE_RANGE_RE = re.compile(
 )
 _SINGLE_DAY_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*(?:当天|当日)")
 _INTERNAL_SOURCE_LABEL_RE = re.compile(r"^[A-Za-z]+Result$")
+_MALFORMED_STOCK_CODE_RE = re.compile(
+    r"[（(][^）)]{0,40}\b\d{6}\b\s*/\s*0x[a-z0-9]*\s*[）)]",
+    re.IGNORECASE,
+)
 _FOLLOW_UP_TAIL_PHRASES = (
     "如果您想进一步了解",
     "如果你想进一步了解",
@@ -97,6 +101,15 @@ _GENERIC_CLARIFICATION_PHRASES = (
     "需要哪方面",
     "哪方面信息",
 )
+_STOCK_PROMPT_PHRASES = (
+    "a股",
+    "受益股",
+    "个股",
+    "股票",
+    "证券",
+    "ticker",
+    "stock",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +154,16 @@ def _is_standalone_source_label(line: str) -> bool:
     if any(hint in line for hint in _SOURCE_LABEL_HINTS):
         return True
     return len(line) <= 20 and line.endswith(_SOURCE_LABEL_SUFFIXES)
+
+
+def _prompt_is_stock_related(prompt_text: str) -> bool:
+    return any(phrase in prompt_text for phrase in _STOCK_PROMPT_PHRASES)
+
+
+def _contains_malformed_stock_code(prompt_text: str, answer: str) -> bool:
+    if not _prompt_is_stock_related(prompt_text):
+        return False
+    return bool(_MALFORMED_STOCK_CODE_RE.search(answer))
 
 
 def _prompt_requests_multiple_items(prompt_text: str) -> bool:
@@ -288,6 +311,9 @@ def assess_search_answer_quality(
 
     if _standalone_source_label_count(raw_answer) >= 2:
         return AnswerQuality(False, "answer contains standalone source labels")
+
+    if _contains_malformed_stock_code(prompt_text, raw_answer):
+        return AnswerQuality(False, "answer contains malformed stock code")
 
     if _prompt_requests_multiple_items(prompt_text) and len(answer_text) < 120:
         return AnswerQuality(False, "answer is too short for the requested list")

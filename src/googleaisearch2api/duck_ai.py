@@ -41,6 +41,9 @@ Answer the user's request directly with concrete, useful findings.
 Do not return only search suggestions.
 Do not ask whether to search.
 If the user asks for a fixed output format, follow it exactly.
+For stock answers, only include ticker symbols you are confident are real.
+For A-share answers, use only real six-digit A-share codes; omit uncertain codes.
+Do not output placeholder codes such as 0x, N/A, or unknown.
 
 User request:
 {prompt}"""
