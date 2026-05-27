@@ -19,6 +19,7 @@ class ServiceConfigRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     default_model: Mapped[str] = mapped_column(String(128))
+    search_engine: Mapped[str] = mapped_column(String(32), default="google")
     api_token: Mapped[str] = mapped_column(String(512))
     browser_channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
     browser_executable_path: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -41,6 +42,7 @@ class RequestLogRow(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     endpoint: Mapped[str] = mapped_column(String(64))
+    engine: Mapped[str] = mapped_column(String(32), default="google")
     status: Mapped[str] = mapped_column(String(32), default="pending")
     model_name: Mapped[str] = mapped_column(String(128))
     prompt_preview: Mapped[str] = mapped_column(Text, default="")
@@ -155,11 +157,13 @@ def create_tables(engine) -> None:
 
 
 def _ensure_service_config_columns(engine) -> None:
+    _ensure_column(engine, "service_config", "search_engine", "VARCHAR(32) DEFAULT 'google'")
     _ensure_column(engine, "service_config", "browser_user_agent", "TEXT")
     _ensure_column(engine, "service_config", "resin_sticky_session_enabled", "BOOLEAN DEFAULT 0")
 
 
 def _ensure_request_log_columns(engine) -> None:
+    _ensure_column(engine, "request_logs", "engine", "VARCHAR(32) DEFAULT 'google'")
     _ensure_column(engine, "request_logs", "resin_sticky_session_enabled", "BOOLEAN DEFAULT 0")
     _ensure_column(engine, "request_logs", "proxy_session_id", "INTEGER")
     _ensure_column(engine, "request_logs", "proxy_base_username", "TEXT")

@@ -209,6 +209,7 @@ label span {
 }
 
 input,
+select,
 textarea {
     width: 100%;
     border: 1px solid rgba(23, 32, 29, 0.12);
@@ -217,6 +218,10 @@ textarea {
     font: inherit;
     color: var(--text);
     background: rgba(255, 255, 255, 0.78);
+}
+
+select {
+    appearance: none;
 }
 
 textarea {

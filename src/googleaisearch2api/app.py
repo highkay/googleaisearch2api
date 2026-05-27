@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from .config import (
     get_settings,
 )
 from .db import create_db_engine, create_session_factory, create_tables
+from .duck_ai import DuckAiRateLimitedError, DuckAiRunner, DuckAiRuntimeError, DuckAiTimeoutError
 from .logging import configure_logging
 from .openai_adapter import (
     OpenAICompatibilityError,
@@ -73,8 +75,32 @@ class Services:
     settings: AppSettings
     store: ConfigStore
     pool: BrowserPool
+    duck_pool: BrowserPool
+    duck_circuit: DuckAiCircuitBreaker
     proxy_session_store: ProxySessionStore
     proxy_selector: ProxySessionSelector
+
+
+class DuckAiCircuitBreaker:
+    def __init__(self, cooldown_seconds: int) -> None:
+        self._cooldown_seconds = max(cooldown_seconds, 0)
+        self._open_until = 0.0
+        self._lock = threading.Lock()
+
+    def remaining_seconds(self) -> int:
+        with self._lock:
+            remaining = self._open_until - time.time()
+        return max(int(remaining), 0)
+
+    def record_rate_limited(self) -> None:
+        if self._cooldown_seconds <= 0:
+            return
+        with self._lock:
+            self._open_until = time.time() + self._cooldown_seconds
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._open_until = 0.0
 
 
 def _templates() -> Jinja2Templates:
@@ -106,10 +132,18 @@ def create_services(settings: AppSettings) -> Services:
         queue_capacity=settings.request_queue_size,
         blocked_retry_count=settings.google_ai_blocked_retry_count,
     )
+    duck_pool = BrowserPool(
+        worker_count=settings.duck_ai_workers,
+        queue_capacity=settings.duck_ai_queue_size,
+        runner_factory=DuckAiRunner,
+        blocked_retry_count=0,
+    )
     return Services(
         settings=settings,
         store=store,
         pool=pool,
+        duck_pool=duck_pool,
+        duck_circuit=DuckAiCircuitBreaker(settings.duck_ai_cooldown_seconds),
         proxy_session_store=proxy_session_store,
         proxy_selector=proxy_selector,
     )
@@ -232,6 +266,7 @@ def _run_google_ai(
         except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
             request_id = services.store.start_request(
                 endpoint=endpoint,
+                engine="google",
                 model_name=model_name,
                 prompt_preview=prompt,
                 client_ip=request.client.host if request.client else None,
@@ -248,6 +283,7 @@ def _run_google_ai(
 
         request_id = services.store.start_request(
             endpoint=endpoint,
+            engine="google",
             model_name=model_name,
             prompt_preview=prompt,
             client_ip=request.client.host if request.client else None,
@@ -367,6 +403,231 @@ def _run_google_ai(
     )
 
 
+def _run_duck_ai(
+    *,
+    request: Request,
+    endpoint: str,
+    prompt: str,
+    stream: bool,
+    requested_model: str | None,
+) -> tuple[ServiceConfig, str, str, object]:
+    services = get_services(request)
+    config = services.store.get_config()
+    model_name = _resolve_model(requested_model, config)
+    selection: ProxySessionSelection | None = None
+    effective_config = config
+
+    cooldown_remaining = services.duck_circuit.remaining_seconds()
+    if cooldown_remaining > 0:
+        request_id = services.store.start_request(
+            endpoint=endpoint,
+            engine="duck",
+            model_name=model_name,
+            prompt_preview=prompt,
+            client_ip=request.client.host if request.client else None,
+            stream=stream,
+            config=config,
+        )
+        message = f"Duck.ai is cooling down for {cooldown_remaining}s after rate limiting."
+        services.store.finish_request_error(request_id, message, 0)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=message,
+        )
+
+    try:
+        selection = services.proxy_selector.select(config)
+    except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
+        request_id = services.store.start_request(
+            endpoint=endpoint,
+            engine="duck",
+            model_name=model_name,
+            prompt_preview=prompt,
+            client_ip=request.client.host if request.client else None,
+            stream=stream,
+            config=config,
+        )
+        services.store.finish_request_error(request_id, str(exc), 0)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    if selection is not None:
+        effective_config = selection.config
+
+    request_id = services.store.start_request(
+        endpoint=endpoint,
+        engine="duck",
+        model_name=model_name,
+        prompt_preview=prompt,
+        client_ip=request.client.host if request.client else None,
+        stream=stream,
+        config=effective_config,
+        proxy_session_id=selection.session.id if selection else None,
+        proxy_base_username=selection.session.proxy_base_username if selection else None,
+        proxy_username=selection.session.proxy_username if selection else None,
+        proxy_primary_ip=selection.session.primary_ip if selection else None,
+        proxy_ip_vector_hash=selection.session.ip_vector_hash if selection else None,
+        proxy_iplark_score=selection.session.iplark_min_quality_score if selection else None,
+    )
+
+    started_at = time.perf_counter()
+    try:
+        result = services.duck_pool.execute(
+            effective_config,
+            prompt,
+            blocked_retry_count=0,
+        )
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.store.finish_request_success(request_id, result, duration_ms)
+        services.duck_circuit.record_success()
+        if selection is not None:
+            services.proxy_session_store.finish_request_success(selection.session.id)
+        return effective_config, model_name, request_id, result
+    except BrowserPoolSaturatedError as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.store.finish_request_error(request_id, str(exc), duration_ms)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+        ) from exc
+    except BrowserPoolClosedError as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.store.finish_request_error(request_id, str(exc), duration_ms)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except BrowserPoolTimeoutError as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.store.finish_request_error(request_id, str(exc), duration_ms)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=str(exc),
+        ) from exc
+    except DuckAiRateLimitedError as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.duck_circuit.record_rate_limited()
+        services.store.finish_request_error(request_id, str(exc), duration_ms)
+        _record_proxy_session_error(
+            services,
+            selection,
+            blocked=False,
+            error_message=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except DuckAiTimeoutError as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.store.finish_request_error(request_id, str(exc), duration_ms)
+        _record_proxy_session_error(
+            services,
+            selection,
+            blocked=False,
+            error_message=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=str(exc),
+        ) from exc
+    except DuckAiRuntimeError as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.store.finish_request_error(request_id, str(exc), duration_ms)
+        _record_proxy_session_error(
+            services,
+            selection,
+            blocked=False,
+            error_message=str(exc),
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.store.finish_request_error(request_id, repr(exc), duration_ms)
+        _record_proxy_session_error(
+            services,
+            selection,
+            blocked=False,
+            error_message=repr(exc),
+        )
+        logger.exception("Unhandled Duck.ai request failure")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unhandled Duck.ai request failure.",
+        ) from exc
+
+
+def _should_try_duck_fallback(exc: HTTPException) -> bool:
+    return exc.status_code in {
+        status.HTTP_502_BAD_GATEWAY,
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        status.HTTP_504_GATEWAY_TIMEOUT,
+    }
+
+
+def _run_search_ai(
+    *,
+    request: Request,
+    endpoint: str,
+    prompt: str,
+    stream: bool,
+    requested_model: str | None,
+) -> tuple[ServiceConfig, str, str, object]:
+    services = get_services(request)
+    config = services.store.get_config()
+    if config.search_engine == "duck":
+        return _run_duck_ai(
+            request=request,
+            endpoint=endpoint,
+            prompt=prompt,
+            stream=stream,
+            requested_model=requested_model,
+        )
+    if config.search_engine != "auto":
+        return _run_google_ai(
+            request=request,
+            endpoint=endpoint,
+            prompt=prompt,
+            stream=stream,
+            requested_model=requested_model,
+        )
+
+    try:
+        return _run_google_ai(
+            request=request,
+            endpoint=endpoint,
+            prompt=prompt,
+            stream=stream,
+            requested_model=requested_model,
+        )
+    except HTTPException as google_exc:
+        if not _should_try_duck_fallback(google_exc):
+            raise
+        logger.warning(
+            "Google engine failed with {}; trying Duck.ai fallback: {}",
+            google_exc.status_code,
+            google_exc.detail,
+        )
+        try:
+            return _run_duck_ai(
+                request=request,
+                endpoint=endpoint,
+                prompt=prompt,
+                stream=stream,
+                requested_model=requested_model,
+            )
+        except HTTPException as duck_exc:
+            detail = (
+                "Both search engines failed. "
+                f"Google: {google_exc.detail}; Duck.ai: {duck_exc.detail}"
+            )
+            raise HTTPException(
+                status_code=duck_exc.status_code,
+                detail=detail,
+            ) from duck_exc
+
+
 def _safe_next_target(target: str | None) -> str:
     if not target:
         return "/console"
@@ -416,6 +677,7 @@ def create_app() -> FastAPI:
             yield
         finally:
             services.pool.close()
+            services.duck_pool.close()
 
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(_static_dir())), name="static")
@@ -433,10 +695,12 @@ def create_app() -> FastAPI:
         services = get_services(request)
         config = services.store.get_config()
         pool_summary = services.pool.get_summary()
+        duck_pool_summary = services.duck_pool.get_summary()
         return {
             "ok": True,
             "service": settings.app_name,
             "model": config.default_model,
+            "search_engine": config.search_engine,
             "browser": config.browser_label,
             "proxy_enabled": config.proxy_enabled,
             "resin_sticky_session_enabled": config.resin_sticky_session_enabled,
@@ -446,6 +710,10 @@ def create_app() -> FastAPI:
             "queued_requests": pool_summary.queued_requests,
             "queue_capacity": pool_summary.queue_capacity,
             "workers_with_errors": pool_summary.workers_with_errors,
+            "duck_ai_workers": duck_pool_summary.worker_count,
+            "duck_ai_busy_workers": duck_pool_summary.busy_workers,
+            "duck_ai_queued_requests": duck_pool_summary.queued_requests,
+            "duck_ai_cooldown_remaining_seconds": services.duck_circuit.remaining_seconds(),
             "accepting_requests": pool_summary.accepting_requests,
         }
 
@@ -511,7 +779,7 @@ def create_app() -> FastAPI:
 
     def _query_response(payload: QueryRequest, request: Request):
         prompt = build_prompt_from_query_request(payload)
-        _, model_name, request_id, result = _run_google_ai(
+        _, model_name, request_id, result = _run_search_ai(
             request=request,
             endpoint="/query",
             prompt=prompt,
@@ -571,7 +839,7 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),
             ) from exc
-        _, model_name, _, result = _run_google_ai(
+        _, model_name, _, result = _run_search_ai(
             request=request,
             endpoint="/v1/chat/completions",
             prompt=prompt,
@@ -594,7 +862,7 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),
             ) from exc
-        _, model_name, _, result = _run_google_ai(
+        _, model_name, _, result = _run_search_ai(
             request=request,
             endpoint="/v1/responses",
             prompt=prompt,
@@ -619,6 +887,7 @@ def create_app() -> FastAPI:
             )
         summary = services.store.get_summary()
         pool_summary = services.pool.get_summary()
+        duck_pool_summary = services.duck_pool.get_summary()
         proxy_session_summary = services.proxy_session_store.get_summary()
         proxy_sessions = services.proxy_session_store.list_proxy_sessions(limit=20)
         recent_requests = services.store.list_recent_requests(limit=20)
@@ -630,6 +899,8 @@ def create_app() -> FastAPI:
                 "config": config,
                 "summary": summary,
                 "pool_summary": pool_summary,
+                "duck_pool_summary": duck_pool_summary,
+                "duck_cooldown_remaining_seconds": services.duck_circuit.remaining_seconds(),
                 "proxy_session_summary": proxy_session_summary,
                 "proxy_sessions": proxy_sessions,
                 "recent_requests": recent_requests,
@@ -648,13 +919,17 @@ def create_app() -> FastAPI:
             )
         summary = services.store.get_summary()
         pool_summary = services.pool.get_summary()
+        duck_pool_summary = services.duck_pool.get_summary()
         proxy_session_summary = services.proxy_session_store.get_summary()
         return {
             "summary": summary.model_dump(mode="json"),
             "pool": pool_summary.model_dump(mode="json"),
+            "duck_pool": duck_pool_summary.model_dump(mode="json"),
+            "duck_cooldown_remaining_seconds": services.duck_circuit.remaining_seconds(),
             "proxy_sessions": proxy_session_summary,
             "config": {
                 "default_model": config.default_model,
+                "search_engine": config.search_engine,
                 "browser_label": config.browser_label,
                 "proxy_enabled": config.proxy_enabled,
                 "resin_sticky_session_enabled": config.resin_sticky_session_enabled,
@@ -666,6 +941,7 @@ def create_app() -> FastAPI:
     def update_settings(
         request: Request,
         default_model: str = Form(...),
+        search_engine: str = Form("google"),
         api_token: str = Form(""),
         browser_headless: str | None = Form(None),
         browser_user_agent: str = Form(""),
@@ -689,6 +965,7 @@ def create_app() -> FastAPI:
             )
         update = ServiceConfigUpdate(
             default_model=default_model,
+            search_engine=search_engine,
             api_token=api_token.strip() or current_config.api_token,
             browser_headless=_coerce_checkbox(browser_headless),
             browser_user_agent=browser_user_agent,
@@ -708,6 +985,7 @@ def create_app() -> FastAPI:
         )
         updated_config = services.store.update_config(update)
         services.pool.reset()
+        services.duck_pool.reset()
         response = RedirectResponse(
             url="/console?status_code=saved",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -730,7 +1008,7 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_303_SEE_OTHER,
             )
         try:
-            _run_google_ai(
+            _run_search_ai(
                 request=request,
                 endpoint="/console/probe",
                 prompt=probe_prompt,

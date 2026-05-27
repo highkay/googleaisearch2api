@@ -14,6 +14,7 @@ from googleaisearch2api.schemas import Citation, GoogleAiResult
 def _build_settings_form(**overrides: str) -> dict[str, str]:
     payload = {
         "default_model": "google-search",
+        "search_engine": "google",
         "api_token": "",
         "browser_headless": "on",
         "browser_user_agent": "",
@@ -88,6 +89,39 @@ def _install_fake_pool(
     return pool
 
 
+def _install_fake_duck_pool(
+    app,
+    answer_text: str = "Duck answer.",
+    outcomes: list[GoogleAiResult | Exception] | None = None,
+) -> FakePool:
+    app.state.services.duck_pool.close()
+    pool = FakePool(answer_text=answer_text, outcomes=outcomes)
+    app.state.services.duck_pool = pool
+    return pool
+
+
+def _set_search_engine(app, search_engine: str) -> None:
+    current = app.state.services.store.get_config()
+    app.state.services.store.update_config(
+        ServiceConfigUpdate(
+            default_model=current.default_model,
+            search_engine=search_engine,
+            api_token=current.api_token,
+            browser_headless=current.browser_headless,
+            browser_user_agent=current.browser_user_agent,
+            browser_locale=current.browser_locale,
+            browser_base_url=current.browser_base_url,
+            browser_timeout_ms=current.browser_timeout_ms,
+            answer_timeout_ms=current.answer_timeout_ms,
+            browser_proxy_server=current.browser_proxy_server,
+            browser_proxy_username=current.browser_proxy_username,
+            browser_proxy_password=current.browser_proxy_password,
+            browser_proxy_bypass=current.browser_proxy_bypass,
+            resin_sticky_session_enabled=current.resin_sticky_session_enabled,
+        )
+    )
+
+
 @pytest.fixture
 def test_app(tmp_path, monkeypatch) -> Iterator:
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
@@ -133,6 +167,7 @@ def test_console_login_sets_cookie_and_unlocks_console(test_app) -> None:
     assert "googleaisearch2api_console_token" in response.headers["set-cookie"]
     assert page.status_code == 200
     assert "Runtime Config" in page.text
+    assert "Auto fallback" in page.text
 
 
 def test_console_settings_preserve_and_clear_hidden_secrets(test_app) -> None:
@@ -161,19 +196,23 @@ def test_console_settings_preserve_and_clear_hidden_secrets(test_app) -> None:
 
         preserve_response = client.post(
             "/console/settings",
-            data=_build_settings_form(),
+            data=_build_settings_form(search_engine="auto"),
             follow_redirects=False,
         )
         preserved = test_app.state.services.store.get_config()
 
         clear_response = client.post(
             "/console/settings",
-            data=_build_settings_form(clear_browser_proxy_password="on"),
+            data=_build_settings_form(
+                search_engine="auto",
+                clear_browser_proxy_password="on",
+            ),
             follow_redirects=False,
         )
         cleared = test_app.state.services.store.get_config()
 
     assert preserve_response.status_code == 303
+    assert preserved.search_engine == "auto"
     assert preserved.api_token == "secret-token"
     assert preserved.browser_proxy_password == "stored-pass"
     assert clear_response.status_code == 303
@@ -265,6 +304,50 @@ def test_query_post_returns_tool_friendly_response_shape(test_app) -> None:
         "Question"
     ]
     assert recent[0].endpoint == "/query"
+    assert recent[0].engine == "google"
+
+
+def test_query_duck_engine_uses_duck_pool_only(test_app) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "duck")
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck answer.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Duck answer."
+    assert google_pool.prompts == []
+    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert duck_pool.blocked_retry_counts == [0]
+    assert recent[0].engine == "duck"
+
+
+def test_query_auto_falls_back_to_duck_when_google_is_unavailable(test_app) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "auto")
+        google_pool = _install_fake_pool(
+            test_app,
+            outcomes=[GoogleAiBlockedError("Google blocked this browser session.")],
+        )
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Duck fallback."
+    assert google_pool.prompts == ["User request:\nQuestion"]
+    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert [record.engine for record in recent] == ["duck", "google"]
+    assert [record.status for record in recent] == ["ok", "error"]
 
 
 def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:

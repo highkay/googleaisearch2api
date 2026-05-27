@@ -93,6 +93,7 @@ class ConfigStore:
     def _row_to_config(self, row: ServiceConfigRow) -> ServiceConfig:
         return ServiceConfig(
             default_model=row.default_model,
+            search_engine=getattr(row, "search_engine", None) or self._defaults.search_engine,
             api_token=row.api_token,
             browser_headless=row.browser_headless,
             browser_user_agent=row.browser_user_agent,
@@ -113,6 +114,7 @@ class ConfigStore:
             row = ServiceConfigRow(
                 id=1,
                 default_model=self._defaults.default_model,
+                search_engine=self._defaults.search_engine,
                 api_token=self._defaults.api_token,
                 browser_channel="chrome",
                 browser_executable_path=None,
@@ -143,6 +145,7 @@ class ConfigStore:
         with self._session_factory() as session:
             row = self._get_or_create_row(session)
             row.default_model = update.default_model.strip()
+            row.search_engine = update.search_engine
             row.api_token = update.api_token.strip()
             row.browser_channel = "chrome"
             row.browser_executable_path = None
@@ -167,6 +170,7 @@ class ConfigStore:
         self,
         *,
         endpoint: str,
+        engine: str = "google",
         model_name: str,
         prompt_preview: str,
         client_ip: str | None,
@@ -184,6 +188,7 @@ class ConfigStore:
             row = RequestLogRow(
                 id=request_id,
                 endpoint=endpoint,
+                engine=engine,
                 status="pending",
                 model_name=model_name,
                 prompt_preview=_sanitize_logged_text(prompt_preview, limit=2000),
@@ -307,6 +312,7 @@ class ConfigStore:
                     RecentRequest(
                         id=row.id,
                         endpoint=row.endpoint,
+                        engine=getattr(row, "engine", None) or "google",
                         status=row.status,
                         model_name=row.model_name,
                         prompt_preview=row.prompt_preview,

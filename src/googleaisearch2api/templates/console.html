@@ -15,13 +15,17 @@
                 <h1>Browser-backed OpenAI compatibility, with the operator controls exposed.</h1>
                 <p class="hero-copy">
                     This console reflects the verified runtime shape: the public API is HTTP, but the
-                    execution path is a live Patchright browser session against Google AI search.
+                    execution path is a live Patchright browser session against the selected search engine.
                 </p>
             </div>
             <div class="hero-meta">
                 <div class="meta-card">
                     <span>Current model</span>
                     <strong>{{ config.default_model }}</strong>
+                </div>
+                <div class="meta-card">
+                    <span>Search engine</span>
+                    <strong>{{ config.search_engine }}</strong>
                 </div>
                 <div class="meta-card">
                     <span>Browser target</span>
@@ -80,6 +84,18 @@
                 <strong class="stat-value" data-stat="generation">{{ pool_summary.generation }}</strong>
             </article>
             <article class="stat-card">
+                <span class="stat-label">Duck busy</span>
+                <strong class="stat-value" data-stat="duck_busy_workers">{{ duck_pool_summary.busy_workers }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Duck queued</span>
+                <strong class="stat-value" data-stat="duck_queued_requests">{{ duck_pool_summary.queued_requests }}</strong>
+            </article>
+            <article class="stat-card">
+                <span class="stat-label">Duck cooldown</span>
+                <strong class="stat-value" data-stat="duck_cooldown_remaining_seconds">{{ duck_cooldown_remaining_seconds }}</strong>
+            </article>
+            <article class="stat-card">
                 <span class="stat-label">Sticky active</span>
                 <strong class="stat-value" data-stat="sticky_active">{{ proxy_session_summary.get("active", 0) }}</strong>
             </article>
@@ -99,6 +115,14 @@
                     <label>
                         <span>Model name</span>
                         <input type="text" name="default_model" value="{{ config.default_model }}" required>
+                    </label>
+                    <label>
+                        <span>Search engine</span>
+                        <select name="search_engine" required>
+                            <option value="google" {% if config.search_engine == "google" %}selected{% endif %}>Google only</option>
+                            <option value="auto" {% if config.search_engine == "auto" %}selected{% endif %}>Auto fallback</option>
+                            <option value="duck" {% if config.search_engine == "duck" %}selected{% endif %}>Duck.ai only</option>
+                        </select>
                     </label>
                     <label>
                         <span>API token</span>
@@ -163,7 +187,7 @@
             <article class="panel">
                 <div class="panel-head">
                     <h2>Live Probe</h2>
-                    <p>Use the current browser settings to run a real Google AI query before changing business code.</p>
+                    <p>Use the current browser settings to run a real query against the selected engine before changing business code.</p>
                 </div>
                 <form method="post" action="/console/logout" class="inline-form">
                     <button type="submit" class="ghost">Log out console</button>
@@ -252,6 +276,7 @@
                         <tr>
                             <th>When</th>
                             <th>Endpoint</th>
+                            <th>Engine</th>
                             <th>Status</th>
                             <th>Latency</th>
                             <th>Proxy</th>
@@ -264,6 +289,7 @@
                         <tr>
                             <td>{{ item.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
                             <td>{{ item.endpoint }}</td>
+                            <td>{{ item.engine }}</td>
                             <td><span class="status {{ item.status }}">{{ item.status }}</span></td>
                             <td>{{ item.duration_ms if item.duration_ms is not none else "n/a" }}</td>
                             <td>
@@ -299,7 +325,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="7" class="empty">No requests have been recorded yet.</td>
+                            <td colspan="8" class="empty">No requests have been recorded yet.</td>
                         </tr>
                         {% endfor %}
                     </tbody>

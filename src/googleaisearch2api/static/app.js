@@ -10,6 +10,7 @@ async function refreshSummary() {
     const payload = await response.json();
     const summary = payload.summary || {};
     const pool = payload.pool || {};
+    const duckPool = payload.duck_pool || {};
     const proxySessions = payload.proxy_sessions || {};
     const statMap = {
         total_requests: summary.total_requests,
@@ -22,6 +23,9 @@ async function refreshSummary() {
         queued_requests: pool.queued_requests,
         workers_with_errors: pool.workers_with_errors,
         generation: pool.generation,
+        duck_busy_workers: duckPool.busy_workers,
+        duck_queued_requests: duckPool.queued_requests,
+        duck_cooldown_remaining_seconds: payload.duck_cooldown_remaining_seconds || 0,
         sticky_active: proxySessions.active || 0,
         sticky_cooldown: proxySessions.cooldown || 0,
     };

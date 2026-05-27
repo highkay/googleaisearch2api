@@ -31,6 +31,7 @@ class GoogleAiResult(StrictModel):
 class RecentRequest(StrictModel):
     id: str
     endpoint: str
+    engine: str = "google"
     status: str
     model_name: str
     prompt_preview: str

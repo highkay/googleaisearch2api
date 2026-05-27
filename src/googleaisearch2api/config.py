@@ -3,10 +3,11 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_API_TOKEN = "change-me-google-search"
+SEARCH_ENGINE_OPTIONS = {"google", "duck", "auto"}
 
 
 def _mask_secret(value: str | None) -> str:
@@ -17,8 +18,17 @@ def _mask_secret(value: str | None) -> str:
     return f"{value[:4]}***{value[-4:]}"
 
 
+def _normalize_search_engine(value: str) -> str:
+    normalized = (value or "google").strip().lower()
+    if normalized not in SEARCH_ENGINE_OPTIONS:
+        allowed = ", ".join(sorted(SEARCH_ENGINE_OPTIONS))
+        raise ValueError(f"search_engine must be one of: {allowed}")
+    return normalized
+
+
 class ServiceConfig(BaseModel):
     default_model: str = "google-search"
+    search_engine: str = "google"
     api_token: str = DEFAULT_API_TOKEN
     browser_headless: bool = True
     browser_user_agent: str | None = None
@@ -31,6 +41,11 @@ class ServiceConfig(BaseModel):
     browser_proxy_password: str | None = None
     browser_proxy_bypass: str | None = None
     resin_sticky_session_enabled: bool = False
+
+    @field_validator("search_engine")
+    @classmethod
+    def validate_search_engine(cls, value: str) -> str:
+        return _normalize_search_engine(value)
 
     @property
     def browser_label(self) -> str:
@@ -57,6 +72,7 @@ class ServiceConfig(BaseModel):
     def from_settings(cls, settings: AppSettings) -> ServiceConfig:
         return cls(
             default_model=settings.default_model,
+            search_engine=settings.search_engine,
             api_token=settings.api_token,
             browser_headless=settings.browser_headless,
             browser_user_agent=settings.browser_user_agent or None,
@@ -74,6 +90,7 @@ class ServiceConfig(BaseModel):
 
 class ServiceConfigUpdate(BaseModel):
     default_model: str
+    search_engine: str = "google"
     api_token: str
     browser_headless: bool
     browser_user_agent: str | None = None
@@ -86,6 +103,11 @@ class ServiceConfigUpdate(BaseModel):
     browser_proxy_password: str | None = None
     browser_proxy_bypass: str | None = None
     resin_sticky_session_enabled: bool = False
+
+    @field_validator("search_engine")
+    @classmethod
+    def validate_search_engine(cls, value: str) -> str:
+        return _normalize_search_engine(value)
 
 
 class AppSettings(BaseSettings):
@@ -102,6 +124,7 @@ class AppSettings(BaseSettings):
     app_data_dir: Path = Field(default=Path("data"), validation_alias="APP_DATA_DIR")
 
     default_model: str = Field(default="google-search", validation_alias="DEFAULT_MODEL")
+    search_engine: str = Field(default="google", validation_alias="SEARCH_ENGINE")
     api_token: str = Field(default=DEFAULT_API_TOKEN, validation_alias="API_TOKEN")
 
     browser_headless: bool = Field(default=True, validation_alias="BROWSER_HEADLESS")
@@ -125,6 +148,13 @@ class AppSettings(BaseSettings):
         ge=0,
         validation_alias=AliasChoices("GOOGLE_AI_BLOCKED_RETRY_COUNT", "GOOGLE_BLOCKED_RETRIES"),
     )
+    duck_ai_workers: int = Field(default=1, ge=1, validation_alias="DUCK_AI_WORKERS")
+    duck_ai_queue_size: int = Field(default=2, ge=1, validation_alias="DUCK_AI_QUEUE_SIZE")
+    duck_ai_cooldown_seconds: int = Field(
+        default=120,
+        ge=0,
+        validation_alias="DUCK_AI_COOLDOWN_SECONDS",
+    )
     proxy_allow_fallback_to_base: bool = Field(
         default=False,
         validation_alias="PROXY_ALLOW_FALLBACK_TO_BASE",
@@ -138,6 +168,11 @@ class AppSettings(BaseSettings):
         default=False,
         validation_alias="RESIN_STICKY_SESSION_ENABLED",
     )
+
+    @field_validator("search_engine")
+    @classmethod
+    def validate_search_engine(cls, value: str) -> str:
+        return _normalize_search_engine(value)
 
     @property
     def db_path(self) -> Path:

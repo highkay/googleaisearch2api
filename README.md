@@ -19,6 +19,7 @@
 - `POST /v1/responses`
 - Bearer Token 认证
 - 可配置模型名、代理、语言、超时、worker 数和队列长度
+- 可在 Google AI、Duck.ai 和自动降级模式之间切换
 - SQLite 持久化配置与请求日志
 - 本地 Web Console: `/console`
 
@@ -95,12 +96,16 @@ uv run googleaisearch2api
 - `API_TOKEN`: OpenAI 兼容接口的 Bearer Token
 - Console 使用同一个 `API_TOKEN` 登录；敏感字段默认不会回显到页面里
 - `DEFAULT_MODEL`: 对外暴露的模型名
+- `SEARCH_ENGINE`: 搜索引擎选择，支持 `google`、`duck`、`auto`；`auto` 会优先跑 Google，遇到上游不可用类错误再降级到 Duck.ai。
 - `BROWSER_HEADLESS`: 是否无头运行
 - `BROWSER_USER_AGENT`: 可选，覆盖浏览器级 UA；留空时服务会给 headless Chrome 使用普通 Chrome UA
 - `BROWSER_WORKERS`: 常驻浏览器 worker 数
 - `REQUEST_QUEUE_SIZE`: 内存等待队列容量；满了以后返回 `429`
 - `REQUEST_LOG_MAX_ROWS`: SQLite 里最多保留多少条最近请求日志；默认 200
 - `GOOGLE_AI_BLOCKED_RETRY_COUNT`: Google 返回机器人/abuse block 页面时，回收当前 browser session 后重试的次数；默认 0。只有在代理会轮换到新出口 IP 时才建议调高；同一出口网络被 Google block 时，立即重试通常会提高失败率。
+- `DUCK_AI_WORKERS`: Duck.ai 独立浏览器 worker 数；默认 1。实测 Duck.ai 对并发 burst 更敏感，不建议直接拉高。
+- `DUCK_AI_QUEUE_SIZE`: Duck.ai 队列长度；默认 2。
+- `DUCK_AI_COOLDOWN_SECONDS`: Duck.ai 返回限流时的本地熔断冷却时间；默认 120。
 - `BROWSER_PROXY_SERVER`: 代理地址，例如 `http://127.0.0.1:7890` 或 `socks5h://user:pass@host:port`；HTTP 代理会把认证字段传给浏览器，`socks5`/`socks5h` 会先走本地 HTTP CONNECT 桥接层，再由桥接层向 SOCKS5 上游完成认证。
 
 请求日志会自动脱敏常见密钥、Bearer token、`user:pass@host` 形式的内联凭据，并且不会把最终 Google URL 里的 `q=` 查询词原样持久化到 SQLite。

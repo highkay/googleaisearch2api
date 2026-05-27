@@ -28,6 +28,7 @@ def test_update_config_and_summary(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     update = ServiceConfigUpdate(
         default_model="google-search-v2",
+        search_engine="auto",
         api_token="secret-token",
         browser_headless=False,
         browser_user_agent="Mozilla/5.0 TestBrowser",
@@ -43,12 +44,14 @@ def test_update_config_and_summary(tmp_path: Path) -> None:
     )
     config = store.update_config(update)
     assert config.default_model == "google-search-v2"
+    assert config.search_engine == "auto"
     assert config.browser_user_agent == "Mozilla/5.0 TestBrowser"
     assert config.proxy_enabled is True
     assert config.resin_sticky_session_enabled is True
 
     request_id = store.start_request(
         endpoint="/v1/chat/completions",
+        engine="duck",
         model_name=config.default_model,
         prompt_preview="hello",
         client_ip="127.0.0.1",
@@ -77,6 +80,7 @@ def test_update_config_and_summary(tmp_path: Path) -> None:
 
     assert summary.total_requests == 1
     assert summary.successful_requests == 1
+    assert recent[0].engine == "duck"
     assert recent[0].response_preview == "world"
     assert recent[0].resin_sticky_session_enabled is True
     assert recent[0].proxy_session_id == 7
