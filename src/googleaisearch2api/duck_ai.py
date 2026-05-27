@@ -55,6 +55,8 @@ Do not output placeholder codes such as 0x, N/A, or unknown.
 For source URLs, use only real public web pages from named sources.
 Use one concrete publisher name in each source field, matching the URL host.
 Do not combine multiple publishers, reprints, or aggregate labels in source fields.
+If the URL host is not the named publisher's host, use the URL host's publisher
+name or skip that result.
 Do not include the raw search query, standalone hostnames, raw search result listings,
 or duplicate URLs.
 Use one specific page URL for each result; do not use homepages, topic pages, or
@@ -62,6 +64,8 @@ date ranges as publication dates.
 Each result must have a concrete publication date from the page. If a page has
 no explicit date, skip that result instead of writing "see page", "unknown", or
 similar placeholders.
+If the user writes Chinese, answer in Chinese and use Chinese field labels:
+来源, 日期, 链接, 为什么相关. Do not use Japanese labels such as リンク.
 Do not output placeholder URLs such as example.com.
 If you cannot verify a real source URL, return an empty results list instead of invented results.
 

@@ -202,6 +202,30 @@ _NON_SPECIFIC_RAW_DATE_PHRASES = (
     "not specified",
     "no explicit date",
 )
+_NON_CHINESE_RAW_LINK_LABELS = (
+    "リンク：",
+    "リンク:",
+)
+_KNOWN_SOURCE_HOST_ALIASES = {
+    "cls.cn": ("财联社", "cls"),
+    "stcn.com": ("证券时报", "证券时报网", "stcn"),
+    "chinaaet.com": ("电子技术应用", "ChinaAET", "chinaaet"),
+    "huxiu.com": ("虎嗅", "Huxiu", "huxiu"),
+    "tmtpost.com": ("钛媒体", "TMTPost", "tmtpost"),
+    "cnyes.com": ("鉅亨", "钜亨", "cnyes"),
+    "stock.yahoo.com": ("Yahoo", "奇摩", "yahoo"),
+    "sina.com.cn": ("新浪", "sina"),
+    "eastmoney.com": ("东方财富", "eastmoney"),
+    "nbd.com.cn": ("每日经济新闻", "nbd"),
+    "xincai.com": ("新财", "xincai"),
+}
+_KNOWN_SOURCE_LABEL_ALIASES = tuple(
+    {
+        alias.casefold()
+        for aliases in _KNOWN_SOURCE_HOST_ALIASES.values()
+        for alias in aliases
+    }
+)
 _SEARCH_RESULTS_TAIL_MARKERS = {
     "search results",
     "搜索结果",
@@ -327,6 +351,12 @@ def _extract_raw_urls(answer: str) -> list[str]:
     return urls
 
 
+def _clean_raw_source_label(source: str) -> str:
+    source = source.strip()
+    parts = re.split(r"\s+[—–-]\s+", source, maxsplit=1)
+    return parts[0].strip()
+
+
 def _contains_non_specific_raw_url(answer: str) -> bool:
     return any(not _is_specific_result_url(url) for url in _extract_raw_urls(answer))
 
@@ -347,14 +377,70 @@ def _iter_raw_source_labels(answer: str) -> list[str]:
         if not line:
             continue
         if line.startswith(("来源：", "来源:")):
-            labels.append(line.split("：", 1)[-1].split(":", 1)[-1].strip())
+            labels.append(_clean_raw_source_label(line.split("：", 1)[-1].split(":", 1)[-1]))
             continue
         if "http://" not in line and "https://" not in line:
             continue
         parts = re.split(r"\s+[—–-]\s+", line)
         if len(parts) >= 4:
-            labels.append(parts[1].strip())
+            labels.append(_clean_raw_source_label(parts[1]))
     return labels
+
+
+def _iter_raw_source_url_pairs(answer: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    pending_source = ""
+    for raw_line in answer.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(("来源：", "来源:")):
+            pending_source = _clean_raw_source_label(
+                line.split("：", 1)[-1].split(":", 1)[-1],
+            )
+            urls = _extract_raw_urls(line)
+            if urls:
+                pairs.append((pending_source, urls[0]))
+                pending_source = ""
+            continue
+
+        urls = _extract_raw_urls(line)
+        if not urls:
+            continue
+        parts = re.split(r"\s+[—–-]\s+", line)
+        if len(parts) >= 4:
+            pairs.append((_clean_raw_source_label(parts[1]), urls[0]))
+            pending_source = ""
+        elif pending_source:
+            pairs.append((pending_source, urls[0]))
+            pending_source = ""
+    return pairs
+
+
+def _host_aliases_for_source_check(url: str) -> tuple[str, ...]:
+    host = (urlparse(url).hostname or "").casefold()
+    for suffix, aliases in _KNOWN_SOURCE_HOST_ALIASES.items():
+        if host == suffix or host.endswith(f".{suffix}"):
+            return aliases
+    return ()
+
+
+def _source_mentions_known_alias(source: str) -> bool:
+    normalized = _normalize(source)
+    return any(alias in normalized for alias in _KNOWN_SOURCE_LABEL_ALIASES)
+
+
+def _contains_raw_source_host_mismatch(answer: str) -> bool:
+    for source, url in _iter_raw_source_url_pairs(answer):
+        host_aliases = _host_aliases_for_source_check(url)
+        if not host_aliases:
+            continue
+        normalized_source = _normalize(source)
+        if any(alias.casefold() in normalized_source for alias in host_aliases):
+            continue
+        if _source_mentions_known_alias(source):
+            return True
+    return False
 
 
 def _contains_aggregate_raw_source_label(answer: str) -> bool:
@@ -365,6 +451,10 @@ def _contains_aggregate_raw_source_label(answer: str) -> bool:
         if any(separator in source for separator in _COMPOSITE_JSON_SOURCE_LABEL_SEPARATORS):
             return True
     return False
+
+
+def _contains_non_chinese_raw_link_label(answer: str) -> bool:
+    return any(label in answer for label in _NON_CHINESE_RAW_LINK_LABELS)
 
 
 def _contains_non_specific_raw_date(answer: str) -> bool:
@@ -568,6 +658,12 @@ def assess_search_answer_quality(
 
     if _contains_aggregate_raw_source_label(raw_answer):
         return AnswerQuality(False, "answer contains aggregate source labels")
+
+    if _contains_non_chinese_raw_link_label(raw_answer):
+        return AnswerQuality(False, "answer contains non-standard link labels")
+
+    if _contains_raw_source_host_mismatch(raw_answer):
+        return AnswerQuality(False, "answer contains source URL host mismatches")
 
     if _contains_non_specific_raw_date(raw_answer):
         return AnswerQuality(False, "answer contains non-specific publication dates")

@@ -140,6 +140,38 @@ def test_allows_raw_answer_with_single_reprint_note() -> None:
     assert quality.ok is True
 
 
+def test_rejects_raw_answer_with_non_chinese_link_label() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+台积电将对3-5nm AI芯片涨价5%-10%
+来源：电子技术应用（ChinaAET，转载自芯智讯）
+日期：2024-07-08
+リンク：https://chinaaet.com/article/3000166304
+为什么相关：字段标签混入了非中文链接标签。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains non-standard link labels"
+
+
+def test_rejects_raw_answer_with_source_host_mismatch() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+全球芯片代工巨头有大消息
+来源：每日经济新闻（新浪财经转载）
+日期：2024-07-07
+链接：https://xincai.com/article/ncchqki5543745
+为什么相关：来源写的是已知媒体，但链接 host 不是该媒体站点。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains source URL host mismatches"
+
+
 def test_rejects_raw_answer_with_non_specific_publication_date() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
