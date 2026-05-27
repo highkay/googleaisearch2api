@@ -59,6 +59,9 @@ Do not include the raw search query, standalone hostnames, raw search result lis
 or duplicate URLs.
 Use one specific page URL for each result; do not use homepages, topic pages, or
 date ranges as publication dates.
+Each result must have a concrete publication date from the page. If a page has
+no explicit date, skip that result instead of writing "see page", "unknown", or
+similar placeholders.
 Do not output placeholder URLs such as example.com.
 If you cannot verify a real source URL, return an empty results list instead of invented results.
 

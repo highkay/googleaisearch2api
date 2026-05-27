@@ -23,6 +23,11 @@ _YEAR_DATE_RANGE_RE = re.compile(
     r"\d{4}(?:-\d{2}-\d{2})?\b",
     re.IGNORECASE,
 )
+_NON_SPECIFIC_URL_PATH_RE = re.compile(
+    r"(?:^|/)(?:tags?|topics?|channels?|categories|keywords?|search|lists?|"
+    r"specials?|subjects?|zt)(?:/|$)",
+    re.IGNORECASE,
+)
 _DATE_RANGE_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2})\s*(?:至|到|~|—|–|\s+-\s+|through|to)\s*"
     r"(\d{4}-\d{2}-\d{2})",
@@ -175,6 +180,24 @@ _AGGREGATE_RAW_SOURCE_LABEL_PHRASES = (
     "汇编",
     "专题",
 )
+_NON_SPECIFIC_RAW_DATE_PHRASES = (
+    "见页",
+    "页面无明确",
+    "页内无明确",
+    "未标注",
+    "未注明",
+    "无明确出版",
+    "无明确日期",
+    "相关时间点",
+    "多篇",
+    "多条",
+    "汇编",
+    "专题",
+    "示例",
+    "unknown",
+    "not specified",
+    "no explicit date",
+)
 _SEARCH_RESULTS_TAIL_MARKERS = {
     "search results",
     "搜索结果",
@@ -281,7 +304,14 @@ def _is_usable_result_url(value: object) -> bool:
 def _is_specific_result_url(value: object) -> bool:
     parsed = urlparse(str(value or "").strip())
     path = parsed.path.strip("/")
-    return bool(path or parsed.query)
+    if not path and not parsed.query:
+        return False
+    if _NON_SPECIFIC_URL_PATH_RE.search(path):
+        return False
+    if parsed.path.casefold().rstrip("/") in {"/tag", "/tags", "/topic", "/topics"}:
+        return False
+    query = parsed.query.casefold()
+    return not (path in {"search", "s"} and query)
 
 
 def _extract_raw_urls(answer: str) -> list[str]:
@@ -336,8 +366,22 @@ def _contains_aggregate_raw_source_label(answer: str) -> bool:
 def _contains_non_specific_raw_date(answer: str) -> bool:
     for raw_line in answer.splitlines():
         line = raw_line.strip()
-        if ("http://" in line or "https://" in line) and (
-            _YEAR_DATE_RANGE_RE.search(line) or "多篇" in line
+        if not line:
+            continue
+        date_text = ""
+        if line.startswith(("日期：", "日期:", "date:", "Date:")):
+            date_text = line.split("：", 1)[-1].split(":", 1)[-1].strip()
+        elif "http://" in line or "https://" in line:
+            parts = re.split(r"\s+[—–-]\s+", line)
+            if len(parts) >= 4:
+                date_text = parts[-2].strip()
+        if not date_text:
+            continue
+        normalized = _normalize(date_text)
+        if _YEAR_DATE_RANGE_RE.search(date_text):
+            return True
+        if any(
+            phrase in normalized for phrase in _NON_SPECIFIC_RAW_DATE_PHRASES
         ):
             return True
     return False

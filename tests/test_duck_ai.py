@@ -9,6 +9,7 @@ def test_build_duck_search_prompt_forces_direct_search_answer() -> None:
     assert "only include ticker symbols you are confident are real" in prompt
     assert "real six-digit A-share codes" in prompt
     assert "Use one concrete publisher name in each source field" in prompt
+    assert "Each result must have a concrete publication date from the page" in prompt
     assert "Do not output placeholder URLs such as example.com." in prompt
     assert "台积电 3nm 涨价 最多返回 5 条" in prompt
 

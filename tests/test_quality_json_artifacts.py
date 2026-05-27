@@ -122,3 +122,16 @@ def test_rejects_json_result_with_non_specific_url() -> None:
 
     assert quality.ok is False
     assert quality.reason == "answer JSON result URL is not specific"
+
+
+def test_rejects_json_result_with_topic_url() -> None:
+    quality = assess_google_answer_quality(
+        "只返回一个 JSON 对象，输出格式固定为 "
+        '{"results":[{"title":"","content":"","source":"","url":"",'
+        '"published_date":"YYYY-MM-DD"}]}。最多返回 5 条',
+        '{"results":[{"title":"专题页","content":"只给出了标签页。","source":"电子工程专辑",'
+        '"url":"https://www.eet-china.com/mp/tags/88974","published_date":"2025-12-30"}]}',
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer JSON result URL is not specific"

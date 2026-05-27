@@ -138,12 +138,41 @@ def test_rejects_raw_answer_with_non_specific_publication_date() -> None:
     assert quality.reason == "answer contains non-specific publication dates"
 
 
+def test_rejects_raw_answer_with_placeholder_publication_date_line() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+AI浪潮下台积电涨价传导顺畅大客户争相预订先进制程产能
+来源：财联社
+日期：见页（文章内未标注明确出版年）
+链接：https://www.cls.cn/detail/1726012
+为什么相关：日期字段不是可核验的单篇发布时间。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains non-specific publication dates"
+
+
 def test_rejects_raw_answer_with_non_specific_url_for_result_list() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
         """
 台积电3nm产能与涨价相关报道 — 财联社 — 2024-07-08 — https://www.cls.cn/
 为什么相关：首页不是单篇报道链接。
+""",
+    )
+
+    assert quality.ok is False
+    assert quality.reason == "answer contains non-specific URLs"
+
+
+def test_rejects_raw_answer_with_topic_url_for_result_list() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+台积电涨价专题汇编 — 电子工程专辑 — 2025-12-30 — https://www.eet-china.com/mp/tags/88974
+为什么相关：标签页不是单篇报道链接。
 """,
     )
 
