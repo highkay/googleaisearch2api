@@ -35,6 +35,7 @@ DISCLAIMER_MARKERS = [
     "AI can make mistakes, so double-check responses",
     "AI's response may contain mistakes",
     "AI responses may contain mistakes",
+    "AI responses may include mistakes. Learn more",
     "AI Mode response is ready",
     "如果您想进一步了解",
     "如果你想进一步了解",
@@ -103,6 +104,25 @@ BLOCKED_MARKERS = [
     "captcha",
     "抱歉",
     "验证您不是机器人",
+]
+
+NON_ANSWER_PAGE_MARKERS = [
+    (
+        "before you continue to google",
+        "Google showed the consent interstitial instead of an AI answer.",
+    ),
+    (
+        "we use cookies and data to deliver and maintain google services",
+        "Google showed the consent interstitial instead of an AI answer.",
+    ),
+    (
+        "ai mode is not currently available on your device or account",
+        "Google AI Mode is not available for this browser session.",
+    ),
+    (
+        "ai mode is not currently available",
+        "Google AI Mode is not available for this browser session.",
+    ),
 ]
 
 DEFAULT_BROWSER_CHANNEL = "chrome"
@@ -201,6 +221,10 @@ class GoogleAiTimeoutError(GoogleAiRuntimeError):
     pass
 
 
+class GoogleAiUnavailableError(GoogleAiRuntimeError):
+    pass
+
+
 def clean_answer_text(answer_text: str, query: str) -> str:
     cleaned = (answer_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     query = (query or "").strip()
@@ -282,6 +306,14 @@ def _is_likely_answer_text(answer_text: str) -> bool:
         if normalized.startswith(_normalize_for_compare(prefix).lower()):
             return False
     return True
+
+
+def _non_answer_page_reason(body_text: str) -> str | None:
+    normalized = (body_text or "").lower()
+    for marker, reason in NON_ANSWER_PAGE_MARKERS:
+        if marker in normalized:
+            return reason
+    return None
 
 
 def _select_answer_text(payload: dict, query: str) -> str:
@@ -606,6 +638,12 @@ class GoogleAiRunner:
             if _is_likely_answer_text(answer_text) and (
                 payload.get("answerReady") or stable_answer_polls >= 1
             ):
+                non_answer_reason = _non_answer_page_reason(payload.get("bodyExcerpt", ""))
+                if non_answer_reason:
+                    excerpt = shorten(payload.get("bodyExcerpt", ""), width=260, placeholder="...")
+                    raise GoogleAiUnavailableError(
+                        f"{non_answer_reason} Last URL: {page.url}. Last excerpt: {excerpt}"
+                    )
                 return GoogleAiResult(
                     answer_text=answer_text,
                     citations=filter_citations(payload.get("citations", [])),

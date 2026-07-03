@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 
 from .browser import resolve_browser_proxy
 from .config import ServiceConfig
@@ -205,6 +205,22 @@ def _google_block_prefix_network(
 def is_risk_metadata_retire_reason(reason: str | None) -> bool:
     text = (reason or "").strip().lower()
     return any(text.startswith(prefix) for prefix in RISK_METADATA_RETIRE_REASON_PREFIXES)
+
+
+def _selectable_session_filter(now: datetime):
+    previously_proven = or_(
+        ProxySessionRow.request_success_count > 0,
+        ProxySessionRow.canary_success_count > 0,
+    )
+    return or_(
+        ProxySessionRow.status == STATUS_ACTIVE,
+        and_(
+            ProxySessionRow.status == STATUS_COOLDOWN,
+            ProxySessionRow.cooldown_until.is_not(None),
+            ProxySessionRow.cooldown_until <= now,
+            previously_proven,
+        ),
+    )
 
 
 class ProxySessionStore:
@@ -415,6 +431,7 @@ class ProxySessionStore:
             row.google_canary_checked_at = now
             row.canary_success_count += 1
             row.cooldown_until = None
+            row.retire_reason = None
             row.last_success_at = now
             row.updated_at = now
             session.add(row)
@@ -563,7 +580,7 @@ class ProxySessionStore:
             row = session.scalars(
                 select(ProxySessionRow)
                 .where(ProxySessionRow.proxy_base_username == proxy_base_username)
-                .where(ProxySessionRow.status.in_(SELECTABLE_STATUSES))
+                .where(_selectable_session_filter(now))
                 .where(ProxySessionRow.duplicate_of_session_id.is_(None))
                 .where(
                     (ProxySessionRow.cooldown_until.is_(None))
@@ -631,6 +648,7 @@ class ProxySessionStore:
                 row.request_success_count += 1
                 row.status = STATUS_ACTIVE
                 row.cooldown_until = None
+                row.retire_reason = None
             row.updated_at = now
             session.add(row)
             session.commit()
@@ -691,7 +709,7 @@ class ProxySessionStore:
         summary["total"] = sum(summary.values())
         return summary
 
-    def count_active_sessions(self, proxy_base_username: str) -> int:
+    def count_selectable_sessions(self, proxy_base_username: str) -> int:
         now = utc_now()
         with self._session_factory() as session:
             return int(
@@ -699,13 +717,41 @@ class ProxySessionStore:
                     select(func.count())
                     .select_from(ProxySessionRow)
                     .where(ProxySessionRow.proxy_base_username == proxy_base_username)
-                    .where(ProxySessionRow.status == STATUS_ACTIVE)
+                    .where(_selectable_session_filter(now))
                     .where(ProxySessionRow.duplicate_of_session_id.is_(None))
                     .where(
                         (ProxySessionRow.cooldown_until.is_(None))
                         | (ProxySessionRow.cooldown_until <= now)
                     )
                 )
+                or 0
+            )
+
+    def count_active_sessions(
+        self,
+        proxy_base_username: str,
+        *,
+        checked_after: datetime | None = None,
+    ) -> int:
+        now = utc_now()
+        with self._session_factory() as session:
+            statement = (
+                select(func.count())
+                .select_from(ProxySessionRow)
+                .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+                .where(ProxySessionRow.status == STATUS_ACTIVE)
+                .where(ProxySessionRow.duplicate_of_session_id.is_(None))
+                .where(
+                    (ProxySessionRow.cooldown_until.is_(None))
+                    | (ProxySessionRow.cooldown_until <= now)
+                )
+            )
+            if checked_after is not None:
+                statement = statement.where(
+                    ProxySessionRow.google_canary_checked_at >= checked_after
+                )
+            return int(
+                session.scalar(statement)
                 or 0
             )
 
@@ -883,12 +929,23 @@ class ProxySessionStore:
                 matched_session=ProxySessionSnapshot.from_row(blocked_rows[0]),
             )
 
-    def list_proxy_sessions(self, limit: int = 20) -> list[ProxySessionSnapshot]:
+    def list_proxy_sessions(
+        self,
+        limit: int = 20,
+        *,
+        proxy_base_username: str | None = None,
+    ) -> list[ProxySessionSnapshot]:
         with self._session_factory() as session:
+            statement = select(ProxySessionRow).order_by(
+                ProxySessionRow.updated_at.desc(),
+                ProxySessionRow.id.desc(),
+            )
+            if proxy_base_username is not None:
+                statement = statement.where(
+                    ProxySessionRow.proxy_base_username == proxy_base_username
+                )
             rows = session.scalars(
-                select(ProxySessionRow)
-                .order_by(ProxySessionRow.updated_at.desc(), ProxySessionRow.id.desc())
-                .limit(limit)
+                statement.limit(limit)
             ).all()
             return [ProxySessionSnapshot.from_row(row) for row in rows]
 

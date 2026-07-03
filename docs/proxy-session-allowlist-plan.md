@@ -759,6 +759,33 @@ docker run --rm ghcr.io/... uv run python scripts/probe_proxy_sessions.py --base
    - request log 是否记录 session/IP/score。
    - Google block 后是否自动切换 Google session，Duck.ai 是否仍可使用 Duck.ai ok session。
 
+### 10.5 2026-07-03 资源事故复盘与验证
+
+本次事故的直接资源症状是 Chrome/Crashpad 子进程退出后没有被 PID 1 回收，容器内出现大量 defunct `chrome`/`chrome_crashpad`，最终触发 `pthread_create: Resource temporarily unavailable`、`BrowserType.launch: Connection closed while reading from the driver` 和 SQLite 写入锁等待。修复后的运行约束：
+
+- Compose 使用 `init: true`，PID 1 为 `docker-init`，负责回收浏览器子进程。
+- 默认资源护栏：`GOOGLEAISEARCH2API_CPUS=2.0`、`GOOGLEAISEARCH2API_MEMORY_LIMIT=3g`、`GOOGLEAISEARCH2API_PIDS_LIMIT=512`。
+- `BROWSER_WORKERS` 默认降为 1，Duck.ai worker 默认 1，避免两个浏览器池同时扩张。
+- 自动恢复默认低预算：`PROXY_AUTO_RECOVERY_MAX_PROBES=3`、`PROXY_AUTO_RECOVERY_SKIP_EGRESS=true`、`PROXY_AUTO_RECOVERY_SKIP_IPLARK=true`、`PROXY_AUTO_RECOVERY_FAST_IPAPI_EGRESS=false`。
+- 自动恢复不再传 `--refresh-active`，只补不足 session，不复测当前可用 active。
+
+验证结果：
+
+- 重启后容器 `HostConfig.Init=true`、`PidsLimit=512`、`Memory=3221225472`、`NanoCpus=2000000000`。
+- PID 1 显示 `/sbin/docker-init -- uv run googleaisearch2api`。
+- 多轮 Google canary、真实 `/v1/chat/completions` 和线上流量后，`zombies=0`。
+- 低流量常驻 worker 后资源约 280MiB/100 PID；有实时请求时可升至约 600MiB/196 PID，仍低于 3GiB/512 PID 护栏。
+- 自动恢复可以把池补到目标附近，但 `PROXY_AUTO_RECOVERY_TARGET_ACTIVE` 不是 SLA。Google 当前 block 状态会导致实际 `sticky_selectable_sessions` 波动；评估时以 `/healthz` 的 `sticky_selectable_sessions`、`workers_with_errors`、`proxy_auto_recovery.last_success`、容器 PID/僵尸数一起判断。
+
+推荐现场复核命令：
+
+```bash
+docker compose ps
+curl -sS http://127.0.0.1:9010/healthz
+docker stats --no-stream googleaisearch2api-googleaisearch2api-1
+docker exec googleaisearch2api-googleaisearch2api-1 sh -c "ps -eo stat,comm | awk '/^Z/ {count++} END {print \"zombies=\" count+0}'"
+```
+
 ## 11. 回滚
 
 最快回滚：

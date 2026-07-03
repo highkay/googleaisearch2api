@@ -100,6 +100,10 @@
                 <strong class="stat-value" data-stat="sticky_active">{{ proxy_session_summary.get("active", 0) }}</strong>
             </article>
             <article class="stat-card">
+                <span class="stat-label">Sticky selectable</span>
+                <strong class="stat-value" data-stat="sticky_selectable">{{ proxy_session_summary.get("selectable", 0) }}</strong>
+            </article>
+            <article class="stat-card">
                 <span class="stat-label">Sticky cooldown</span>
                 <strong class="stat-value" data-stat="sticky_cooldown">{{ proxy_session_summary.get("cooldown", 0) }}</strong>
             </article>

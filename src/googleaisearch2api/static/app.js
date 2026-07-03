@@ -27,6 +27,7 @@ async function refreshSummary() {
         duck_queued_requests: duckPool.queued_requests,
         duck_cooldown_remaining_seconds: payload.duck_cooldown_remaining_seconds || 0,
         sticky_active: proxySessions.active || 0,
+        sticky_selectable: proxySessions.selectable || 0,
         sticky_cooldown: proxySessions.cooldown || 0,
     };
 

@@ -106,9 +106,15 @@ uv run googleaisearch2api
 - `DUCK_AI_WORKERS`: Duck.ai 独立浏览器 worker 数；默认 1。实测 Duck.ai 对并发 burst 更敏感，不建议直接拉高。
 - `DUCK_AI_QUEUE_SIZE`: Duck.ai 队列长度；默认 2。
 - `DUCK_AI_COOLDOWN_SECONDS`: Duck.ai 返回限流时的本地熔断冷却时间；默认 120。
+- `PROXY_AUTO_RECOVERY_ENABLED`: 启用 sticky session 自动恢复；恢复任务默认只做少量 Google canary，不跑 egress/IPLark，以避免恢复过程本身放大浏览器资源占用。
+- `PROXY_AUTO_RECOVERY_MAX_PROBES`: 单次自动恢复最多执行多少个昂贵探针；默认 3。
+- `PROXY_AUTO_RECOVERY_TARGET_ACTIVE`: 触发恢复时希望补到的 Google selectable session 数；这是恢复目标，不是保证值，实际数量仍取决于当前代理出口是否被 Google block。
+- `GOOGLEAISEARCH2API_CPUS` / `GOOGLEAISEARCH2API_MEMORY_LIMIT` / `GOOGLEAISEARCH2API_PIDS_LIMIT`: Docker 资源护栏；默认 `2.0` CPU、`3g` 内存、`512` PID。
 - `BROWSER_PROXY_SERVER`: 代理地址，例如 `http://127.0.0.1:7890` 或 `socks5h://user:pass@host:port`；HTTP 代理会把认证字段传给浏览器，`socks5`/`socks5h` 会先走本地 HTTP CONNECT 桥接层，再由桥接层向 SOCKS5 上游完成认证。
 
 请求日志会自动脱敏常见密钥、Bearer token、`user:pass@host` 形式的内联凭据，并且不会把最终 Google URL 里的 `q=` 查询词原样持久化到 SQLite。
+
+Docker Compose 默认使用 `init: true` 启动服务，让 `docker-init` 回收 Chrome/Crashpad 子进程；不要移除这个设置，否则浏览器异常退出后可能堆积僵尸进程并耗尽 PID。
 
 如果容器里需要走宿主机代理：
 

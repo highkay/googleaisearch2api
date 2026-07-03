@@ -23,6 +23,7 @@ from .browser import (
     GoogleAiBlockedError,
     GoogleAiRuntimeError,
     GoogleAiTimeoutError,
+    GoogleAiUnavailableError,
 )
 from .config import (
     DEFAULT_API_TOKEN,
@@ -49,6 +50,7 @@ from .pool import (
     BrowserPoolSaturatedError,
     BrowserPoolTimeoutError,
 )
+from .proxy_recovery import ProxyAutoRecovery
 from .proxy_sessions import (
     ProxySessionConfigError,
     ProxySessionSelection,
@@ -57,6 +59,7 @@ from .proxy_sessions import (
     ProxySessionUnavailableError,
     google_block_has_ip_mismatch,
     parse_google_block_ips,
+    resolve_proxy_base_username,
 )
 from .quality import (
     answer_has_empty_json_results,
@@ -84,6 +87,27 @@ class Services:
     duck_circuit: DuckAiCircuitBreaker
     proxy_session_store: ProxySessionStore
     proxy_selector: ProxySessionSelector
+    proxy_auto_recovery: ProxyAutoRecovery
+
+
+def _normalize_result_for_prompt(prompt: str, result: GoogleAiResult) -> GoogleAiResult:
+    normalized_answer = normalize_answer_for_prompt(prompt, result.answer_text)
+    if normalized_answer == result.answer_text:
+        return result
+    return result.model_copy(update={"answer_text": normalized_answer})
+
+
+def _auto_empty_json_result_error(
+    engine_label: str,
+    prompt: str,
+    result: GoogleAiResult,
+    config: ServiceConfig,
+) -> str | None:
+    if config.search_engine != "auto":
+        return None
+    if not answer_has_empty_json_results(prompt, result.answer_text):
+        return None
+    return f"{engine_label} returned empty JSON results in auto mode"
 
 
 def _normalize_result_for_prompt(prompt: str, result: GoogleAiResult) -> GoogleAiResult:
@@ -152,6 +176,7 @@ def create_services(settings: AppSettings) -> Services:
         proxy_session_store,
         allow_fallback_to_base=settings.proxy_allow_fallback_to_base,
     )
+    proxy_auto_recovery = ProxyAutoRecovery(settings, store)
     pool = BrowserPool(
         worker_count=settings.max_concurrent_requests,
         queue_capacity=settings.request_queue_size,
@@ -171,6 +196,7 @@ def create_services(settings: AppSettings) -> Services:
         duck_circuit=DuckAiCircuitBreaker(settings.duck_ai_cooldown_seconds),
         proxy_session_store=proxy_session_store,
         proxy_selector=proxy_selector,
+        proxy_auto_recovery=proxy_auto_recovery,
     )
 
 
@@ -237,6 +263,21 @@ def _validate_settings(settings: AppSettings) -> None:
             "API_TOKEN must be set to a non-default value before binding the service "
             f"to {settings.app_host}."
         )
+
+
+def _proxy_session_summary(services: Services, config: ServiceConfig) -> dict[str, int]:
+    summary = services.proxy_session_store.get_summary()
+    summary["selectable"] = 0
+    if not config.resin_sticky_session_enabled:
+        return summary
+    try:
+        base_username = resolve_proxy_base_username(config)
+    except ProxySessionConfigError:
+        return summary
+    summary["selectable"] = services.proxy_session_store.count_selectable_sessions(
+        base_username
+    )
+    return summary
 
 
 def _resolve_model(requested_model: str | None, config: ServiceConfig) -> str:
@@ -411,6 +452,11 @@ def _run_google_ai(
                 error_message=str(exc),
                 block_ips=block_ips,
             )
+            _trigger_proxy_auto_recovery_if_pool_below_target(
+                services,
+                config,
+                reason="google-blocked-pool-below-target",
+            )
             if selection is not None:
                 services.pool.reset()
                 if attempt_index + 1 < max_attempts:
@@ -436,6 +482,37 @@ def _run_google_ai(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail=str(exc),
             ) from exc
+        except GoogleAiUnavailableError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=False,
+                error_message=str(exc),
+            )
+            if selection is not None:
+                services.proxy_session_store.mark_session_cooldown(
+                    selection.session.id,
+                    reason=str(exc),
+                    hours=1,
+                )
+                _trigger_proxy_auto_recovery_if_pool_below_target(
+                    services,
+                    config,
+                    reason="google-unavailable-pool-below-target",
+                )
+                services.pool.reset()
+                if attempt_index + 1 < max_attempts:
+                    logger.warning(
+                        "Google sticky proxy session {} returned a non-answer page; "
+                        "retrying request with another session ({}/{})",
+                        selection.session.proxy_username,
+                        attempt_index + 1,
+                        max_attempts - 1,
+                    )
+                    continue
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         except GoogleAiRuntimeError as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             services.store.finish_request_error(request_id, str(exc), duration_ms)
@@ -501,7 +578,13 @@ def _run_duck_ai(
 
     try:
         selection = services.proxy_selector.select(config, engine="duck")
-    except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
+    except ProxySessionUnavailableError as exc:
+        logger.warning(
+            "Duck.ai sticky proxy session unavailable; continuing with base proxy config: {}",
+            exc,
+        )
+        selection = None
+    except ProxySessionConfigError as exc:
         request_id = services.store.start_request(
             endpoint=endpoint,
             engine="duck",
@@ -683,6 +766,72 @@ def _should_try_duck_fallback(exc: HTTPException) -> bool:
     }
 
 
+def _should_route_auto_directly_to_duck(services: Services, config: ServiceConfig) -> bool:
+    if not config.resin_sticky_session_enabled or services.settings.proxy_allow_fallback_to_base:
+        return False
+    try:
+        base_username = resolve_proxy_base_username(config)
+    except ProxySessionConfigError:
+        return False
+    return services.proxy_session_store.count_selectable_sessions(base_username) == 0
+
+
+def _trigger_proxy_auto_recovery_if_pool_empty(
+    services: Services,
+    config: ServiceConfig,
+    *,
+    reason: str,
+) -> None:
+    _trigger_proxy_auto_recovery_if_pool_below(
+        services,
+        config,
+        reason=reason,
+        min_selectable=1,
+    )
+
+
+def _trigger_proxy_auto_recovery_if_pool_below_target(
+    services: Services,
+    config: ServiceConfig,
+    *,
+    reason: str,
+) -> None:
+    target_active = services.settings.proxy_auto_recovery_target_active
+    if target_active <= 0:
+        return
+    _trigger_proxy_auto_recovery_if_pool_below(
+        services,
+        config,
+        reason=reason,
+        min_selectable=target_active,
+    )
+
+
+def _trigger_proxy_auto_recovery_if_pool_below(
+    services: Services,
+    config: ServiceConfig,
+    *,
+    reason: str,
+    min_selectable: int,
+) -> None:
+    if not config.resin_sticky_session_enabled:
+        return
+    try:
+        base_username = resolve_proxy_base_username(config)
+    except ProxySessionConfigError:
+        return
+    selectable_count = services.proxy_session_store.count_selectable_sessions(base_username)
+    if selectable_count >= min_selectable:
+        return
+    if services.proxy_auto_recovery.trigger_async(reason=reason):
+        logger.warning(
+            "Triggered proxy auto recovery: reason={} selectable={} min_selectable={}",
+            reason,
+            selectable_count,
+            min_selectable,
+        )
+
+
 def _run_search_ai(
     *,
     request: Request,
@@ -710,6 +859,24 @@ def _run_search_ai(
             requested_model=requested_model,
         )
 
+    if _should_route_auto_directly_to_duck(services, config):
+        logger.warning(
+            "Google sticky proxy session pool is empty; routing auto request directly "
+            "to Duck.ai fallback."
+        )
+        _trigger_proxy_auto_recovery_if_pool_empty(
+            services,
+            config,
+            reason="auto-pool-empty",
+        )
+        return _run_duck_ai(
+            request=request,
+            endpoint=endpoint,
+            prompt=prompt,
+            stream=stream,
+            requested_model=requested_model,
+        )
+
     try:
         return _run_google_ai(
             request=request,
@@ -725,6 +892,11 @@ def _run_search_ai(
             "Google engine failed with {}; trying Duck.ai fallback: {}",
             google_exc.status_code,
             google_exc.detail,
+        )
+        _trigger_proxy_auto_recovery_if_pool_empty(
+            services,
+            config,
+            reason="google-failed-pool-empty",
         )
         try:
             return _run_duck_ai(
@@ -790,9 +962,11 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         services = create_services(settings)
         app.state.services = services
+        services.proxy_auto_recovery.start()
         try:
             yield
         finally:
+            services.proxy_auto_recovery.close()
             services.pool.close()
             services.duck_pool.close()
 
@@ -813,6 +987,7 @@ def create_app() -> FastAPI:
         config = services.store.get_config()
         pool_summary = services.pool.get_summary()
         duck_pool_summary = services.duck_pool.get_summary()
+        proxy_session_summary = _proxy_session_summary(services, config)
         return {
             "ok": True,
             "service": settings.app_name,
@@ -821,6 +996,8 @@ def create_app() -> FastAPI:
             "browser": config.browser_label,
             "proxy_enabled": config.proxy_enabled,
             "resin_sticky_session_enabled": config.resin_sticky_session_enabled,
+            "sticky_active_sessions": proxy_session_summary.get("active", 0),
+            "sticky_selectable_sessions": proxy_session_summary.get("selectable", 0),
             "headless": config.browser_headless,
             "workers": pool_summary.worker_count,
             "busy_workers": pool_summary.busy_workers,
@@ -831,6 +1008,7 @@ def create_app() -> FastAPI:
             "duck_ai_busy_workers": duck_pool_summary.busy_workers,
             "duck_ai_queued_requests": duck_pool_summary.queued_requests,
             "duck_ai_cooldown_remaining_seconds": services.duck_circuit.remaining_seconds(),
+            "proxy_auto_recovery": services.proxy_auto_recovery.status(),
             "accepting_requests": pool_summary.accepting_requests,
         }
 
@@ -1005,7 +1183,7 @@ def create_app() -> FastAPI:
         summary = services.store.get_summary()
         pool_summary = services.pool.get_summary()
         duck_pool_summary = services.duck_pool.get_summary()
-        proxy_session_summary = services.proxy_session_store.get_summary()
+        proxy_session_summary = _proxy_session_summary(services, config)
         proxy_sessions = services.proxy_session_store.list_proxy_sessions(limit=20)
         recent_requests = services.store.list_recent_requests(limit=20)
         return templates.TemplateResponse(
@@ -1037,7 +1215,7 @@ def create_app() -> FastAPI:
         summary = services.store.get_summary()
         pool_summary = services.pool.get_summary()
         duck_pool_summary = services.duck_pool.get_summary()
-        proxy_session_summary = services.proxy_session_store.get_summary()
+        proxy_session_summary = _proxy_session_summary(services, config)
         return {
             "summary": summary.model_dump(mode="json"),
             "pool": pool_summary.model_dump(mode="json"),

@@ -168,6 +168,91 @@ class AppSettings(BaseSettings):
         default=False,
         validation_alias="RESIN_STICKY_SESSION_ENABLED",
     )
+    proxy_auto_recovery_enabled: bool = Field(
+        default=False,
+        validation_alias="PROXY_AUTO_RECOVERY_ENABLED",
+    )
+    proxy_auto_recovery_interval_seconds: int = Field(
+        default=43_200,
+        ge=300,
+        validation_alias="PROXY_AUTO_RECOVERY_INTERVAL_SECONDS",
+    )
+    proxy_auto_recovery_run_on_startup: bool = Field(
+        default=False,
+        validation_alias="PROXY_AUTO_RECOVERY_RUN_ON_STARTUP",
+    )
+    proxy_auto_recovery_existing_sessions: bool = Field(
+        default=True,
+        validation_alias="PROXY_AUTO_RECOVERY_EXISTING_SESSIONS",
+    )
+    proxy_auto_recovery_existing_session_limit: int = Field(
+        default=50,
+        ge=1,
+        validation_alias="PROXY_AUTO_RECOVERY_EXISTING_SESSION_LIMIT",
+    )
+    proxy_auto_recovery_max_probes: int = Field(
+        default=3,
+        ge=0,
+        validation_alias="PROXY_AUTO_RECOVERY_MAX_PROBES",
+    )
+    proxy_auto_recovery_start: int = Field(
+        default=1,
+        ge=1,
+        validation_alias="PROXY_AUTO_RECOVERY_START",
+    )
+    proxy_auto_recovery_end: int = Field(
+        default=1_000,
+        ge=1,
+        validation_alias="PROXY_AUTO_RECOVERY_END",
+    )
+    proxy_auto_recovery_target_active: int = Field(
+        default=1,
+        ge=0,
+        validation_alias="PROXY_AUTO_RECOVERY_TARGET_ACTIVE",
+    )
+    proxy_auto_recovery_timeout_seconds: int = Field(
+        default=300,
+        ge=60,
+        validation_alias="PROXY_AUTO_RECOVERY_TIMEOUT_SECONDS",
+    )
+    proxy_auto_recovery_min_trigger_interval_seconds: int = Field(
+        default=900,
+        ge=0,
+        validation_alias="PROXY_AUTO_RECOVERY_MIN_TRIGGER_INTERVAL_SECONDS",
+    )
+    proxy_auto_recovery_skip_egress: bool = Field(
+        default=True,
+        validation_alias="PROXY_AUTO_RECOVERY_SKIP_EGRESS",
+    )
+    proxy_auto_recovery_skip_iplark: bool = Field(
+        default=True,
+        validation_alias="PROXY_AUTO_RECOVERY_SKIP_IPLARK",
+    )
+    proxy_auto_recovery_fast_ipapi_egress: bool = Field(
+        default=False,
+        validation_alias="PROXY_AUTO_RECOVERY_FAST_IPAPI_EGRESS",
+    )
+    proxy_auto_recovery_allow_known_google_blocked_ip: bool = Field(
+        default=True,
+        validation_alias="PROXY_AUTO_RECOVERY_ALLOW_KNOWN_GOOGLE_BLOCKED_IP",
+    )
+    proxy_auto_recovery_allow_known_google_blocked_prefix: bool = Field(
+        default=True,
+        validation_alias="PROXY_AUTO_RECOVERY_ALLOW_KNOWN_GOOGLE_BLOCKED_PREFIX",
+    )
+    proxy_auto_recovery_retry_retired: bool = Field(
+        default=False,
+        validation_alias="PROXY_AUTO_RECOVERY_RETRY_RETIRED",
+    )
+    proxy_auto_recovery_skip_duck_canary: bool = Field(
+        default=True,
+        validation_alias="PROXY_AUTO_RECOVERY_SKIP_DUCK_CANARY",
+    )
+    proxy_auto_recovery_canary_repeats: int = Field(
+        default=1,
+        ge=1,
+        validation_alias="PROXY_AUTO_RECOVERY_CANARY_REPEATS",
+    )
 
     @field_validator("search_engine")
     @classmethod

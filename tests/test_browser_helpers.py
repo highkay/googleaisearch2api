@@ -1,5 +1,8 @@
+import pytest
+
 from googleaisearch2api.browser import (
     GoogleAiRunner,
+    GoogleAiUnavailableError,
     clean_answer_text,
     filter_citations,
     resolve_browser_proxy,
@@ -125,6 +128,27 @@ def test_wait_for_answer_skips_prompt_echo_and_accepts_ready_short_answer() -> N
     result = runner._wait_for_answer(_FakePage(), query, 5_000)
 
     assert result.answer_text == "READY"
+
+
+def test_wait_for_answer_rejects_non_answer_interstitial_page() -> None:
+    runner = _PayloadRunner(
+        [
+            {
+                "answerText": "Google needs consent to continue.",
+                "answerReady": True,
+                "citations": [],
+                "finalUrl": "https://www.google.com/search?udm=50",
+                "pageTitle": "Before you continue",
+                "bodyExcerpt": (
+                    "Before you continue to Google, we use cookies and data "
+                    "to deliver and maintain Google services."
+                ),
+            },
+        ]
+    )
+
+    with pytest.raises(GoogleAiUnavailableError, match="consent interstitial"):
+        runner._wait_for_answer(_FakePage(), "Question", 5_000)
 
 
 def test_filter_citations_deduplicates_empty_entries() -> None:

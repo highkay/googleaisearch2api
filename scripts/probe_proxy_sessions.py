@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
+from collections.abc import Callable
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
+from itertools import groupby
 from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -25,7 +28,10 @@ from googleaisearch2api.proxy_sessions import (
     DEFAULT_STICKY_SUFFIX_TEMPLATE,
     STATUS_ACTIVE,
     STATUS_COOLDOWN,
+    STATUS_EGRESS_CHECKED,
+    STATUS_NEW,
     STATUS_RETIRED,
+    STATUS_RISK_CHECKED,
     ProxySessionSnapshot,
     ProxySessionStore,
     build_proxy_config_for_session,
@@ -41,6 +47,62 @@ DEFAULT_CANARY_PROMPT = "What is nineteen plus twenty-three? Reply with only the
 DEFAULT_CANARY_EXPECTED_ANSWER = "42"
 DEFAULT_CANARY_REPEATS = 2
 DEFAULT_DUCK_CANARY_REPEATS = 1
+EXISTING_SESSION_RANKING_FETCH_LIMIT = 5_000
+
+
+def _session_success_score(snapshot: ProxySessionSnapshot) -> int:
+    return int(snapshot.request_success_count) + int(snapshot.canary_success_count)
+
+
+def _session_failure_score(snapshot: ProxySessionSnapshot) -> int:
+    return (
+        int(snapshot.request_block_count)
+        + int(snapshot.canary_block_count)
+        + int(snapshot.request_error_count)
+    )
+
+
+def _existing_session_recovery_group(snapshot: ProxySessionSnapshot) -> tuple[int, int, int, int]:
+    success_score = _session_success_score(snapshot)
+    duplicate_rank = 1 if snapshot.duplicate_of_session_id is not None else 0
+    if snapshot.status == STATUS_ACTIVE:
+        status_rank = 0
+    elif snapshot.status not in {STATUS_COOLDOWN, STATUS_RETIRED} and success_score > 0:
+        status_rank = 1
+    elif snapshot.status in {STATUS_RISK_CHECKED, STATUS_EGRESS_CHECKED, STATUS_NEW}:
+        status_rank = 2
+    elif snapshot.status == STATUS_COOLDOWN and success_score > 0:
+        status_rank = 3
+    elif snapshot.status == STATUS_COOLDOWN:
+        status_rank = 4
+    elif snapshot.status == STATUS_RETIRED and is_risk_metadata_retire_reason(
+        snapshot.retire_reason
+    ):
+        status_rank = 5
+    else:
+        status_rank = 6
+    return (duplicate_rank, status_rank, -success_score, _session_failure_score(snapshot))
+
+
+def _existing_session_recovery_rank(
+    snapshot: ProxySessionSnapshot,
+) -> tuple[int, int, int, int, int]:
+    return (*_existing_session_recovery_group(snapshot), snapshot.id)
+
+
+def _shuffle_within_rank_groups(
+    snapshots: list[ProxySessionSnapshot],
+    *,
+    seed: int | None,
+    group_key: Callable[[ProxySessionSnapshot], tuple[int, int, int, int]],
+) -> list[ProxySessionSnapshot]:
+    rng = random.Random(seed)
+    shuffled: list[ProxySessionSnapshot] = []
+    for _key, items_iter in groupby(snapshots, key=group_key):
+        items = list(items_iter)
+        rng.shuffle(items)
+        shuffled.extend(items)
+    return shuffled
 
 
 def _snapshot_json(snapshot: ProxySessionSnapshot) -> dict:
@@ -97,6 +159,40 @@ def _candidate_indices(start: int, end: int, *, shuffle: bool, seed: int | None)
     return indices
 
 
+def _candidate_existing_sessions(
+    store: ProxySessionStore,
+    base_username: str,
+    *,
+    limit: int,
+    shuffle: bool,
+    seed: int | None,
+) -> list[ProxySessionSnapshot]:
+    fetch_limit = max(limit, EXISTING_SESSION_RANKING_FETCH_LIMIT)
+    snapshots = store.list_proxy_sessions(limit=fetch_limit, proxy_base_username=base_username)
+    snapshots = sorted(snapshots, key=_existing_session_recovery_rank)
+    if shuffle:
+        snapshots = _shuffle_within_rank_groups(
+            snapshots,
+            seed=seed,
+            group_key=_existing_session_recovery_group,
+        )
+    return snapshots[:limit]
+
+
+def _should_stop_after_terminal_stage(
+    snapshot: ProxySessionSnapshot,
+    *,
+    stage_ran: bool,
+) -> bool:
+    return stage_ran and snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}
+
+
+def _fresh_active_checked_after(now: datetime, active_freshness_seconds: int) -> datetime | None:
+    if active_freshness_seconds <= 0:
+        return None
+    return now - timedelta(seconds=active_freshness_seconds)
+
+
 def _normalize_canary_answer(text: str) -> str:
     normalized = " ".join(text.strip().split()).strip("`'\" ")
     while len(normalized) > 1 and normalized.endswith("."):
@@ -108,7 +204,12 @@ def _canary_answer_matches(actual: str, expected: str) -> bool:
     expected = expected.strip()
     if not expected:
         return True
-    return _normalize_canary_answer(actual) == _normalize_canary_answer(expected)
+    actual_normalized = _normalize_canary_answer(actual)
+    expected_normalized = _normalize_canary_answer(expected)
+    if actual_normalized == expected_normalized:
+        return True
+    prefix_pattern = rf"^{re.escape(expected_normalized)}(?:\s|[.,;:!?])"
+    return re.match(prefix_pattern, actual_normalized) is not None
 
 
 def _run_canary(
@@ -588,6 +689,29 @@ def main() -> None:
         default=DEFAULT_STICKY_SUFFIX_TEMPLATE,
         help="Suffix template. Default creates <base>.user{n}.",
     )
+    parser.add_argument(
+        "--existing-sessions",
+        action="store_true",
+        help=(
+            "Probe existing proxy_sessions rows instead of generating candidates "
+            "from --start/--end."
+        ),
+    )
+    parser.add_argument(
+        "--existing-session-limit",
+        type=int,
+        default=2_000,
+        help="Maximum existing proxy_sessions rows to probe with --existing-sessions.",
+    )
+    parser.add_argument(
+        "--max-probes",
+        type=int,
+        default=0,
+        help=(
+            "Maximum sessions that may run expensive egress/canary probes. "
+            "0 means unlimited."
+        ),
+    )
     parser.add_argument("--egress-checks", type=int, default=2, help="Egress checks per session.")
     parser.add_argument(
         "--min-quality-score",
@@ -665,6 +789,16 @@ def main() -> None:
         default=0,
         help="Stop once this many active sessions exist for the base username.",
     )
+    parser.add_argument(
+        "--active-freshness-seconds",
+        type=int,
+        default=0,
+        help=(
+            "When used with --stop-after-active, count only active sessions whose "
+            "Google canary was checked within this many seconds. Default counts "
+            "all active sessions."
+        ),
+    )
     parser.add_argument("--skip-google-canary", action="store_true", help="Skip Google canary.")
     parser.add_argument("--skip-duck-canary", action="store_true", help="Skip Duck.ai canary.")
     parser.add_argument(
@@ -715,6 +849,12 @@ def main() -> None:
         raise SystemExit("--duck-canary-repeats must be >= 1")
     if args.known_google_blocked_prefix_min_count < 1:
         raise SystemExit("--known-google-blocked-prefix-min-count must be >= 1")
+    if args.existing_session_limit < 1:
+        raise SystemExit("--existing-session-limit must be >= 1")
+    if args.max_probes < 0:
+        raise SystemExit("--max-probes must be >= 0")
+    if args.active_freshness_seconds < 0:
+        raise SystemExit("--active-freshness-seconds must be >= 0")
 
     settings = get_settings()
     configure_logging(settings.app_log_level)
@@ -741,20 +881,20 @@ def main() -> None:
         deep=True,
     )
 
-    records = []
-    for index in _candidate_indices(args.start, args.end, shuffle=args.shuffle, seed=args.seed):
-        if (
-            args.stop_after_active > 0
-            and store.count_active_sessions(base_username) >= args.stop_after_active
-        ):
-            break
-        proxy_username = format_sticky_username(base_username, index, args.suffix_template)
-        session_name = f"user{index}"
-        snapshot = store.upsert_proxy_session(
-            proxy_base_username=base_username,
-            session_name=session_name,
-            proxy_username=proxy_username,
+    def stop_target_reached() -> bool:
+        if args.stop_after_active <= 0:
+            return False
+        checked_after = _fresh_active_checked_after(utc_now(), args.active_freshness_seconds)
+        return (
+            store.count_active_sessions(base_username, checked_after=checked_after)
+            >= args.stop_after_active
         )
+
+    records = []
+    probed_count = 0
+
+    def process_snapshot(snapshot: ProxySessionSnapshot) -> None:
+        nonlocal probed_count
         skip_reason = _skip_candidate_reason(
             snapshot,
             now=utc_now(),
@@ -771,11 +911,14 @@ def main() -> None:
                     "skipped": skip_reason,
                 }
             )
-            continue
-        candidate_config = build_proxy_config_for_session(base_config, proxy_username)
+            return
+        probed_count += 1
+        candidate_config = build_proxy_config_for_session(base_config, snapshot.proxy_username)
 
         iplark_result = None
+        egress_stage_ran = False
         if args.fast_ipapi_egress:
+            egress_stage_ran = True
             snapshot, iplark_result = _run_fast_ipapi_egress(
                 store,
                 snapshot,
@@ -784,6 +927,7 @@ def main() -> None:
                 timeout_s=args.fast_egress_timeout,
             )
         elif not args.skip_egress:
+            egress_stage_ran = True
             snapshot = _run_egress(
                 store,
                 snapshot,
@@ -791,16 +935,18 @@ def main() -> None:
                 checks=max(args.egress_checks, 1),
             )
 
-        if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+        if _should_stop_after_terminal_stage(snapshot, stage_ran=egress_stage_ran):
             records.append(
                 {
                     "session": _snapshot_json(snapshot),
                     "iplark": asdict(iplark_result) if iplark_result else None,
                 }
             )
-            continue
+            return
 
+        iplark_stage_ran = False
         if not args.skip_iplark and not args.fast_ipapi_egress:
+            iplark_stage_ran = True
             snapshot, iplark_result = _run_iplark(
                 store,
                 snapshot,
@@ -808,14 +954,14 @@ def main() -> None:
                 min_quality_score=args.min_quality_score,
                 risk_source=args.risk_source,
             )
-        if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+        if _should_stop_after_terminal_stage(snapshot, stage_ran=iplark_stage_ran):
             records.append(
                 {
                     "session": _snapshot_json(snapshot),
                     "iplark": asdict(iplark_result) if iplark_result else None,
                 }
             )
-            continue
+            return
 
         if not args.skip_duck_canary:
             snapshot = _run_duck_canary(
@@ -827,6 +973,7 @@ def main() -> None:
                 args.duck_canary_repeats,
             )
 
+        known_block_stage_applied = False
         checked_snapshot = _skip_known_google_blocked_ip(
             store,
             snapshot,
@@ -834,23 +981,59 @@ def main() -> None:
             enabled=not args.allow_known_google_blocked_ip,
         )
         if checked_snapshot is snapshot:
-            snapshot = _skip_known_google_blocked_prefix(
+            checked_snapshot = _skip_known_google_blocked_prefix(
                 store,
                 snapshot,
                 base_username=base_username,
                 enabled=not args.allow_known_google_blocked_prefix,
                 min_blocked_count=args.known_google_blocked_prefix_min_count,
             )
-        else:
-            snapshot = checked_snapshot
-        if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+        known_block_stage_applied = checked_snapshot is not snapshot
+        snapshot = checked_snapshot
+        if _should_stop_after_terminal_stage(snapshot, stage_ran=known_block_stage_applied):
             records.append(
                 {
                     "session": _snapshot_json(snapshot),
                     "iplark": asdict(iplark_result) if iplark_result else None,
                 }
             )
-            continue
+            return
+
+        if not args.skip_duck_canary:
+            snapshot = _run_duck_canary(
+                store,
+                snapshot,
+                candidate_config,
+                args.duck_canary_prompt,
+                args.duck_canary_expected_answer,
+                args.duck_canary_repeats,
+            )
+
+        known_block_stage_applied = False
+        checked_snapshot = _skip_known_google_blocked_ip(
+            store,
+            snapshot,
+            base_username=base_username,
+            enabled=not args.allow_known_google_blocked_ip,
+        )
+        if checked_snapshot is snapshot:
+            checked_snapshot = _skip_known_google_blocked_prefix(
+                store,
+                snapshot,
+                base_username=base_username,
+                enabled=not args.allow_known_google_blocked_prefix,
+                min_blocked_count=args.known_google_blocked_prefix_min_count,
+            )
+        known_block_stage_applied = checked_snapshot is not snapshot
+        snapshot = checked_snapshot
+        if _should_stop_after_terminal_stage(snapshot, stage_ran=known_block_stage_applied):
+            records.append(
+                {
+                    "session": _snapshot_json(snapshot),
+                    "iplark": asdict(iplark_result) if iplark_result else None,
+                }
+            )
+            return
 
         if not args.skip_google_canary:
             snapshot = _run_canary(
@@ -869,11 +1052,40 @@ def main() -> None:
             }
         )
 
+    if args.existing_sessions:
+        for snapshot in _candidate_existing_sessions(
+            store,
+            base_username,
+            limit=args.existing_session_limit,
+            shuffle=args.shuffle,
+            seed=args.seed,
+        ):
+            if stop_target_reached() or (
+                args.max_probes > 0 and probed_count >= args.max_probes
+            ):
+                break
+            process_snapshot(snapshot)
+    else:
+        for index in _candidate_indices(args.start, args.end, shuffle=args.shuffle, seed=args.seed):
+            if stop_target_reached() or (
+                args.max_probes > 0 and probed_count >= args.max_probes
+            ):
+                break
+            proxy_username = format_sticky_username(base_username, index, args.suffix_template)
+            session_name = f"user{index}"
+            snapshot = store.upsert_proxy_session(
+                proxy_base_username=base_username,
+                session_name=session_name,
+                proxy_username=proxy_username,
+            )
+            process_snapshot(snapshot)
+
     print(
         json.dumps(
             {
                 "base_username": base_username,
                 "active_sessions": store.count_active_sessions(base_username),
+                "probed_sessions": probed_count,
                 "records": records,
             },
             ensure_ascii=False,

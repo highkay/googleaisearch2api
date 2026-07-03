@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from googleaisearch2api.app import create_app
-from googleaisearch2api.browser import GoogleAiBlockedError
+from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiUnavailableError
 from googleaisearch2api.config import DEFAULT_API_TOKEN, ServiceConfigUpdate, get_settings
 from googleaisearch2api.schemas import Citation, GoogleAiResult
 
@@ -76,6 +76,18 @@ class FakePool:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeProxyAutoRecovery:
+    def __init__(self) -> None:
+        self.reasons: list[str] = []
+
+    def trigger_async(self, *, reason: str = "event") -> bool:
+        self.reasons.append(reason)
+        return True
+
+    def close(self) -> None:
+        pass
 
 
 def _install_fake_pool(
@@ -350,6 +362,77 @@ def test_query_auto_falls_back_to_duck_when_google_is_unavailable(test_app) -> N
     assert [record.status for record in recent] == ["ok", "error"]
 
 
+def test_query_auto_routes_directly_to_duck_when_sticky_pool_is_empty(test_app) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                search_engine="auto",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck direct fallback.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Duck direct fallback."
+    assert google_pool.prompts == []
+    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert recent[0].engine == "duck"
+    assert recent[0].status == "ok"
+
+
+def test_query_auto_triggers_recovery_when_sticky_pool_is_empty(test_app) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                search_engine="auto",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        recovery = FakeProxyAutoRecovery()
+        test_app.state.services.proxy_auto_recovery = recovery
+        _install_fake_pool(test_app, answer_text="Google answer.")
+        _install_fake_duck_pool(test_app, answer_text="Duck direct fallback.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert recovery.reasons == ["auto-pool-empty"]
+
+
 def test_query_auto_falls_back_to_duck_when_google_answer_quality_fails(
     test_app,
 ) -> None:
@@ -596,6 +679,7 @@ def test_duck_query_can_use_duck_ok_session_in_google_cooldown(test_app) -> None
 def test_query_reselects_sticky_proxy_session_after_google_block(test_app) -> None:
     with TestClient(test_app) as client:
         test_app.state.services.settings.google_ai_blocked_retry_count = 1
+        test_app.state.services.settings.proxy_auto_recovery_target_active = 2
         test_app.state.services.store.update_config(
             ServiceConfigUpdate(
                 default_model="google-search",
@@ -647,6 +731,8 @@ def test_query_reselects_sticky_proxy_session_after_google_block(test_app) -> No
             answer_text="Recovered answer.",
             outcomes=[blocked_error],
         )
+        recovery = FakeProxyAutoRecovery()
+        test_app.state.services.proxy_auto_recovery = recovery
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -679,6 +765,84 @@ def test_query_reselects_sticky_proxy_session_after_google_block(test_app) -> No
     assert sessions["openai.user1"].request_block_count == 1
     assert sessions["openai.user2"].status == "active"
     assert sessions["openai.user2"].request_success_count == 1
+    assert recovery.reasons == ["google-blocked-pool-below-target"]
+
+
+def test_query_reselects_sticky_proxy_session_after_google_non_answer_page(
+    test_app,
+) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.settings.google_ai_blocked_retry_count = 1
+        test_app.state.services.settings.proxy_auto_recovery_target_active = 2
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        first = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user1",
+            proxy_username="openai.user1",
+            status="active",
+        )
+        second = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user2",
+            proxy_username="openai.user2",
+            status="active",
+        )
+        test_app.state.services.proxy_session_store.mark_canary_success(first.id)
+        test_app.state.services.proxy_session_store.mark_canary_success(second.id)
+        pool = _install_fake_pool(
+            test_app,
+            answer_text="Recovered answer.",
+            outcomes=[
+                GoogleAiUnavailableError(
+                    "Google AI Mode is not available for this browser session."
+                )
+            ],
+        )
+        recovery = FakeProxyAutoRecovery()
+        test_app.state.services.proxy_auto_recovery = recovery
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+        sessions = {
+            snapshot.proxy_username: snapshot
+            for snapshot in test_app.state.services.proxy_session_store.list_proxy_sessions(
+                limit=10
+            )
+        }
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Recovered answer."
+    assert [config.browser_proxy_username for config in pool.configs] == [
+        "openai.user1",
+        "openai.user2",
+    ]
+    assert pool.reset_calls == 1
+    requests_by_proxy = {record.proxy_username: record for record in recent}
+    assert requests_by_proxy["openai.user1"].status == "error"
+    assert requests_by_proxy["openai.user2"].status == "ok"
+    assert sessions["openai.user1"].status == "cooldown"
+    assert sessions["openai.user1"].request_error_count == 1
+    assert sessions["openai.user2"].request_success_count == 1
+    assert recovery.reasons == ["google-unavailable-pool-below-target"]
 
 
 def test_query_fails_fast_when_sticky_enabled_without_active_session(test_app) -> None:

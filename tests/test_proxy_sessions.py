@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from googleaisearch2api.browser import resolve_browser_proxy
 from googleaisearch2api.config import ServiceConfig
-from googleaisearch2api.db import create_db_engine, create_session_factory, create_tables
+from googleaisearch2api.db import create_db_engine, create_session_factory, create_tables, utc_now
 from googleaisearch2api.proxy_sessions import (
     STATUS_ACTIVE,
     STATUS_COOLDOWN,
@@ -149,6 +150,96 @@ def test_duck_canary_success_does_not_promote_google_active_session(
     assert snapshot.duck_canary_success_count == 1
     assert snapshot.request_success_count == 0
     assert store.count_active_sessions("openai") == 0
+
+
+def test_count_active_sessions_can_require_recent_google_canary(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    snapshot = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+        status=STATUS_ACTIVE,
+    )
+    store.mark_canary_success(snapshot.id)
+
+    assert store.count_active_sessions("openai") == 1
+    assert store.count_active_sessions(
+        "openai",
+        checked_after=utc_now() - timedelta(minutes=1),
+    ) == 1
+    assert store.count_active_sessions(
+        "openai",
+        checked_after=utc_now() + timedelta(minutes=1),
+    ) == 0
+
+
+def test_canary_success_clears_stale_cooldown_reason(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    snapshot = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+        status=STATUS_ACTIVE,
+    )
+    snapshot = store.mark_session_cooldown(snapshot.id, reason="old block reason")
+
+    assert snapshot.retire_reason == "old block reason"
+
+    snapshot = store.mark_canary_success(snapshot.id)
+
+    assert snapshot.status == STATUS_ACTIVE
+    assert snapshot.cooldown_until is None
+    assert snapshot.retire_reason is None
+
+
+def test_request_success_clears_stale_cooldown_reason(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    snapshot = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+        status=STATUS_ACTIVE,
+    )
+    snapshot = store.mark_session_cooldown(snapshot.id, reason="old block reason")
+
+    assert snapshot.retire_reason == "old block reason"
+
+    store.finish_request_success(snapshot.id)
+    snapshot = store.list_proxy_sessions(limit=1, proxy_base_username="openai")[0]
+
+    assert snapshot.status == STATUS_ACTIVE
+    assert snapshot.cooldown_until is None
+    assert snapshot.retire_reason is None
+
+
+def test_expired_proven_cooldown_session_is_selectable(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    snapshot = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+        status=STATUS_ACTIVE,
+    )
+    store.mark_canary_success(snapshot.id)
+    store.mark_session_cooldown(snapshot.id, reason="temporary non-answer page", hours=1)
+
+    assert store.count_active_sessions("openai") == 0
+    assert store.count_selectable_sessions("openai") == 0
+
+    store.mark_session_cooldown(snapshot.id, reason="cooldown elapsed", hours=-1)
+    selector = ProxySessionSelector(store)
+    config = ServiceConfig(
+        browser_proxy_server="http://192.0.2.1:2260",
+        browser_proxy_username="openai",
+        browser_proxy_password="pass",
+        resin_sticky_session_enabled=True,
+    )
+    selection = selector.select(config)
+
+    assert store.count_active_sessions("openai") == 0
+    assert store.count_selectable_sessions("openai") == 1
+    assert selection is not None
+    assert selection.session.proxy_username == "openai.user1"
 
 
 def test_duck_selector_can_use_google_cooldown_session(

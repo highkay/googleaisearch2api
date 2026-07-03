@@ -7,6 +7,7 @@ from googleaisearch2api.proxy_sessions import (
     STATUS_ACTIVE,
     STATUS_COOLDOWN,
     STATUS_RETIRED,
+    STATUS_RISK_CHECKED,
     ProxyBlockedPrefixSnapshot,
     ProxySessionSnapshot,
 )
@@ -19,11 +20,14 @@ _SPEC.loader.exec_module(_SCRIPT)
 
 _candidate_indices = _SCRIPT._candidate_indices
 _canary_answer_matches = _SCRIPT._canary_answer_matches
+_candidate_existing_sessions = _SCRIPT._candidate_existing_sessions
+_fresh_active_checked_after = _SCRIPT._fresh_active_checked_after
 _run_canary = _SCRIPT._run_canary
 _run_duck_canary = _SCRIPT._run_duck_canary
 _skip_candidate_reason = _SCRIPT._skip_candidate_reason
 _skip_known_google_blocked_ip = _SCRIPT._skip_known_google_blocked_ip
 _skip_known_google_blocked_prefix = _SCRIPT._skip_known_google_blocked_prefix
+_should_stop_after_terminal_stage = _SCRIPT._should_stop_after_terminal_stage
 
 
 def _snapshot(
@@ -34,6 +38,12 @@ def _snapshot(
     primary_ip: str | None = "203.0.113.10",
     retire_reason: str | None = None,
     cooldown_until: datetime | None = None,
+    request_success_count: int = 0,
+    request_block_count: int = 0,
+    request_error_count: int = 0,
+    canary_success_count: int = 0,
+    canary_block_count: int = 0,
+    duplicate_of_session_id: int | None = None,
 ) -> ProxySessionSnapshot:
     return ProxySessionSnapshot(
         id=id,
@@ -51,15 +61,15 @@ def _snapshot(
         duck_canary_status="",
         duck_canary_error=None,
         duck_canary_checked_at=None,
-        request_success_count=0,
-        request_block_count=0,
-        request_error_count=0,
-        canary_success_count=0,
-        canary_block_count=0,
+        request_success_count=request_success_count,
+        request_block_count=request_block_count,
+        request_error_count=request_error_count,
+        canary_success_count=canary_success_count,
+        canary_block_count=canary_block_count,
         duck_canary_success_count=0,
         duck_canary_rate_limit_count=0,
         duck_canary_error_count=0,
-        duplicate_of_session_id=None,
+        duplicate_of_session_id=duplicate_of_session_id,
         last_selected_at=None,
         last_success_at=None,
         last_blocked_at=None,
@@ -192,6 +202,85 @@ def test_skip_candidate_retries_legacy_risk_retired_only() -> None:
 def test_candidate_indices_can_shuffle_with_stable_seed() -> None:
     assert _candidate_indices(1, 5, shuffle=False, seed=None) == [1, 2, 3, 4, 5]
     assert _candidate_indices(1, 5, shuffle=True, seed=7) == [5, 1, 4, 2, 3]
+
+
+def test_fresh_active_checked_after_uses_seconds_window() -> None:
+    now = datetime(2026, 5, 26, 12, 0, tzinfo=UTC)
+
+    assert _fresh_active_checked_after(now, 0) is None
+    assert _fresh_active_checked_after(now, 300) == now - timedelta(seconds=300)
+
+
+class _FakeExistingSessionStore:
+    def __init__(self) -> None:
+        self.snapshots = [
+            _snapshot(status=STATUS_ACTIVE, id=1, proxy_username="openai.user1"),
+            _snapshot(status=STATUS_COOLDOWN, id=2, proxy_username="openai.user2"),
+            _snapshot(status=STATUS_RETIRED, id=3, proxy_username="openai.user3"),
+        ]
+        self.calls: list[tuple[int, str]] = []
+
+    def list_proxy_sessions(
+        self,
+        *,
+        limit: int,
+        proxy_base_username: str | None = None,
+    ) -> list[ProxySessionSnapshot]:
+        self.calls.append((limit, proxy_base_username or ""))
+        return self.snapshots[:limit]
+
+
+def test_candidate_existing_sessions_reads_wider_store_pool_and_ranks() -> None:
+    store = _FakeExistingSessionStore()
+
+    result = _candidate_existing_sessions(
+        store,
+        "openai",
+        limit=3,
+        shuffle=True,
+        seed=7,
+    )
+
+    assert store.calls == [(_SCRIPT.EXISTING_SESSION_RANKING_FETCH_LIMIT, "openai")]
+    assert [item.id for item in result] == [1, 2, 3]
+
+
+def test_candidate_existing_sessions_prefers_recoverable_success_history() -> None:
+    store = _FakeExistingSessionStore()
+    store.snapshots = [
+        _snapshot(status=STATUS_COOLDOWN, id=10, request_error_count=8),
+        _snapshot(status=STATUS_RETIRED, id=11, request_success_count=200),
+        _snapshot(
+            status=STATUS_COOLDOWN,
+            id=12,
+            request_success_count=20,
+            request_block_count=1,
+        ),
+        _snapshot(status=STATUS_RISK_CHECKED, id=13),
+        _snapshot(
+            status=STATUS_COOLDOWN,
+            id=14,
+            request_success_count=100,
+            duplicate_of_session_id=12,
+        ),
+    ]
+
+    result = _candidate_existing_sessions(
+        store,
+        "openai",
+        limit=5,
+        shuffle=False,
+        seed=None,
+    )
+
+    assert [item.id for item in result] == [13, 12, 10, 11, 14]
+
+
+def test_terminal_stage_gate_allows_direct_cooldown_canary_retry() -> None:
+    cooldown = _snapshot(status=STATUS_COOLDOWN)
+
+    assert not _should_stop_after_terminal_stage(cooldown, stage_ran=False)
+    assert _should_stop_after_terminal_stage(cooldown, stage_ran=True)
 
 
 class _FakeKnownBlockedStore:
@@ -387,6 +476,12 @@ def test_skip_known_google_blocked_prefix_can_be_disabled() -> None:
 def test_canary_answer_match_normalizes_trailing_period_and_whitespace() -> None:
     assert _canary_answer_matches("  42.\n", "42")
     assert _canary_answer_matches("`42`", "42")
+    assert _canary_answer_matches(
+        "42\nIf you have any other math problems, feel free to ask!",
+        "42",
+    )
+    assert not _canary_answer_matches("420", "42")
+    assert not _canary_answer_matches("42abc", "42")
     assert not _canary_answer_matches(
         "You said: What is nineteen plus twenty-three?",
         "42",
