@@ -238,8 +238,9 @@ docker inspect googleaisearch2api-googleaisearch2api-1 --format '{{.Config.Image
 
 1. 候选集 = **已有 inventory 全部** ∪ **缺失的 `user{START}..user{END}`**  
    （`START`/`END` 是 discovery 上界，不是写死 500；库存外索引会 upsert 进库再扫）
-2. 并发 `curl_cffi`（默认 16 worker）测隧道 / 出口 IP / Google 壳页
-3. 失败 → cooldown；**不占** browser `max-probes`
+2. 并发 `curl_cffi`（默认 16 worker）测隧道 / 出口 IP / Google **IP 级阻断**  
+   （`enablejs` 壳页不算 block；纯 HTTP 正常会返回，浏览器 canary 再验）
+3. 失败 → 记录 egress IP（若有）并 cooldown；**不占** browser `max-probes`
 4. 通过 → 再跑少量浏览器 canary（`MAX_PROBES`），成功 → Hot `active`
 5. 事件触发（池空）只扫已有 inventory，且用较小 `EVENT_FAST_HTTP_SCAN_LIMIT`，**不**做 index discovery
 

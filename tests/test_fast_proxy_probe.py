@@ -86,3 +86,57 @@ def test_probe_proxy_http_fast_accepts_clean_proxy() -> None:
     assert result.ok is True
     assert result.primary_ip == "198.51.100.7"
     assert result.google_blocked is False
+
+
+def test_probe_proxy_http_fast_allows_enablejs_shell_for_browser_canary() -> None:
+    # Pure HTTP to the AI search URL normally returns the enablejs retry shell
+    # even for healthy sticky exits; L0 must not treat that as an IP block.
+    session = _FakeSession(
+        {
+            "https://api.ipify.org?format=json": _FakeResponse(
+                200, '{"ip":"203.0.113.55"}'
+            ),
+            "https://api64.ipify.org?format=json": _FakeResponse(
+                200, '{"ip":"203.0.113.55"}'
+            ),
+            "https://www.google.com/search?udm=50&aep=11&hl=en&q=ping": _FakeResponse(
+                200,
+                (
+                    '<!DOCTYPE html><html><body><noscript>'
+                    '<meta content="0;url=/httpservice/retry/enablejs?sei=abc" '
+                    'http-equiv="refresh">'
+                    "Please click here if you are not redirected within a few seconds."
+                    "</noscript></body></html>"
+                ),
+            ),
+        }
+    )
+    config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
+    result = probe_proxy_http_fast(config, session=session)
+
+    assert result.ok is True
+    assert result.google_blocked is False
+    assert result.primary_ip == "203.0.113.55"
+
+
+def test_probe_proxy_http_fast_still_rejects_sorry_interstitial() -> None:
+    session = _FakeSession(
+        {
+            "https://api.ipify.org?format=json": _FakeResponse(
+                200, '{"ip":"203.0.113.77"}'
+            ),
+            "https://api64.ipify.org?format=json": _FakeResponse(
+                200, '{"ip":"203.0.113.77"}'
+            ),
+            "https://www.google.com/search?udm=50&aep=11&hl=en&q=ping": _FakeResponse(
+                200,
+                "https://www.google.com/sorry/index?continue=https://www.google.com/",
+                url="https://www.google.com/sorry/index?continue=search",
+            ),
+        }
+    )
+    config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
+    result = probe_proxy_http_fast(config, session=session)
+
+    assert result.ok is False
+    assert result.google_blocked is True

@@ -17,6 +17,9 @@ GOOGLE_AI_PROBE_URL = "https://www.google.com/search?udm=50&aep=11&hl=en&q=ping"
 DEFAULT_IMPERSONATE = "chrome131"
 DEFAULT_TIMEOUT_S = 8.0
 
+# IP-level Google blocks only. Do NOT treat enablejs / noscript shells as blocked:
+# pure HTTP (httpx/curl_cffi) routinely receives the enablejs retry page even for
+# healthy sticky exits; only a real browser can complete that path (see AGENTS.md).
 BLOCKED_BODY_MARKERS = (
     "unusual traffic",
     "this network is blocked due to unaddressed abuse complaints",
@@ -24,8 +27,8 @@ BLOCKED_BODY_MARKERS = (
     "this page checks to see if it's really a human",
     "not a robot",
     "captcha",
-    "enablejs",
-    "please click here if you are not redirected",
+    "sorry/index",
+    "/sorry/",
 )
 
 
@@ -110,7 +113,8 @@ def probe_proxy_http_fast(
 
     Pass criteria:
     - at least one egress IP endpoint succeeds
-    - optional Google AI URL is reachable and body is not an obvious block/enablejs shell
+    - optional Google AI URL is reachable and body is not an obvious IP-level block
+      (enablejs / JS shells are allowed; browser canary owns that path)
     """
     try:
         from curl_cffi import requests as curl_requests

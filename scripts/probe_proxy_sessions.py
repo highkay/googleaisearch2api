@@ -772,16 +772,22 @@ def _run_fast_http_prefilter(
         message=("ok" if result.ok else (result.reason or "failed")),
         raw_json=payload,
     )
+    # Always persist observed egress IPs when available (including L0 rejects)
+    # so the inventory can learn bad exits without a second probe.
+    if result.ips:
+        snapshot = store.update_egress(
+            proxy_session_id=snapshot.id,
+            ips=result.ips,
+            source="fast_http",
+            raw_json=result.raw,
+        )
+        if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+            return snapshot, payload
+
     if not result.ok:
         reason = result.reason or "fast http prefilter failed"
         return store.mark_session_cooldown(snapshot.id, reason=reason), payload
 
-    snapshot = store.update_egress(
-        proxy_session_id=snapshot.id,
-        ips=result.ips,
-        source="fast_http",
-        raw_json=result.raw,
-    )
     return snapshot, payload
 
 
