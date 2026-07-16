@@ -232,6 +232,20 @@ class AppSettings(BaseSettings):
         default=False,
         validation_alias="PROXY_AUTO_RECOVERY_FAST_IPAPI_EGRESS",
     )
+    proxy_auto_recovery_fast_http_prefilter: bool = Field(
+        default=True,
+        validation_alias="PROXY_AUTO_RECOVERY_FAST_HTTP_PREFILTER",
+    )
+    proxy_auto_recovery_fast_http_timeout: float = Field(
+        default=8.0,
+        gt=0,
+        validation_alias="PROXY_AUTO_RECOVERY_FAST_HTTP_TIMEOUT",
+    )
+    proxy_auto_recovery_fast_http_scan_limit: int = Field(
+        default=40,
+        ge=0,
+        validation_alias="PROXY_AUTO_RECOVERY_FAST_HTTP_SCAN_LIMIT",
+    )
     proxy_auto_recovery_allow_known_google_blocked_ip: bool = Field(
         default=True,
         validation_alias="PROXY_AUTO_RECOVERY_ALLOW_KNOWN_GOOGLE_BLOCKED_IP",

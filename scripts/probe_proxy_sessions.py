@@ -16,6 +16,7 @@ from googleaisearch2api.config import ServiceConfig, get_settings
 from googleaisearch2api.db import create_db_engine, create_session_factory, create_tables, utc_now
 from googleaisearch2api.duck_ai import DuckAiRateLimitedError, DuckAiRunner
 from googleaisearch2api.egress import probe_egress
+from googleaisearch2api.fast_proxy_probe import probe_proxy_http_fast
 from googleaisearch2api.iplark import (
     IPAPI_IS_BASE_URL,
     IplarkProbeResult,
@@ -684,6 +685,40 @@ def _run_fast_ipapi_egress(
     return snapshot, result
 
 
+def _run_fast_http_prefilter(
+    store: ProxySessionStore,
+    snapshot: ProxySessionSnapshot,
+    config: ServiceConfig,
+    *,
+    timeout_s: float,
+    check_google: bool,
+) -> tuple[ProxySessionSnapshot, dict[str, object]]:
+    """L0 curl_cffi screen. Rejects dead/blocked exits without launching Chrome."""
+    result = probe_proxy_http_fast(
+        config,
+        timeout_s=timeout_s,
+        check_google=check_google,
+    )
+    payload = result.as_dict()
+    store.record_event(
+        proxy_session_id=snapshot.id,
+        event_type="fast_http_prefilter",
+        message=("ok" if result.ok else (result.reason or "failed")),
+        raw_json=payload,
+    )
+    if not result.ok:
+        reason = result.reason or "fast http prefilter failed"
+        return store.mark_session_cooldown(snapshot.id, reason=reason), payload
+
+    snapshot = store.update_egress(
+        proxy_session_id=snapshot.id,
+        ips=result.ips,
+        source="fast_http",
+        raw_json=result.raw,
+    )
+    return snapshot, payload
+
+
 def _run_egress(
     store: ProxySessionStore,
     snapshot: ProxySessionSnapshot,
@@ -765,9 +800,38 @@ def main() -> None:
         type=int,
         default=0,
         help=(
-            "Maximum sessions that may run expensive egress/canary probes. "
-            "0 means unlimited."
+            "Maximum sessions that may run expensive browser egress/canary probes. "
+            "Fast HTTP prefilter rejections do not count. 0 means unlimited."
         ),
+    )
+    parser.add_argument(
+        "--fast-http-prefilter",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use curl_cffi to cheaply screen proxy tunnel/egress/Google shell before "
+            "browser canary (default: enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--fast-http-timeout",
+        type=float,
+        default=8.0,
+        help="Timeout seconds for each curl_cffi request in the fast prefilter.",
+    )
+    parser.add_argument(
+        "--fast-http-scan-limit",
+        type=int,
+        default=0,
+        help=(
+            "Maximum candidates to run through the fast HTTP prefilter. "
+            "0 means unlimited. Browser max-probes is separate."
+        ),
+    )
+    parser.add_argument(
+        "--fast-http-skip-google",
+        action="store_true",
+        help="Only check egress IPs in the fast prefilter; skip Google AI URL check.",
     )
     parser.add_argument("--egress-checks", type=int, default=2, help="Egress checks per session.")
     parser.add_argument(
@@ -910,6 +974,10 @@ def main() -> None:
         raise SystemExit("--existing-session-limit must be >= 1")
     if args.max_probes < 0:
         raise SystemExit("--max-probes must be >= 0")
+    if args.fast_http_scan_limit < 0:
+        raise SystemExit("--fast-http-scan-limit must be >= 0")
+    if args.fast_http_timeout <= 0:
+        raise SystemExit("--fast-http-timeout must be > 0")
     if args.active_freshness_seconds < 0:
         raise SystemExit("--active-freshness-seconds must be >= 0")
 
@@ -949,9 +1017,11 @@ def main() -> None:
 
     records = []
     probed_count = 0
+    fast_http_screened = 0
+    fast_http_rejected = 0
 
     def process_snapshot(snapshot: ProxySessionSnapshot) -> None:
-        nonlocal probed_count
+        nonlocal probed_count, fast_http_screened, fast_http_rejected
         skip_reason = _skip_candidate_reason(
             snapshot,
             now=utc_now(),
@@ -969,34 +1039,80 @@ def main() -> None:
                 }
             )
             return
-        probed_count += 1
-        candidate_config = build_proxy_config_for_session(base_config, snapshot.proxy_username)
 
+        candidate_config = build_proxy_config_for_session(base_config, snapshot.proxy_username)
         iplark_result = None
+        fast_http_payload: dict[str, object] | None = None
+
+        if args.fast_http_prefilter:
+            if args.fast_http_scan_limit > 0 and fast_http_screened >= args.fast_http_scan_limit:
+                records.append(
+                    {
+                        "session": _snapshot_json(snapshot),
+                        "iplark": None,
+                        "skipped": "fast http scan limit reached",
+                    }
+                )
+                return
+            fast_http_screened += 1
+            snapshot, fast_http_payload = _run_fast_http_prefilter(
+                store,
+                snapshot,
+                candidate_config,
+                timeout_s=args.fast_http_timeout,
+                check_google=not args.fast_http_skip_google,
+            )
+            if snapshot.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+                fast_http_rejected += 1
+                records.append(
+                    {
+                        "session": _snapshot_json(snapshot),
+                        "iplark": None,
+                        "fast_http": fast_http_payload,
+                    }
+                )
+                return
+
+        # Expensive browser path budget starts here.
+        if args.max_probes > 0 and probed_count >= args.max_probes:
+            records.append(
+                {
+                    "session": _snapshot_json(snapshot),
+                    "iplark": None,
+                    "fast_http": fast_http_payload,
+                    "skipped": "browser probe budget exhausted",
+                }
+            )
+            return
+        probed_count += 1
+
         egress_stage_ran = False
-        if args.fast_ipapi_egress:
-            egress_stage_ran = True
-            snapshot, iplark_result = _run_fast_ipapi_egress(
-                store,
-                snapshot,
-                candidate_config,
-                min_quality_score=args.min_quality_score,
-                timeout_s=args.fast_egress_timeout,
-            )
-        elif not args.skip_egress:
-            egress_stage_ran = True
-            snapshot = _run_egress(
-                store,
-                snapshot,
-                candidate_config,
-                checks=max(args.egress_checks, 1),
-            )
+        # Fast HTTP already wrote egress IPs; skip slower browser/ipapi egress.
+        if not (args.fast_http_prefilter and snapshot.primary_ip):
+            if args.fast_ipapi_egress:
+                egress_stage_ran = True
+                snapshot, iplark_result = _run_fast_ipapi_egress(
+                    store,
+                    snapshot,
+                    candidate_config,
+                    min_quality_score=args.min_quality_score,
+                    timeout_s=args.fast_egress_timeout,
+                )
+            elif not args.skip_egress:
+                egress_stage_ran = True
+                snapshot = _run_egress(
+                    store,
+                    snapshot,
+                    candidate_config,
+                    checks=max(args.egress_checks, 1),
+                )
 
         if _should_stop_after_terminal_stage(snapshot, stage_ran=egress_stage_ran):
             records.append(
                 {
                     "session": _snapshot_json(snapshot),
                     "iplark": asdict(iplark_result) if iplark_result else None,
+                    "fast_http": fast_http_payload,
                 }
             )
             return
@@ -1016,6 +1132,7 @@ def main() -> None:
                 {
                     "session": _snapshot_json(snapshot),
                     "iplark": asdict(iplark_result) if iplark_result else None,
+                    "fast_http": fast_http_payload,
                 }
             )
             return
@@ -1052,6 +1169,7 @@ def main() -> None:
                 {
                     "session": _snapshot_json(snapshot),
                     "iplark": asdict(iplark_result) if iplark_result else None,
+                    "fast_http": fast_http_payload,
                 }
             )
             return
@@ -1088,6 +1206,7 @@ def main() -> None:
                 {
                     "session": _snapshot_json(snapshot),
                     "iplark": asdict(iplark_result) if iplark_result else None,
+                    "fast_http": fast_http_payload,
                 }
             )
             return
@@ -1106,27 +1225,38 @@ def main() -> None:
             {
                 "session": _snapshot_json(snapshot),
                 "iplark": asdict(iplark_result) if iplark_result else None,
+                "fast_http": fast_http_payload,
             }
         )
 
+    def browser_budget_exhausted() -> bool:
+        return args.max_probes > 0 and probed_count >= args.max_probes
+
+    def fast_scan_exhausted() -> bool:
+        return args.fast_http_scan_limit > 0 and fast_http_screened >= args.fast_http_scan_limit
+
+    def should_stop_candidate_loop() -> bool:
+        return stop_target_reached() or browser_budget_exhausted() or fast_scan_exhausted()
+
+    existing_candidates: list[ProxySessionSnapshot] = []
     if args.existing_sessions:
-        for snapshot in _candidate_existing_sessions(
+        existing_candidates = _candidate_existing_sessions(
             store,
             base_username,
             limit=args.existing_session_limit,
             shuffle=args.shuffle,
             seed=args.seed,
-        ):
-            if stop_target_reached() or (
-                args.max_probes > 0 and probed_count >= args.max_probes
-            ):
+        )
+
+    if existing_candidates:
+        for snapshot in existing_candidates:
+            if should_stop_candidate_loop():
                 break
             process_snapshot(snapshot)
     else:
+        # No inventory for this base yet (e.g. sticky prefix renamed openai -> Default).
         for index in _candidate_indices(args.start, args.end, shuffle=args.shuffle, seed=args.seed):
-            if stop_target_reached() or (
-                args.max_probes > 0 and probed_count >= args.max_probes
-            ):
+            if should_stop_candidate_loop():
                 break
             proxy_username = format_sticky_username(base_username, index, args.suffix_template)
             session_name = f"user{index}"
@@ -1142,6 +1272,9 @@ def main() -> None:
         "base_username": base_username,
         "active_sessions": active_sessions,
         "probed_sessions": probed_count,
+        "fast_http_screened": fast_http_screened,
+        "fast_http_rejected": fast_http_rejected,
+        "candidate_mode": "existing" if existing_candidates else "index",
         "stop_after_active": args.stop_after_active,
         "target_met": (
             args.stop_after_active <= 0 or active_sessions >= args.stop_after_active

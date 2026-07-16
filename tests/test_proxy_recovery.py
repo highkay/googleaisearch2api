@@ -68,6 +68,9 @@ def test_proxy_auto_recovery_runs_existing_session_probe(tmp_path: Path) -> None
     assert "--skip-egress" in command
     assert "--skip-iplark" in command
     assert "--fast-ipapi-egress" not in command
+    assert "--fast-http-prefilter" in command
+    assert command[command.index("--fast-http-timeout") + 1] == "8.0"
+    assert command[command.index("--fast-http-scan-limit") + 1] == "40"
     assert "--allow-known-google-blocked-ip" in command
     assert "--allow-known-google-blocked-prefix" in command
     assert "--skip-duck-canary" in command

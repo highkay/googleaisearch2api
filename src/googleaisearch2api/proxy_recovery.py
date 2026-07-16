@@ -109,6 +109,11 @@ class ProxyAutoRecovery:
                 "skip_egress": self._settings.proxy_auto_recovery_skip_egress,
                 "skip_iplark": self._settings.proxy_auto_recovery_skip_iplark,
                 "fast_ipapi_egress": self._settings.proxy_auto_recovery_fast_ipapi_egress,
+                "fast_http_prefilter": self._settings.proxy_auto_recovery_fast_http_prefilter,
+                "fast_http_timeout": self._settings.proxy_auto_recovery_fast_http_timeout,
+                "fast_http_scan_limit": (
+                    self._settings.proxy_auto_recovery_fast_http_scan_limit
+                ),
                 "allow_known_google_blocked_ip": (
                     self._settings.proxy_auto_recovery_allow_known_google_blocked_ip
                 ),
@@ -279,6 +284,23 @@ class ProxyAutoRecovery:
             command.append("--skip-duck-canary")
         if self._settings.proxy_auto_recovery_retry_retired:
             command.append("--retry-retired")
+        if self._settings.proxy_auto_recovery_fast_http_prefilter:
+            command.extend(
+                [
+                    "--fast-http-prefilter",
+                    "--fast-http-timeout",
+                    str(self._settings.proxy_auto_recovery_fast_http_timeout),
+                ]
+            )
+            if self._settings.proxy_auto_recovery_fast_http_scan_limit > 0:
+                command.extend(
+                    [
+                        "--fast-http-scan-limit",
+                        str(self._settings.proxy_auto_recovery_fast_http_scan_limit),
+                    ]
+                )
+        else:
+            command.append("--no-fast-http-prefilter")
         if self._settings.proxy_auto_recovery_skip_egress:
             command.append("--skip-egress")
         elif self._settings.proxy_auto_recovery_fast_ipapi_egress:

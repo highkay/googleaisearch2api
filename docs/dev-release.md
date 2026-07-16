@@ -231,3 +231,31 @@ docker inspect googleaisearch2api-googleaisearch2api-1 --format '{{.Config.Image
 - 根因用真实 `/healthz`、SQLite、容器日志取证后再改
 - 选择器/提取逻辑与并发模型拆开改，各自跑对应测试
 - 大规模 `probe_proxy_sessions` 与在线流量错峰；recovery 已与 Google worker 互斥，仍避免无意义狂扫 300 IP
+
+## 9. Fast HTTP 预筛（curl_cffi）
+
+Recovery / `probe_proxy_sessions` 默认启用 L0 快筛：
+
+1. `curl_cffi` 测隧道 + 出口 IP（ipify/api64）
+2. 粗测 `udm=50` 是否 403/429/unusual traffic/enablejs 壳
+3. 失败 → cooldown，**不占** browser `max-probes` 预算
+4. 通过 → 才跑昂贵 Google AI browser canary，成功才进 Hot（`active`）
+
+相关环境变量：
+
+```env
+PROXY_AUTO_RECOVERY_FAST_HTTP_PREFILTER=true
+PROXY_AUTO_RECOVERY_FAST_HTTP_TIMEOUT=8
+PROXY_AUTO_RECOVERY_FAST_HTTP_SCAN_LIMIT=40
+```
+
+手动快扫示例：
+
+```bash
+uv run python scripts/probe_proxy_sessions.py \
+  --base-username Default \
+  --start 1 --end 200 --shuffle \
+  --fast-http-prefilter --fast-http-scan-limit 80 \
+  --max-probes 5 --stop-after-active 2 \
+  --skip-duck-canary --skip-iplark
+```
