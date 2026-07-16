@@ -234,13 +234,14 @@ docker inspect googleaisearch2api-googleaisearch2api-1 --format '{{.Config.Image
 
 ## 9. Fast HTTP 预筛与 12h 全池维护（curl_cffi）
 
-**日常不靠手跑脚本。** `ProxyAutoRecovery` 每 12 小时自动对**当前 sticky 前缀下的动态库存**做全量 L0 快筛：
+**日常不靠手跑脚本。** `ProxyAutoRecovery` 每 12 小时自动对**当前 sticky 前缀**做全量 L0 快筛：
 
-1. 列出该 base 的全部 `proxy_sessions`（数量动态，不写死 500）
+1. 候选集 = **已有 inventory 全部** ∪ **缺失的 `user{START}..user{END}`**  
+   （`START`/`END` 是 discovery 上界，不是写死 500；库存外索引会 upsert 进库再扫）
 2. 并发 `curl_cffi`（默认 16 worker）测隧道 / 出口 IP / Google 壳页
 3. 失败 → cooldown；**不占** browser `max-probes`
 4. 通过 → 再跑少量浏览器 canary（`MAX_PROBES`），成功 → Hot `active`
-5. 事件触发（池空）用较小 `EVENT_FAST_HTTP_SCAN_LIMIT`，避免请求路径上全池狂扫
+5. 事件触发（池空）只扫已有 inventory，且用较小 `EVENT_FAST_HTTP_SCAN_LIMIT`，**不**做 index discovery
 
 相关环境变量：
 
@@ -248,13 +249,15 @@ docker inspect googleaisearch2api-googleaisearch2api-1 --format '{{.Config.Image
 PROXY_AUTO_RECOVERY_ENABLED=true
 PROXY_AUTO_RECOVERY_INTERVAL_SECONDS=43200
 PROXY_AUTO_RECOVERY_EXISTING_SESSIONS=true
-PROXY_AUTO_RECOVERY_EXISTING_SESSION_LIMIT=0   # 0=整池
+PROXY_AUTO_RECOVERY_EXISTING_SESSION_LIMIT=0   # 0=整库存
+PROXY_AUTO_RECOVERY_START=1
+PROXY_AUTO_RECOVERY_END=1000                  # 全量扫时补齐缺失 userN
 PROXY_AUTO_RECOVERY_FAST_HTTP_PREFILTER=true
-PROXY_AUTO_RECOVERY_FAST_HTTP_SCAN_LIMIT=0    # 0=整池快筛
+PROXY_AUTO_RECOVERY_FAST_HTTP_SCAN_LIMIT=0    # 0=整候选集快筛
 PROXY_AUTO_RECOVERY_FAST_HTTP_WORKERS=16
 PROXY_AUTO_RECOVERY_EVENT_FAST_HTTP_SCAN_LIMIT=40
 PROXY_AUTO_RECOVERY_MAX_PROBES=5              # 仅浏览器 canary 预算
 PROXY_AUTO_RECOVERY_TIMEOUT_SECONDS=1800
 ```
 
-`scripts/probe_proxy_sessions.py` 只用于应急/调试，与自动恢复是同一引擎。
+`scripts/probe_proxy_sessions.py` 只用于应急/调试，与自动恢复是同一引擎（全量模式加 `--discover-missing-indices`）。

@@ -21,7 +21,9 @@ _SPEC.loader.exec_module(_SCRIPT)
 _candidate_indices = _SCRIPT._candidate_indices
 _canary_answer_matches = _SCRIPT._canary_answer_matches
 _candidate_existing_sessions = _SCRIPT._candidate_existing_sessions
+_discover_missing_index_sessions = _SCRIPT._discover_missing_index_sessions
 _fresh_active_checked_after = _SCRIPT._fresh_active_checked_after
+_merge_existing_with_index_discovery = _SCRIPT._merge_existing_with_index_discovery
 _run_canary = _SCRIPT._run_canary
 _run_duck_canary = _SCRIPT._run_duck_canary
 _skip_candidate_reason = _SCRIPT._skip_candidate_reason
@@ -221,6 +223,8 @@ class _FakeExistingSessionStore:
             _snapshot(status=STATUS_RETIRED, id=3, proxy_username="openai.user3"),
         ]
         self.calls: list[tuple[int, str]] = []
+        self.upserts: list[tuple[str, str, str]] = []
+        self._next_id = 100
 
     def list_proxy_sessions(
         self,
@@ -230,6 +234,25 @@ class _FakeExistingSessionStore:
     ) -> list[ProxySessionSnapshot]:
         self.calls.append((limit, proxy_base_username or ""))
         return self.snapshots[:limit]
+
+    def upsert_proxy_session(
+        self,
+        *,
+        proxy_base_username: str,
+        session_name: str,
+        proxy_username: str,
+    ) -> ProxySessionSnapshot:
+        self.upserts.append((proxy_base_username, session_name, proxy_username))
+        snapshot = _snapshot(
+            status=STATUS_ACTIVE,
+            id=self._next_id,
+            proxy_username=proxy_username,
+        )
+        # Keep session_name realistic for assertions without mutating frozen models.
+        object.__setattr__(snapshot, "session_name", session_name)
+        object.__setattr__(snapshot, "proxy_base_username", proxy_base_username)
+        self._next_id += 1
+        return snapshot
 
 
 def test_candidate_existing_sessions_reads_wider_store_pool_and_ranks() -> None:
@@ -331,6 +354,65 @@ def test_candidate_existing_sessions_prefers_ready_over_active_cooldown() -> Non
     )
 
     assert [item.id for item in result] == [122, 726, 169]
+
+
+def test_discover_missing_index_sessions_skips_known_usernames() -> None:
+    store = _FakeExistingSessionStore()
+    known = {"Default.user2", "Default.user4"}
+
+    discovered = _discover_missing_index_sessions(
+        store,
+        "Default",
+        start=1,
+        end=4,
+        suffix_template=".user{n}",
+        known_proxy_usernames=known,
+        shuffle=False,
+        seed=None,
+    )
+
+    assert [item.proxy_username for item in discovered] == [
+        "Default.user1",
+        "Default.user3",
+    ]
+    assert store.upserts == [
+        ("Default", "user1", "Default.user1"),
+        ("Default", "user3", "Default.user3"),
+    ]
+
+
+def test_merge_existing_with_index_discovery_is_union_existing_then_missing() -> None:
+    store = _FakeExistingSessionStore()
+    # Sparse inventory: only user2 and user5 exist; START..END is 1..5.
+    existing = [
+        _snapshot(status=STATUS_RISK_CHECKED, id=50, proxy_username="Default.user5"),
+        _snapshot(status=STATUS_COOLDOWN, id=20, proxy_username="Default.user2"),
+    ]
+
+    merged = _merge_existing_with_index_discovery(
+        store,
+        "Default",
+        existing,
+        start=1,
+        end=5,
+        suffix_template=".user{n}",
+        shuffle=False,
+        seed=None,
+    )
+
+    assert [item.proxy_username for item in merged] == [
+        "Default.user5",
+        "Default.user2",
+        "Default.user1",
+        "Default.user3",
+        "Default.user4",
+    ]
+    assert len(store.upserts) == 3
+    assert {username for _, _, username in store.upserts} == {
+        "Default.user1",
+        "Default.user3",
+        "Default.user4",
+    }
 
 
 def test_terminal_stage_gate_allows_direct_cooldown_canary_retry() -> None:

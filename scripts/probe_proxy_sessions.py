@@ -234,6 +234,64 @@ def _candidate_existing_sessions(
     return snapshots[:limit]
 
 
+def _discover_missing_index_sessions(
+    store: ProxySessionStore,
+    base_username: str,
+    *,
+    start: int,
+    end: int,
+    suffix_template: str,
+    known_proxy_usernames: set[str],
+    shuffle: bool,
+    seed: int | None,
+) -> list[ProxySessionSnapshot]:
+    """Create inventory rows for sticky indices in [start, end] not yet known."""
+    missing_indices = [
+        index
+        for index in _candidate_indices(start, end, shuffle=shuffle, seed=seed)
+        if format_sticky_username(base_username, index, suffix_template)
+        not in known_proxy_usernames
+    ]
+    discovered: list[ProxySessionSnapshot] = []
+    for index in missing_indices:
+        proxy_username = format_sticky_username(base_username, index, suffix_template)
+        discovered.append(
+            store.upsert_proxy_session(
+                proxy_base_username=base_username,
+                session_name=f"user{index}",
+                proxy_username=proxy_username,
+            )
+        )
+    return discovered
+
+
+def _merge_existing_with_index_discovery(
+    store: ProxySessionStore,
+    base_username: str,
+    existing: list[ProxySessionSnapshot],
+    *,
+    start: int,
+    end: int,
+    suffix_template: str,
+    shuffle: bool,
+    seed: int | None,
+) -> list[ProxySessionSnapshot]:
+    """Full-pool candidates = ranked existing inventory ∪ missing user{start}..user{end}."""
+    known = {snapshot.proxy_username for snapshot in existing}
+    discovered = _discover_missing_index_sessions(
+        store,
+        base_username,
+        start=start,
+        end=end,
+        suffix_template=suffix_template,
+        known_proxy_usernames=known,
+        shuffle=shuffle,
+        seed=seed,
+    )
+    # Existing first (recovery-ranked / history-aware); newly discovered indexes after.
+    return [*existing, *discovered]
+
+
 def _should_stop_after_terminal_stage(
     snapshot: ProxySessionSnapshot,
     *,
@@ -793,8 +851,8 @@ def main() -> None:
         "--existing-sessions",
         action="store_true",
         help=(
-            "Probe existing proxy_sessions rows instead of generating candidates "
-            "from --start/--end."
+            "Probe existing proxy_sessions rows (optionally merged with missing "
+            "--start/--end indices via --discover-missing-indices)."
         ),
     )
     parser.add_argument(
@@ -804,6 +862,14 @@ def main() -> None:
         help=(
             "Maximum existing proxy_sessions rows to probe with --existing-sessions. "
             "0 means the whole dynamic inventory for the sticky base."
+        ),
+    )
+    parser.add_argument(
+        "--discover-missing-indices",
+        action="store_true",
+        help=(
+            "With --existing-sessions, also include sticky indices in --start..--end "
+            "that are not yet in the inventory (full-pool = existing ∪ missing)."
         ),
     )
     parser.add_argument(
@@ -1191,21 +1257,34 @@ def main() -> None:
             seed=args.seed,
         )
 
-    if existing_candidates:
+    if existing_candidates and args.discover_missing_indices:
+        # Interval full-pool: every known row plus any missing user{start}..user{end}.
+        candidate_snapshots = _merge_existing_with_index_discovery(
+            store,
+            base_username,
+            existing_candidates,
+            start=args.start,
+            end=args.end,
+            suffix_template=args.suffix_template,
+            shuffle=args.shuffle,
+            seed=args.seed,
+        )
+        candidate_mode = "existing+index"
+    elif existing_candidates:
         candidate_snapshots = existing_candidates
         candidate_mode = "existing"
     else:
-        # Dynamic pool is empty for this sticky base: discover indexes once.
-        candidate_snapshots = []
-        for index in _candidate_indices(args.start, args.end, shuffle=args.shuffle, seed=args.seed):
-            proxy_username = format_sticky_username(base_username, index, args.suffix_template)
-            candidate_snapshots.append(
-                store.upsert_proxy_session(
-                    proxy_base_username=base_username,
-                    session_name=f"user{index}",
-                    proxy_username=proxy_username,
-                )
-            )
+        # Dynamic pool empty (or not using --existing-sessions): discover indexes once.
+        candidate_snapshots = _discover_missing_index_sessions(
+            store,
+            base_username,
+            start=args.start,
+            end=args.end,
+            suffix_template=args.suffix_template,
+            known_proxy_usernames=set(),
+            shuffle=args.shuffle,
+            seed=args.seed,
+        )
         candidate_mode = "index"
 
     # Phase 1: local skip filters (no network).

@@ -186,7 +186,8 @@ class AppSettings(BaseSettings):
         validation_alias="PROXY_AUTO_RECOVERY_EXISTING_SESSIONS",
     )
     proxy_auto_recovery_existing_session_limit: int = Field(
-        # 0 = scan the whole dynamic inventory for the current sticky base.
+        # 0 = include the whole dynamic inventory for the current sticky base.
+        # Full-pool (interval/startup) also discovers missing user{START}..user{END}.
         default=0,
         ge=0,
         validation_alias="PROXY_AUTO_RECOVERY_EXISTING_SESSION_LIMIT",

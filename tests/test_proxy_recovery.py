@@ -61,6 +61,9 @@ def test_proxy_auto_recovery_runs_existing_session_probe(tmp_path: Path) -> None
     assert command[command.index("--base-username") + 1] == "openai"
     assert "--existing-sessions" in command
     assert command[command.index("--existing-session-limit") + 1] == "0"
+    assert "--discover-missing-indices" in command
+    assert command[command.index("--start") + 1] == "1"
+    assert command[command.index("--end") + 1] == "1000"
     assert command[command.index("--max-probes") + 1] == "5"
     assert "--refresh-active" not in command
     assert "--retry-cooldown" in command
@@ -147,6 +150,7 @@ def test_proxy_auto_recovery_can_probe_generated_range(tmp_path: Path) -> None:
 
     command = calls[0]
     assert "--existing-sessions" not in command
+    assert "--discover-missing-indices" not in command
     assert "--retry-retired" not in command
     assert "--skip-egress" not in command
     assert "--skip-iplark" not in command
@@ -156,6 +160,41 @@ def test_proxy_auto_recovery_can_probe_generated_range(tmp_path: Path) -> None:
     assert "--stop-after-active" not in command
     assert command[command.index("--start") + 1] == "10"
     assert command[command.index("--end") + 1] == "20"
+
+
+def test_proxy_auto_recovery_event_trigger_skips_index_discovery(tmp_path: Path) -> None:
+    settings = AppSettings(
+        _env_file=None,
+        APP_DATA_DIR=tmp_path,
+        PROXY_AUTO_RECOVERY_ENABLED=True,
+        PROXY_AUTO_RECOVERY_EXISTING_SESSIONS=True,
+        PROXY_AUTO_RECOVERY_START=1,
+        PROXY_AUTO_RECOVERY_END=500,
+    )
+    script_path = _make_probe_script(tmp_path)
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout='{"active_sessions": 0}', stderr="")
+
+    recovery = ProxyAutoRecovery(
+        settings,
+        _FakeConfigStore(_sticky_config()),
+        script_path=script_path,
+        command_runner=runner,
+    )
+
+    assert recovery.run_once(reason="empty-pool") is True
+
+    command = calls[0]
+    assert "--existing-sessions" in command
+    assert "--discover-missing-indices" not in command
+    assert "--full-fast-http-sweep" not in command
+    assert "--no-full-fast-http-sweep" in command
+    assert command[command.index("--start") + 1] == "1"
+    assert command[command.index("--end") + 1] == "500"
+    assert command[command.index("--fast-http-scan-limit") + 1] == "40"
 
 
 def test_proxy_auto_recovery_trigger_async_runs_probe_once(tmp_path: Path) -> None:

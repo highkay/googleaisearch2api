@@ -269,8 +269,8 @@ class ProxyAutoRecovery:
         if self._settings.proxy_auto_recovery_end < self._settings.proxy_auto_recovery_start:
             raise ValueError("PROXY_AUTO_RECOVERY_END must be >= PROXY_AUTO_RECOVERY_START")
 
-        # Interval/startup: full-pool fast HTTP sweep over the dynamic inventory.
-        # Event triggers: smaller fast-scan budget so request-path recovery stays light.
+        # Interval/startup: full-pool = existing inventory ∪ missing user{START}..END.
+        # Event triggers: inventory-only + smaller fast-scan budget (request-path light).
         full_pool_sweep = reason in {"interval", "startup", "manual", "test"}
         fast_scan_limit = (
             self._settings.proxy_auto_recovery_fast_http_scan_limit
@@ -326,6 +326,16 @@ class ProxyAutoRecovery:
             command.extend(
                 ["--stop-after-active", str(self._settings.proxy_auto_recovery_target_active)]
             )
+        # Always pass the sticky index bound so empty inventory (and full-pool merge)
+        # can discover missing user{START}..user{END} slots.
+        command.extend(
+            [
+                "--start",
+                str(self._settings.proxy_auto_recovery_start),
+                "--end",
+                str(self._settings.proxy_auto_recovery_end),
+            ]
+        )
         if self._settings.proxy_auto_recovery_existing_sessions:
             command.extend(
                 [
@@ -334,24 +344,10 @@ class ProxyAutoRecovery:
                     str(self._settings.proxy_auto_recovery_existing_session_limit),
                 ]
             )
-            # When inventory is empty for a new sticky prefix, still allow index discovery.
-            command.extend(
-                [
-                    "--start",
-                    str(self._settings.proxy_auto_recovery_start),
-                    "--end",
-                    str(self._settings.proxy_auto_recovery_end),
-                ]
-            )
-        else:
-            command.extend(
-                [
-                    "--start",
-                    str(self._settings.proxy_auto_recovery_start),
-                    "--end",
-                    str(self._settings.proxy_auto_recovery_end),
-                ]
-            )
+            # Interval/startup full sweep expands inventory: existing ∪ missing indices.
+            # Event triggers stay inventory-only so request-path recovery stays light.
+            if full_pool_sweep:
+                command.append("--discover-missing-indices")
         return command
 
     def _consume_trigger_budget(self) -> bool:
