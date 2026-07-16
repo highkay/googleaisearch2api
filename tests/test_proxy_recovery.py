@@ -64,7 +64,7 @@ def test_proxy_auto_recovery_runs_existing_session_probe(tmp_path: Path) -> None
     assert "--discover-missing-indices" in command
     assert command[command.index("--start") + 1] == "1"
     assert command[command.index("--end") + 1] == "1000"
-    assert command[command.index("--max-probes") + 1] == "5"
+    assert command[command.index("--max-probes") + 1] == "25"
     assert "--refresh-active" not in command
     assert "--retry-cooldown" in command
     assert "--retry-retired" not in command

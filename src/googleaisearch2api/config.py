@@ -193,8 +193,10 @@ class AppSettings(BaseSettings):
         validation_alias="PROXY_AUTO_RECOVERY_EXISTING_SESSION_LIMIT",
     )
     proxy_auto_recovery_max_probes: int = Field(
-        # Browser canary budget after fast HTTP screening (not the whole pool size).
-        default=5,
+        # Browser canary budget after L0. Full-pool recovery often needs more than a
+        # handful because many L0 survivors still fail real Google unusual-traffic.
+        # Stops early once TARGET_ACTIVE is reached.
+        default=25,
         ge=0,
         validation_alias="PROXY_AUTO_RECOVERY_MAX_PROBES",
     )

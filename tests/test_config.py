@@ -61,7 +61,7 @@ def test_browser_worker_settings_support_current_and_legacy_env_names(tmp_path: 
     assert default_settings.proxy_auto_recovery_run_on_startup is False
     assert default_settings.proxy_auto_recovery_existing_sessions is True
     assert default_settings.proxy_auto_recovery_existing_session_limit == 0
-    assert default_settings.proxy_auto_recovery_max_probes == 5
+    assert default_settings.proxy_auto_recovery_max_probes == 25
     assert default_settings.proxy_auto_recovery_timeout_seconds == 1_800
     assert default_settings.proxy_auto_recovery_min_trigger_interval_seconds == 900
     assert default_settings.proxy_auto_recovery_skip_egress is True
