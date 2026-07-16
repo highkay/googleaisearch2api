@@ -114,6 +114,10 @@ class ProxyAutoRecovery:
                 "fast_http_scan_limit": (
                     self._settings.proxy_auto_recovery_fast_http_scan_limit
                 ),
+                "fast_http_workers": self._settings.proxy_auto_recovery_fast_http_workers,
+                "event_fast_http_scan_limit": (
+                    self._settings.proxy_auto_recovery_event_fast_http_scan_limit
+                ),
                 "allow_known_google_blocked_ip": (
                     self._settings.proxy_auto_recovery_allow_known_google_blocked_ip
                 ),
@@ -189,7 +193,7 @@ class ProxyAutoRecovery:
                     )
                     return False
             config = self._config_store.get_config()
-            command = self._build_command(config)
+            command = self._build_command(config, reason=reason)
             logger.info(
                 "Starting proxy auto recovery probe: reason={} interval={}s",
                 reason,
@@ -255,7 +259,7 @@ class ProxyAutoRecovery:
         while not self._stop_event.wait(self._settings.proxy_auto_recovery_interval_seconds):
             self.run_once(reason="interval")
 
-    def _build_command(self, config: ServiceConfig) -> list[str]:
+    def _build_command(self, config: ServiceConfig, *, reason: str = "manual") -> list[str]:
         if not config.resin_sticky_session_enabled:
             raise ProxyAutoRecoverySkipped("sticky proxy sessions are disabled")
         if not config.proxy_enabled:
@@ -264,6 +268,15 @@ class ProxyAutoRecovery:
             raise FileNotFoundError(f"probe script not found: {self._script_path}")
         if self._settings.proxy_auto_recovery_end < self._settings.proxy_auto_recovery_start:
             raise ValueError("PROXY_AUTO_RECOVERY_END must be >= PROXY_AUTO_RECOVERY_START")
+
+        # Interval/startup: full-pool fast HTTP sweep over the dynamic inventory.
+        # Event triggers: smaller fast-scan budget so request-path recovery stays light.
+        full_pool_sweep = reason in {"interval", "startup", "manual", "test"}
+        fast_scan_limit = (
+            self._settings.proxy_auto_recovery_fast_http_scan_limit
+            if full_pool_sweep
+            else self._settings.proxy_auto_recovery_event_fast_http_scan_limit
+        )
 
         base_username = resolve_proxy_base_username(config)
         command = [
@@ -277,6 +290,7 @@ class ProxyAutoRecovery:
             str(self._settings.proxy_auto_recovery_interval_seconds),
             "--canary-repeats",
             str(self._settings.proxy_auto_recovery_canary_repeats),
+            "--full-fast-http-sweep" if full_pool_sweep else "--no-full-fast-http-sweep",
         ]
         if self._settings.proxy_auto_recovery_max_probes > 0:
             command.extend(["--max-probes", str(self._settings.proxy_auto_recovery_max_probes)])
@@ -290,15 +304,12 @@ class ProxyAutoRecovery:
                     "--fast-http-prefilter",
                     "--fast-http-timeout",
                     str(self._settings.proxy_auto_recovery_fast_http_timeout),
+                    "--fast-http-workers",
+                    str(self._settings.proxy_auto_recovery_fast_http_workers),
                 ]
             )
-            if self._settings.proxy_auto_recovery_fast_http_scan_limit > 0:
-                command.extend(
-                    [
-                        "--fast-http-scan-limit",
-                        str(self._settings.proxy_auto_recovery_fast_http_scan_limit),
-                    ]
-                )
+            # 0 means unlimited (scan whole dynamic pool). Always pass explicitly.
+            command.extend(["--fast-http-scan-limit", str(fast_scan_limit)])
         else:
             command.append("--no-fast-http-prefilter")
         if self._settings.proxy_auto_recovery_skip_egress:
@@ -321,6 +332,15 @@ class ProxyAutoRecovery:
                     "--existing-sessions",
                     "--existing-session-limit",
                     str(self._settings.proxy_auto_recovery_existing_session_limit),
+                ]
+            )
+            # When inventory is empty for a new sticky prefix, still allow index discovery.
+            command.extend(
+                [
+                    "--start",
+                    str(self._settings.proxy_auto_recovery_start),
+                    "--end",
+                    str(self._settings.proxy_auto_recovery_end),
                 ]
             )
         else:

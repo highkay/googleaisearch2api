@@ -186,12 +186,14 @@ class AppSettings(BaseSettings):
         validation_alias="PROXY_AUTO_RECOVERY_EXISTING_SESSIONS",
     )
     proxy_auto_recovery_existing_session_limit: int = Field(
-        default=50,
-        ge=1,
+        # 0 = scan the whole dynamic inventory for the current sticky base.
+        default=0,
+        ge=0,
         validation_alias="PROXY_AUTO_RECOVERY_EXISTING_SESSION_LIMIT",
     )
     proxy_auto_recovery_max_probes: int = Field(
-        default=3,
+        # Browser canary budget after fast HTTP screening (not the whole pool size).
+        default=5,
         ge=0,
         validation_alias="PROXY_AUTO_RECOVERY_MAX_PROBES",
     )
@@ -211,7 +213,8 @@ class AppSettings(BaseSettings):
         validation_alias="PROXY_AUTO_RECOVERY_TARGET_ACTIVE",
     )
     proxy_auto_recovery_timeout_seconds: int = Field(
-        default=300,
+        # Full-pool fast HTTP scans of a few hundred sticky sessions need headroom.
+        default=1_800,
         ge=60,
         validation_alias="PROXY_AUTO_RECOVERY_TIMEOUT_SECONDS",
     )
@@ -242,9 +245,21 @@ class AppSettings(BaseSettings):
         validation_alias="PROXY_AUTO_RECOVERY_FAST_HTTP_TIMEOUT",
     )
     proxy_auto_recovery_fast_http_scan_limit: int = Field(
-        default=40,
+        # 0 = no cap: interval recovery fast-scans the whole dynamic pool.
+        default=0,
         ge=0,
         validation_alias="PROXY_AUTO_RECOVERY_FAST_HTTP_SCAN_LIMIT",
+    )
+    proxy_auto_recovery_fast_http_workers: int = Field(
+        default=16,
+        ge=1,
+        validation_alias="PROXY_AUTO_RECOVERY_FAST_HTTP_WORKERS",
+    )
+    proxy_auto_recovery_event_fast_http_scan_limit: int = Field(
+        # Event-triggered recovery stays cheaper than the 12h full pool sweep.
+        default=40,
+        ge=0,
+        validation_alias="PROXY_AUTO_RECOVERY_EVENT_FAST_HTTP_SCAN_LIMIT",
     )
     proxy_auto_recovery_allow_known_google_blocked_ip: bool = Field(
         default=True,

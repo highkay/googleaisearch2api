@@ -60,8 +60,8 @@ def test_proxy_auto_recovery_runs_existing_session_probe(tmp_path: Path) -> None
     assert str(script_path) in command
     assert command[command.index("--base-username") + 1] == "openai"
     assert "--existing-sessions" in command
-    assert command[command.index("--existing-session-limit") + 1] == "50"
-    assert command[command.index("--max-probes") + 1] == "3"
+    assert command[command.index("--existing-session-limit") + 1] == "0"
+    assert command[command.index("--max-probes") + 1] == "5"
     assert "--refresh-active" not in command
     assert "--retry-cooldown" in command
     assert "--retry-retired" not in command
@@ -69,8 +69,10 @@ def test_proxy_auto_recovery_runs_existing_session_probe(tmp_path: Path) -> None
     assert "--skip-iplark" in command
     assert "--fast-ipapi-egress" not in command
     assert "--fast-http-prefilter" in command
+    assert "--full-fast-http-sweep" in command
     assert command[command.index("--fast-http-timeout") + 1] == "8.0"
-    assert command[command.index("--fast-http-scan-limit") + 1] == "40"
+    assert command[command.index("--fast-http-scan-limit") + 1] == "0"
+    assert command[command.index("--fast-http-workers") + 1] == "16"
     assert "--allow-known-google-blocked-ip" in command
     assert "--allow-known-google-blocked-prefix" in command
     assert "--skip-duck-canary" in command
@@ -78,7 +80,7 @@ def test_proxy_auto_recovery_runs_existing_session_probe(tmp_path: Path) -> None
     assert command[command.index("--active-freshness-seconds") + 1] == "43200"
     assert command[command.index("--stop-after-active") + 1] == "1"
     assert kwargs["cwd"] == str(tmp_path)
-    assert kwargs["timeout"] == 300
+    assert kwargs["timeout"] == 1800
     assert recovery.status()["last_success"] is True
 
 

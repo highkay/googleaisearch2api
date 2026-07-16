@@ -60,13 +60,17 @@ def test_browser_worker_settings_support_current_and_legacy_env_names(tmp_path: 
     assert default_settings.proxy_auto_recovery_interval_seconds == 43_200
     assert default_settings.proxy_auto_recovery_run_on_startup is False
     assert default_settings.proxy_auto_recovery_existing_sessions is True
-    assert default_settings.proxy_auto_recovery_existing_session_limit == 50
-    assert default_settings.proxy_auto_recovery_max_probes == 3
-    assert default_settings.proxy_auto_recovery_timeout_seconds == 300
+    assert default_settings.proxy_auto_recovery_existing_session_limit == 0
+    assert default_settings.proxy_auto_recovery_max_probes == 5
+    assert default_settings.proxy_auto_recovery_timeout_seconds == 1_800
     assert default_settings.proxy_auto_recovery_min_trigger_interval_seconds == 900
     assert default_settings.proxy_auto_recovery_skip_egress is True
     assert default_settings.proxy_auto_recovery_skip_iplark is True
     assert default_settings.proxy_auto_recovery_fast_ipapi_egress is False
+    assert default_settings.proxy_auto_recovery_fast_http_prefilter is True
+    assert default_settings.proxy_auto_recovery_fast_http_scan_limit == 0
+    assert default_settings.proxy_auto_recovery_fast_http_workers == 16
+    assert default_settings.proxy_auto_recovery_event_fast_http_scan_limit == 40
     assert default_settings.proxy_auto_recovery_allow_known_google_blocked_ip is True
     assert default_settings.proxy_auto_recovery_allow_known_google_blocked_prefix is True
     assert default_settings.proxy_auto_recovery_retry_retired is False

@@ -993,9 +993,9 @@ class ProxySessionStore:
                 statement = statement.where(
                     ProxySessionRow.proxy_base_username == proxy_base_username
                 )
-            rows = session.scalars(
-                statement.limit(limit)
-            ).all()
+            if limit > 0:
+                statement = statement.limit(limit)
+            rows = session.scalars(statement).all()
             return [ProxySessionSnapshot.from_row(row) for row in rows]
 
 
