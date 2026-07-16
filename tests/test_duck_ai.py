@@ -16,7 +16,7 @@ def test_build_duck_search_prompt_forces_direct_search_answer() -> None:
     assert "Do not invent Reuters, Bloomberg, or other article slugs" in prompt
     assert "Return fewer results rather than filling the requested count" in prompt
     assert "Do not include unfinished notes" in prompt
-    assert "for JSON requests use an empty results list" in prompt
+    assert "no directly verifiable results were found" in prompt
     assert "台积电 3nm 涨价 最多返回 5 条" in prompt
 
 
@@ -137,3 +137,21 @@ Duck.ai
     )
 
     assert answer == "台积电 3nm 涨价可能利好半导体设备和材料供应链。"
+
+
+def test_extract_duck_answer_text_removes_app_download_tail() -> None:
+    answer = extract_duck_answer_text(
+        """
+Duck.ai
+User request:
+外服控股 重要事件 最多返回 5 条
+Reading website
+未找到符合 2026-07-06 当天范围的可追溯重要事件。
+Duck.ai works best in our private and free DuckDuckGo app!
+Download
+Learn More
+""",
+        "User request:\n外服控股 重要事件 最多返回 5 条",
+    )
+
+    assert answer == "未找到符合 2026-07-06 当天范围的可追溯重要事件。"

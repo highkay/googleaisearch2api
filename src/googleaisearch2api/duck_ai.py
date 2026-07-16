@@ -33,6 +33,12 @@ SEARCH_RESULTS_TAIL_MARKERS = {
     "Search Results",
     "搜索结果",
 }
+DUCK_UI_TAIL_MARKERS = {
+    "Duck.ai works best in our private and free DuckDuckGo app!",
+    "Download",
+    "Learn More",
+    "Get the App",
+}
 FOLLOW_UP_TAIL_MARKERS = [
     "\u5982\u679c\u60a8\u60f3\u8fdb\u4e00\u6b65\u4e86\u89e3",
     "\u5982\u679c\u4f60\u60f3\u8fdb\u4e00\u6b65\u4e86\u89e3",
@@ -71,7 +77,8 @@ Do not invent Reuters, Bloomberg, or other article slugs from memory.
 Use only exact URLs visible in the search result or opened page.
 Return fewer results rather than filling the requested count with guessed URLs.
 Do not include unfinished notes, parenthetical comments, or trailing note sections.
-If no source URL is verifiable, return no results; for JSON requests use an empty results list.
+If no source URL is verifiable, say that no directly verifiable results were found
+instead of guessing.
 
 User request:
 {prompt}"""
@@ -340,6 +347,7 @@ def extract_duck_answer_text(body_text: str, prompt: str, *, limit: int = 3000) 
         re.compile(r"^(\u5de5\u5177|\u5feb\u901f|\u804a\u5929)$"),
         re.compile(r"^(Searching the web|Search the web|Hide Reasoning)", re.IGNORECASE),
         re.compile(r"^(\u6b63\u5728\u641c\u7d22|\u9690\u85cf\u63a8\u7406)"),
+        re.compile(r"^Reading (?:website|document)$", re.IGNORECASE),
     ]
 
     lines: list[str] = []
@@ -348,6 +356,8 @@ def extract_duck_answer_text(body_text: str, prompt: str, *, limit: int = 3000) 
         if not line:
             continue
         if line in SEARCH_RESULTS_TAIL_MARKERS:
+            break
+        if line in DUCK_UI_TAIL_MARKERS:
             break
         if any(pattern.search(line) for pattern in skip_patterns):
             continue

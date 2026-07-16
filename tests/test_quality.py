@@ -13,6 +13,15 @@ def test_rejects_short_answer_when_prompt_requests_multiple_items() -> None:
     assert quality.reason == "answer is too short for the requested list"
 
 
+def test_accepts_concise_no_results_answer_for_multi_item_prompt() -> None:
+    quality = assess_google_answer_quality(
+        "外服控股 重要事件 最多返回 5 条",
+        "未找到外服控股在 2026-07-06 当日有可直接追溯的重要事件网页来源。",
+    )
+
+    assert quality.ok is True
+
+
 def test_rejects_short_answer_without_usable_citations() -> None:
     quality = assess_google_answer_quality("NVIDIA latest news", "NVIDIA shares rose today.")
 
@@ -25,6 +34,17 @@ def test_accepts_short_answer_with_usable_citation() -> None:
         "NVIDIA latest news",
         "NVIDIA shares rose today.",
         [Citation(title="Market report", url="https://example.com/market")],
+    )
+
+    assert quality.ok is True
+
+
+def test_accepts_short_answer_when_prompt_asks_for_only_a_number() -> None:
+    # Mirrors the real 2026-07-16 chat completion that asked for "only the number"
+    # and was wrongly rejected for missing citations.
+    quality = assess_google_answer_quality(
+        "User request:\nWhat is 19 plus 23? Reply with only the number.",
+        "42",
     )
 
     assert quality.ok is True
@@ -112,6 +132,28 @@ def test_rejects_raw_answer_with_duplicate_urls() -> None:
     assert quality.reason == "answer contains duplicate URLs"
 
 
+def test_normalize_answer_for_prompt_deduplicates_markdown_result_blocks() -> None:
+    prompt = "福日电子 600203.SH 最新公告 新闻 最多返回3条"
+    answer = normalize_answer_for_prompt(
+        prompt,
+        """
+**关键发现：**独立董事林丰离任公告。
+**来源：**新浪财经
+**日期：**2026-06-30
+**链接：**https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllNewsStock/symbol/sh600203.phtml
+**为什么相关：**页面列出福日电子公告条目。
+**关键发现：**关于获得政府补助的公告。
+**来源：**新浪财经
+**日期：**2026-06-27
+**链接：**https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllNewsStock/symbol/sh600203.phtml
+**为什么相关：**同一公告列表页里的另一个条目。
+""",
+    )
+
+    assert answer.count("https://vip.stock.finance.sina.com.cn") == 1
+    assert assess_google_answer_quality(prompt, answer).ok is True
+
+
 def test_rejects_raw_answer_with_aggregate_source_label() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
@@ -123,6 +165,43 @@ def test_rejects_raw_answer_with_aggregate_source_label() -> None:
 
     assert quality.ok is False
     assert quality.reason == "answer contains aggregate source labels"
+
+
+def test_accepts_official_source_label_with_page_slash() -> None:
+    quality = assess_google_answer_quality(
+        "外服控股 重要事件 最多返回 5 条",
+        """
+未找到符合 2026-07-06 当天范围的可追溯重要事件。
+来源：上海外服控股集团股份有限公司官网（投资者关系/公司公告列表） 日期：2026-07-02 链接：https://www.fsg.com.cn/IR.html
+为什么相关：页面列示公司公告条目，但日期不满足限定日期范围。
+""",
+    )
+
+    assert quality.ok is True
+
+
+def test_accepts_multiple_concrete_source_labels_with_slash() -> None:
+    quality = assess_google_answer_quality(
+        "福日电子 600203.SH 最新公告 新闻 最多返回3条",
+        """
+福日电子（600203.SH）的3条最新公告与新闻关键发现如下：
+公司独立董事林丰因任期届满离任
+日期：2026年7月1日
+来源：东方财富网 / 雪球
+公司及子公司累计获得与收益相关政府补助约582.50万元
+日期：2026年6月27日
+来源：新浪财经
+公司召开2025年年度股东会
+日期：2026年6月23日
+来源：证券日报网（东方财富） / 中国证券网
+""",
+        [
+            Citation(title="东方财富", url="https://quote.eastmoney.com/sh600203.html"),
+            Citation(title="雪球", url="https://stockmc.xueqiu.com/202606/600203.pdf"),
+        ],
+    )
+
+    assert quality.ok is True
 
 
 def test_normalize_answer_for_prompt_filters_bad_raw_result_blocks() -> None:
@@ -267,12 +346,32 @@ def test_rejects_raw_answer_with_unusable_url_artifact() -> None:
     assert quality.reason == "answer contains unusable URLs"
 
 
-def test_rejects_raw_answer_with_escaped_url_artifact() -> None:
+def test_normalizes_markdown_escaped_url_artifact() -> None:
+    prompt = "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条"
+    answer = normalize_answer_for_prompt(
+        prompt,
+        """
+台积电 3nm 涨价跟踪 — 东方财富 — 2024-02-18 — https://stock.eastmoney.com/a/20240218/20240218\\_1.html
+为什么相关：URL 中的反斜杠是模型输出转义残留；这条结果用于确认清洗逻辑会保留真实链接、
+来源、日期和相关性说明，而不是因为 Markdown 转义把整段答案误判为不可用。
+""",
+    )
+    quality = assess_google_answer_quality(
+        prompt,
+        answer,
+    )
+
+    assert "\\_" not in answer
+    assert "20240218_1.html" in answer
+    assert quality.ok is True
+
+
+def test_rejects_raw_answer_with_unhandled_url_artifact() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
         """
-台积电 3nm 涨价跟踪 — 东方财富 — 2024-02-18 — https://stock.eastmoney.com/a/20240218/20240218\\_1.html
-为什么相关：URL 中的反斜杠是模型输出转义残留。
+台积电 3nm 涨价跟踪 — 东方财富 — 2024-02-18 — https://stock.eastmoney.com/a/20240218/20240218\\bad.html
+为什么相关：URL 中有不能自动修复的反斜杠残留。
 """,
     )
 

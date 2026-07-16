@@ -5,7 +5,9 @@ import re
 import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from loguru import logger
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from .config import ServiceConfig, ServiceConfigUpdate
 from .db import RequestLogRow, ServiceConfigRow, utc_now
@@ -184,50 +186,56 @@ class ConfigStore:
         proxy_iplark_score: int | None = None,
     ) -> str:
         request_id = uuid.uuid4().hex
-        with self._session_factory() as session:
-            row = RequestLogRow(
-                id=request_id,
-                endpoint=endpoint,
-                engine=engine,
-                status="pending",
-                model_name=model_name,
-                prompt_preview=_sanitize_logged_text(prompt_preview, limit=2000),
-                client_ip=client_ip,
-                stream=stream,
-                headless=config.browser_headless,
-                proxy_enabled=config.proxy_enabled,
-                resin_sticky_session_enabled=config.resin_sticky_session_enabled,
-                proxy_session_id=proxy_session_id,
-                proxy_base_username=proxy_base_username,
-                proxy_username=proxy_username,
-                proxy_primary_ip=proxy_primary_ip,
-                proxy_ip_vector_hash=proxy_ip_vector_hash,
-                proxy_iplark_score=proxy_iplark_score,
-            )
-            session.add(row)
-            self._trim_request_logs(session)
-            session.commit()
+        try:
+            with self._session_factory() as session:
+                row = RequestLogRow(
+                    id=request_id,
+                    endpoint=endpoint,
+                    engine=engine,
+                    status="pending",
+                    model_name=model_name,
+                    prompt_preview=_sanitize_logged_text(prompt_preview, limit=2000),
+                    client_ip=client_ip,
+                    stream=stream,
+                    headless=config.browser_headless,
+                    proxy_enabled=config.proxy_enabled,
+                    resin_sticky_session_enabled=config.resin_sticky_session_enabled,
+                    proxy_session_id=proxy_session_id,
+                    proxy_base_username=proxy_base_username,
+                    proxy_username=proxy_username,
+                    proxy_primary_ip=proxy_primary_ip,
+                    proxy_ip_vector_hash=proxy_ip_vector_hash,
+                    proxy_iplark_score=proxy_iplark_score,
+                )
+                session.add(row)
+                self._trim_request_logs(session)
+                session.commit()
+        except SQLAlchemyError as exc:
+            logger.warning("Request log start failed for {}: {}", request_id, exc)
         return request_id
 
     def finish_request_success(
         self, request_id: str, result: GoogleAiResult, duration_ms: int
     ) -> None:
-        with self._session_factory() as session:
-            row = session.get(RequestLogRow, request_id)
-            if row is None:
-                return
-            row.status = "ok"
-            row.response_preview = _sanitize_logged_text(result.answer_text, limit=3000)
-            row.final_url = _sanitize_logged_url(result.final_url)
-            row.citations_json = json.dumps(
-                [citation.model_dump() for citation in result.citations],
-                ensure_ascii=False,
-            )
-            row.duration_ms = duration_ms
-            row.finished_at = utc_now()
-            session.add(row)
-            self._trim_request_logs(session)
-            session.commit()
+        try:
+            with self._session_factory() as session:
+                row = session.get(RequestLogRow, request_id)
+                if row is None:
+                    return
+                row.status = "ok"
+                row.response_preview = _sanitize_logged_text(result.answer_text, limit=3000)
+                row.final_url = _sanitize_logged_url(result.final_url)
+                row.citations_json = json.dumps(
+                    [citation.model_dump() for citation in result.citations],
+                    ensure_ascii=False,
+                )
+                row.duration_ms = duration_ms
+                row.finished_at = utc_now()
+                session.add(row)
+                self._trim_request_logs(session)
+                session.commit()
+        except SQLAlchemyError as exc:
+            logger.warning("Request log success update failed for {}: {}", request_id, exc)
 
     def finish_request_error(
         self,
@@ -239,27 +247,30 @@ class ConfigStore:
         google_block_ips: list[str] | None = None,
         google_block_mismatch: bool = False,
     ) -> None:
-        with self._session_factory() as session:
-            row = session.get(RequestLogRow, request_id)
-            if row is None:
-                return
-            row.status = "error"
-            row.error_message = _sanitize_logged_text(error_message, limit=3000)
-            if result is not None:
-                row.response_preview = _sanitize_logged_text(result.answer_text, limit=3000)
-                row.final_url = _sanitize_logged_url(result.final_url)
-                row.citations_json = json.dumps(
-                    [citation.model_dump() for citation in result.citations],
-                    ensure_ascii=False,
-                )
-            row.duration_ms = duration_ms
-            if google_block_ips is not None:
-                row.google_block_ips_json = json.dumps(google_block_ips, ensure_ascii=False)
-                row.google_block_mismatch = google_block_mismatch
-            row.finished_at = utc_now()
-            session.add(row)
-            self._trim_request_logs(session)
-            session.commit()
+        try:
+            with self._session_factory() as session:
+                row = session.get(RequestLogRow, request_id)
+                if row is None:
+                    return
+                row.status = "error"
+                row.error_message = _sanitize_logged_text(error_message, limit=3000)
+                if result is not None:
+                    row.response_preview = _sanitize_logged_text(result.answer_text, limit=3000)
+                    row.final_url = _sanitize_logged_url(result.final_url)
+                    row.citations_json = json.dumps(
+                        [citation.model_dump() for citation in result.citations],
+                        ensure_ascii=False,
+                    )
+                row.duration_ms = duration_ms
+                if google_block_ips is not None:
+                    row.google_block_ips_json = json.dumps(google_block_ips, ensure_ascii=False)
+                    row.google_block_mismatch = google_block_mismatch
+                row.finished_at = utc_now()
+                session.add(row)
+                self._trim_request_logs(session)
+                session.commit()
+        except SQLAlchemyError as exc:
+            logger.warning("Request log error update failed for {}: {}", request_id, exc)
 
     def get_summary(self) -> DashboardSummary:
         with self._session_factory() as session:

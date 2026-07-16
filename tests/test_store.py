@@ -18,6 +18,17 @@ def _make_store(tmp_path: Path, request_log_max_rows: int = 200) -> ConfigStore:
     )
 
 
+def test_create_db_engine_sets_sqlite_lock_pragmas(tmp_path: Path) -> None:
+    engine = create_db_engine(str(tmp_path / "pragma.sqlite3"))
+
+    with engine.connect() as connection:
+        journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar()
+        busy_timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar()
+
+    assert journal_mode == "wal"
+    assert busy_timeout == 30000
+
+
 def test_get_config_creates_default_row(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     config = store.get_config()

@@ -44,6 +44,7 @@ def _snapshot(
     canary_success_count: int = 0,
     canary_block_count: int = 0,
     duplicate_of_session_id: int | None = None,
+    google_canary_status: str = "",
 ) -> ProxySessionSnapshot:
     return ProxySessionSnapshot(
         id=id,
@@ -55,7 +56,7 @@ def _snapshot(
         primary_ip=primary_ip,
         ip_vector_hash="hash",
         iplark_min_quality_score=34,
-        google_canary_status="",
+        google_canary_status=google_canary_status,
         google_canary_error=None,
         google_canary_checked_at=None,
         duck_canary_status="",
@@ -274,6 +275,61 @@ def test_candidate_existing_sessions_prefers_recoverable_success_history() -> No
     )
 
     assert [item.id for item in result] == [13, 12, 10, 11, 14]
+
+
+def test_candidate_existing_sessions_prefers_ready_over_active_cooldown() -> None:
+    # Mirrors production DB state where high-history sessions still in cooldown
+    # (user169/347/5700) monopolized recovery probes while ready sessions
+    # (user122/user2055) with prior canary ok were never tried.
+    now = datetime(2026, 7, 16, 16, 24, tzinfo=UTC)
+    store = _FakeExistingSessionStore()
+    store.snapshots = [
+        _snapshot(
+            status=STATUS_COOLDOWN,
+            id=169,
+            proxy_username="openai.user169",
+            request_success_count=536,
+            canary_success_count=40,
+            request_block_count=96,
+            request_error_count=60,
+            canary_block_count=40,
+            cooldown_until=now + timedelta(hours=23),
+            google_canary_status="blocked",
+        ),
+        _snapshot(
+            status=STATUS_COOLDOWN,
+            id=122,
+            proxy_username="openai.user122",
+            request_success_count=104,
+            canary_success_count=7,
+            request_block_count=13,
+            request_error_count=6,
+            cooldown_until=now - timedelta(hours=1),
+            google_canary_status="ok",
+        ),
+        _snapshot(
+            status=STATUS_COOLDOWN,
+            id=726,
+            proxy_username="openai.user2055",
+            request_success_count=64,
+            canary_success_count=3,
+            request_block_count=13,
+            request_error_count=9,
+            cooldown_until=now - timedelta(hours=1),
+            google_canary_status="ok",
+        ),
+    ]
+
+    result = _candidate_existing_sessions(
+        store,
+        "openai",
+        limit=3,
+        shuffle=False,
+        seed=None,
+        now=now,
+    )
+
+    assert [item.id for item in result] == [122, 726, 169]
 
 
 def test_terminal_stage_gate_allows_direct_cooldown_canary_retry() -> None:

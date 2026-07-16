@@ -279,6 +279,32 @@ def test_duck_selector_can_use_google_cooldown_session(
         selector.select(config, engine="google")
 
 
+def test_duck_selector_can_use_historical_duck_success_after_error(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    snapshot = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    store.mark_duck_canary_success(snapshot.id)
+    store.mark_duck_canary_error(snapshot.id, error_message="temporary tunnel failure")
+    selector = ProxySessionSelector(store)
+    config = ServiceConfig(
+        browser_proxy_server="http://192.0.2.1:2260",
+        browser_proxy_username="openai",
+        browser_proxy_password="pass",
+        resin_sticky_session_enabled=True,
+    )
+
+    duck_selection = selector.select(config, engine="duck")
+
+    assert duck_selection is not None
+    assert duck_selection.session.proxy_username == "openai.user1"
+    assert duck_selection.config.browser_proxy_username == "openai.user1"
+
+
 def test_proxy_session_selector_prefers_real_success_before_unproven_active_session(
     tmp_path: Path,
 ) -> None:

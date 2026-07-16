@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from googleaisearch2api.app import create_app
 from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiUnavailableError
 from googleaisearch2api.config import DEFAULT_API_TOKEN, ServiceConfigUpdate, get_settings
+from googleaisearch2api.duck_ai import DuckAiTimeoutError
 from googleaisearch2api.schemas import Citation, GoogleAiResult
 
 
@@ -339,6 +340,79 @@ def test_query_duck_engine_uses_duck_pool_only(test_app) -> None:
     assert recent[0].engine == "duck"
 
 
+def test_query_duck_engine_resets_duck_pool_after_timeout(test_app) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "duck")
+        duck_pool = _install_fake_duck_pool(
+            test_app,
+            outcomes=[DuckAiTimeoutError("Duck.ai chat input did not become ready.")],
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 504
+    assert duck_pool.reset_calls == 1
+
+
+def test_query_duck_engine_retries_another_sticky_session_after_timeout(test_app) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                search_engine="duck",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        first = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user1",
+            proxy_username="openai.user1",
+            status="active",
+        )
+        second = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user2",
+            proxy_username="openai.user2",
+            status="active",
+        )
+        test_app.state.services.proxy_session_store.mark_duck_canary_success(first.id)
+        test_app.state.services.proxy_session_store.mark_duck_canary_success(second.id)
+        duck_pool = _install_fake_duck_pool(
+            test_app,
+            answer_text="Duck recovered.",
+            outcomes=[DuckAiTimeoutError("Duck.ai chat input did not become ready.")],
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Duck recovered."
+    assert [config.browser_proxy_username for config in duck_pool.configs] == [
+        "openai.user1",
+        "openai.user2",
+    ]
+    assert duck_pool.reset_calls == 1
+    assert [record.status for record in recent] == ["ok", "error"]
+
+
 def test_query_auto_falls_back_to_duck_when_google_is_unavailable(test_app) -> None:
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
@@ -360,6 +434,82 @@ def test_query_auto_falls_back_to_duck_when_google_is_unavailable(test_app) -> N
     assert duck_pool.prompts == ["User request:\nQuestion"]
     assert [record.engine for record in recent] == ["duck", "google"]
     assert [record.status for record in recent] == ["ok", "error"]
+
+
+def test_query_auto_retries_sticky_sessions_before_duck_fallback(test_app) -> None:
+    # Real traffic: auto used to force max_sticky_attempts=1, so a single Google block
+    # skipped remaining ready sticky sessions and fell straight to Duck.
+    with TestClient(test_app) as client:
+        test_app.state.services.settings.google_ai_blocked_retry_count = 2
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                search_engine="auto",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        first = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user1",
+            proxy_username="openai.user1",
+            status="active",
+        )
+        second = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user2",
+            proxy_username="openai.user2",
+            status="active",
+        )
+        third = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user3",
+            proxy_username="openai.user3",
+            status="active",
+        )
+        test_app.state.services.proxy_session_store.mark_canary_success(first.id)
+        test_app.state.services.proxy_session_store.mark_canary_success(second.id)
+        test_app.state.services.proxy_session_store.mark_canary_success(third.id)
+        google_pool = _install_fake_pool(
+            test_app,
+            outcomes=[
+                GoogleAiBlockedError("Google blocked this browser session."),
+                GoogleAiBlockedError("Google blocked this browser session."),
+                GoogleAiBlockedError("Google blocked this browser session."),
+            ],
+        )
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback.")
+        recovery = FakeProxyAutoRecovery()
+        test_app.state.services.proxy_auto_recovery = recovery
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=4)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Duck fallback."
+    assert [config.browser_proxy_username for config in google_pool.configs] == [
+        "openai.user1",
+        "openai.user2",
+        "openai.user3",
+    ]
+    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert [record.engine for record in recent] == ["duck", "google", "google", "google"]
+    assert [record.status for record in recent] == ["ok", "error", "error", "error"]
+    assert "google-blocked-pool-below-target" in recovery.reasons
+    assert "google-failed-pool-empty" in recovery.reasons
 
 
 def test_query_auto_routes_directly_to_duck_when_sticky_pool_is_empty(test_app) -> None:
@@ -499,7 +649,7 @@ def test_query_auto_falls_back_to_duck_when_google_list_answer_is_too_short(
     assert "too short for the requested list" in (recent[1].error_message or "")
 
 
-def test_query_auto_falls_back_to_duck_when_google_json_results_are_empty(
+def test_query_simplifies_json_results_prompt_for_natural_language_answer(
     test_app,
 ) -> None:
     prompt = (
@@ -508,32 +658,38 @@ def test_query_auto_falls_back_to_duck_when_google_json_results_are_empty(
         '若找不到足够直接相关的结果，返回 {"results": []}。'
         "问题：PingAn 000001.SZ 最新公告 新闻 催化 风险 最多返回 5 条"
     )
-    duck_answer = (
-        '{"results":[{"title":"平安银行公告","content":"平安银行发布公告。",'
-        '"source":"证券时报","url":"https://www.stcn.com/article/detail/1234567.html",'
-        '"published_date":"2026-05-27"}]}'
+    google_answer = (
+        "平安银行近期公告重点包括经营数据和股东大会相关事项。"
+        "来源可关注公司公告、交易所公告和证券时报等公开渠道。"
+        "如果需要更精确的催化和风险，应继续核对交易所公告原文、公司投资者关系记录"
+        "以及主流财经媒体报道，避免把转载或旧新闻当成最新事项。"
+        "风险侧重点包括息差压力、资产质量波动和宏观需求变化；催化侧重点包括业绩披露、"
+        "分红政策和监管口径变化。"
     )
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
-        google_pool = _install_fake_pool(test_app, answer_text='{"results": []}')
-        duck_pool = _install_fake_duck_pool(test_app, answer_text=duck_answer)
+        google_pool = _install_fake_pool(test_app, answer_text=google_answer)
+        duck_pool = _install_fake_duck_pool(test_app)
         response = client.post(
             "/query",
             headers=_auth_headers(),
             json={"model": "google-search", "query": prompt},
         )
-        recent = test_app.state.services.store.list_recent_requests(limit=2)
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
 
     assert response.status_code == 200
-    assert response.json()["answer"] == duck_answer
-    assert google_pool.prompts == [f"User request:\n{prompt}"]
-    assert duck_pool.prompts == [f"User request:\n{prompt}"]
-    assert [record.engine for record in recent] == ["duck", "google"]
-    assert [record.status for record in recent] == ["ok", "error"]
-    assert "empty JSON results" in (recent[1].error_message or "")
+    assert response.json()["answer"] == google_answer
+    assert google_pool.prompts == [
+        "搜索并用自然语言简要回答，列出关键发现、来源和日期；"
+        "如果没有足够直接相关的信息，直接说明未找到：\n"
+        "PingAn 000001.SZ 最新公告 新闻 催化 风险 最多返回 5 条"
+    ]
+    assert duck_pool.prompts == []
+    assert [record.engine for record in recent] == ["google"]
+    assert [record.status for record in recent] == ["ok"]
 
 
-def test_query_auto_rejects_when_both_engines_return_empty_json_results(
+def test_query_auto_naturalizes_empty_json_results_for_simplified_prompt(
     test_app,
 ) -> None:
     prompt = (
@@ -545,22 +701,24 @@ def test_query_auto_rejects_when_both_engines_return_empty_json_results(
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
         google_pool = _install_fake_pool(test_app, answer_text='{"results": []}')
-        duck_pool = _install_fake_duck_pool(test_app, answer_text='{"results": []}')
+        duck_pool = _install_fake_duck_pool(test_app)
         response = client.post(
             "/query",
             headers=_auth_headers(),
             json={"model": "google-search", "query": prompt},
         )
-        recent = test_app.state.services.store.list_recent_requests(limit=2)
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
 
-    assert response.status_code == 502
-    assert "Both search engines failed" in response.json()["detail"]
-    assert "Google returned empty JSON results in auto mode" in response.json()["detail"]
-    assert "Duck.ai returned empty JSON results in auto mode" in response.json()["detail"]
-    assert google_pool.prompts == [f"User request:\n{prompt}"]
-    assert duck_pool.prompts == [f"User request:\n{prompt}"]
-    assert [record.engine for record in recent] == ["duck", "google"]
-    assert [record.status for record in recent] == ["error", "error"]
+    assert response.status_code == 200
+    assert "没有找到足够直接相关" in response.json()["answer"]
+    assert google_pool.prompts == [
+        "搜索并用自然语言简要回答，列出关键发现、来源和日期；"
+        "如果没有足够直接相关的信息，直接说明未找到：\n"
+        "PingAn 000001.SZ 最新公告 新闻 催化 风险 最多返回 5 条"
+    ]
+    assert duck_pool.prompts == []
+    assert [record.engine for record in recent] == ["google"]
+    assert [record.status for record in recent] == ["ok"]
 
 
 def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:

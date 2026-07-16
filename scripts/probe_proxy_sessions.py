@@ -62,9 +62,32 @@ def _session_failure_score(snapshot: ProxySessionSnapshot) -> int:
     )
 
 
-def _existing_session_recovery_group(snapshot: ProxySessionSnapshot) -> tuple[int, int, int, int]:
+def _cooldown_is_ready(snapshot: ProxySessionSnapshot, now: datetime) -> bool:
+    if snapshot.cooldown_until is None:
+        return True
+    cooldown_until = _datetime_for_compare(snapshot.cooldown_until, now)
+    compare_now = _datetime_for_compare(now, cooldown_until)
+    return cooldown_until <= compare_now
+
+
+def _existing_session_recovery_group(
+    snapshot: ProxySessionSnapshot,
+    *,
+    now: datetime | None = None,
+) -> tuple[int, int, int, int]:
+    """Rank existing sessions for recovery probes.
+
+    Real production evidence (2026-07-16): recovery always burned max_probes=3 on the
+    same high-history sessions that were still in cooldown / recently Google-blocked
+    (user169/347/5700), while ready selectable sessions with prior canary ok
+    (user122/user2055) were never probed. Prefer currently ready candidates first,
+    then lower failure scores, then higher success history.
+    """
+    compare_now = now or utc_now()
     success_score = _session_success_score(snapshot)
+    failure_score = _session_failure_score(snapshot)
     duplicate_rank = 1 if snapshot.duplicate_of_session_id is not None else 0
+    google_canary = (snapshot.google_canary_status or "").strip().lower()
     if snapshot.status == STATUS_ACTIVE:
         status_rank = 0
     elif snapshot.status not in {STATUS_COOLDOWN, STATUS_RETIRED} and success_score > 0:
@@ -72,22 +95,31 @@ def _existing_session_recovery_group(snapshot: ProxySessionSnapshot) -> tuple[in
     elif snapshot.status in {STATUS_RISK_CHECKED, STATUS_EGRESS_CHECKED, STATUS_NEW}:
         status_rank = 2
     elif snapshot.status == STATUS_COOLDOWN and success_score > 0:
-        status_rank = 3
+        if _cooldown_is_ready(snapshot, compare_now):
+            # Ready again: prefer sessions not last marked blocked by canary.
+            status_rank = 3 if google_canary != "blocked" else 4
+        else:
+            # Still cooling — only try after ready candidates are exhausted.
+            status_rank = 6
     elif snapshot.status == STATUS_COOLDOWN:
-        status_rank = 4
+        status_rank = 5 if _cooldown_is_ready(snapshot, compare_now) else 7
     elif snapshot.status == STATUS_RETIRED and is_risk_metadata_retire_reason(
         snapshot.retire_reason
     ):
-        status_rank = 5
+        status_rank = 8
     else:
-        status_rank = 6
-    return (duplicate_rank, status_rank, -success_score, _session_failure_score(snapshot))
+        status_rank = 9
+    # Prefer fewer failures before raw historical success so chronically blocked
+    # high-success sessions stop monopolizing the probe budget.
+    return (duplicate_rank, status_rank, failure_score, -success_score)
 
 
 def _existing_session_recovery_rank(
     snapshot: ProxySessionSnapshot,
+    *,
+    now: datetime | None = None,
 ) -> tuple[int, int, int, int, int]:
-    return (*_existing_session_recovery_group(snapshot), snapshot.id)
+    return (*_existing_session_recovery_group(snapshot, now=now), snapshot.id)
 
 
 def _shuffle_within_rank_groups(
@@ -103,6 +135,15 @@ def _shuffle_within_rank_groups(
         rng.shuffle(items)
         shuffled.extend(items)
     return shuffled
+
+
+def _rank_group_key_for_now(
+    now: datetime,
+) -> Callable[[ProxySessionSnapshot], tuple[int, int, int, int]]:
+    def _key(snapshot: ProxySessionSnapshot) -> tuple[int, int, int, int]:
+        return _existing_session_recovery_group(snapshot, now=now)
+
+    return _key
 
 
 def _snapshot_json(snapshot: ProxySessionSnapshot) -> dict:
@@ -166,15 +207,20 @@ def _candidate_existing_sessions(
     limit: int,
     shuffle: bool,
     seed: int | None,
+    now: datetime | None = None,
 ) -> list[ProxySessionSnapshot]:
+    compare_now = now or utc_now()
     fetch_limit = max(limit, EXISTING_SESSION_RANKING_FETCH_LIMIT)
     snapshots = store.list_proxy_sessions(limit=fetch_limit, proxy_base_username=base_username)
-    snapshots = sorted(snapshots, key=_existing_session_recovery_rank)
+    snapshots = sorted(
+        snapshots,
+        key=lambda snapshot: _existing_session_recovery_rank(snapshot, now=compare_now),
+    )
     if shuffle:
         snapshots = _shuffle_within_rank_groups(
             snapshots,
             seed=seed,
-            group_key=_existing_session_recovery_group,
+            group_key=_rank_group_key_for_now(compare_now),
         )
     return snapshots[:limit]
 
@@ -1080,18 +1126,23 @@ def main() -> None:
             )
             process_snapshot(snapshot)
 
-    print(
-        json.dumps(
-            {
-                "base_username": base_username,
-                "active_sessions": store.count_active_sessions(base_username),
-                "probed_sessions": probed_count,
-                "records": records,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    active_sessions = store.count_active_sessions(base_username)
+    payload = {
+        "base_username": base_username,
+        "active_sessions": active_sessions,
+        "probed_sessions": probed_count,
+        "stop_after_active": args.stop_after_active,
+        "target_met": (
+            args.stop_after_active <= 0 or active_sessions >= args.stop_after_active
+        ),
+        "records": records,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    # Auto-recovery used to treat any probe process exit 0 as success even when
+    # sticky_active_sessions stayed at 0 after repeatedly canary-blocking the same
+    # sessions. Fail the process when a target was requested but not met.
+    if args.stop_after_active > 0 and active_sessions < args.stop_after_active:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

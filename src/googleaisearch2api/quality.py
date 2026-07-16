@@ -28,6 +28,16 @@ _NO_RESULT_CONDITION_RE = re.compile(
     r"if\s+(?:you\s+)?(?:cannot|can't|do\s+not)\s+find|not\s+found",
     re.IGNORECASE,
 )
+# Real request evidence (2026-07-16): prompt "What is 19 plus 23? Reply with only the
+# number." produced a correct short Duck/Google answer that was rejected as
+# "short answer has no usable citations". Treat explicit short-answer instructions
+# as exempt from the short-body citation floor.
+_SHORT_ANSWER_PROMPT_RE = re.compile(
+    r"reply with only|answer with only|only the number|just the number|"
+    r"only\s+a\s+number|respond with only|return only the|"
+    r"只回答|仅回答|只需回答|只要数字|只输出|仅输出|只回",
+    re.IGNORECASE,
+)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _YEAR_DATE_RANGE_RE = re.compile(
     r"\b\d{4}(?:-\d{2}-\d{2})?\s*(?:至|到|~|—|–|\s+-\s+|through|to)\s*"
@@ -52,6 +62,7 @@ _MALFORMED_STOCK_CODE_RE = re.compile(
 )
 _CITATION_MARKER_ARTIFACT_RE = re.compile(r"\[\s*\d+\s*\]")
 _RAW_URL_RE = re.compile(r"https?://[^\s<>\]\)）\"']+")
+_MARKDOWN_ESCAPED_URL_CHAR_RE = re.compile(r"\\([_~*`#=+\-|.!?()[\]{}])")
 _PLACEHOLDER_URL_PATH_RE = re.compile(
     r"(?:^|[/_-])(?:doc-?xyz|placeholder|dummy|fake)(?:[._/?#-]|$)",
     re.IGNORECASE,
@@ -269,6 +280,12 @@ _RAW_RESULT_SOURCE_PREFIXES = (
     "来源：",
     "来源:",
 )
+_RAW_RESULT_START_PREFIXES = (
+    "标题：",
+    "标题:",
+    "关键发现：",
+    "关键发现:",
+)
 _KNOWN_SOURCE_HOST_ALIASES = {
     "cls.cn": ("财联社", "cls"),
     "stcn.com": ("证券时报", "证券时报网", "stcn"),
@@ -438,8 +455,24 @@ def answer_has_empty_json_results(prompt: str, answer: str) -> bool:
     return not payload["results"]
 
 
+def answer_is_empty_json_results(answer: str) -> bool:
+    parsed = _extract_json_results_payload(answer)
+    if parsed is None:
+        return False
+    payload, _ = parsed
+    return not payload["results"]
+
+
+def prompt_requests_json_results(prompt: str) -> bool:
+    return _prompt_requests_json_results(_normalize(prompt))
+
+
+def _normalize_url_text(value: object) -> str:
+    return _MARKDOWN_ESCAPED_URL_CHAR_RE.sub(r"\1", str(value or "").strip())
+
+
 def _is_usable_result_url(value: object) -> bool:
-    raw_url = str(value or "").strip()
+    raw_url = _normalize_url_text(value)
     if _url_has_artifacts(raw_url):
         return False
     parsed = urlparse(raw_url)
@@ -458,7 +491,7 @@ def _is_usable_result_url(value: object) -> bool:
 
 
 def _url_has_artifacts(value: object) -> bool:
-    raw_url = str(value or "").strip()
+    raw_url = _normalize_url_text(value)
     if not raw_url:
         return True
     if "\\" in raw_url:
@@ -473,7 +506,7 @@ def _url_has_artifacts(value: object) -> bool:
 
 
 def _is_specific_result_url(value: object) -> bool:
-    parsed = urlparse(str(value or "").strip())
+    parsed = urlparse(_normalize_url_text(value))
     path = parsed.path.strip("/")
     if not path and not parsed.query:
         return False
@@ -488,9 +521,13 @@ def _is_specific_result_url(value: object) -> bool:
 def _extract_raw_url_candidates(answer: str) -> list[str]:
     urls: list[str] = []
     for match in _RAW_URL_RE.finditer(answer):
-        url = match.group(0).rstrip(".,，。；;:：、")
+        url = _normalize_url_text(match.group(0).rstrip(".,，。；;:：、"))
         urls.append(url)
     return urls
+
+
+def _normalize_raw_answer_urls(answer: str) -> str:
+    return _RAW_URL_RE.sub(lambda match: _normalize_url_text(match.group(0)), answer)
 
 
 def _extract_raw_urls(answer: str) -> list[str]:
@@ -503,6 +540,11 @@ def _extract_raw_urls(answer: str) -> list[str]:
 
 def _clean_raw_source_label(source: str) -> str:
     source = source.strip()
+    source = re.split(
+        r"\s+(?:日期|链接|Date|date|Link|link|URL|url)[：:]",
+        source,
+        maxsplit=1,
+    )[0]
     parts = re.split(r"\s+[—–-]\s+", source, maxsplit=1)
     return parts[0].strip()
 
@@ -524,10 +566,18 @@ def _contains_duplicate_raw_url(answer: str) -> bool:
     return False
 
 
+def _normalize_raw_result_line_label(line: str) -> str:
+    normalized = line.strip()
+    normalized = re.sub(r"^\*\*([^*：:]{1,12}[：:])\*\*", r"\1", normalized)
+    normalized = re.sub(r"^\s*(?:[-*]|\d+[.、])\s*", "", normalized)
+    normalized = re.sub(r"^\*\*([^*：:]{1,12}[：:])\*\*", r"\1", normalized)
+    return normalized
+
+
 def _iter_raw_source_labels(answer: str) -> list[str]:
     labels: list[str] = []
     for raw_line in answer.splitlines():
-        line = raw_line.strip()
+        line = _normalize_raw_result_line_label(raw_line)
         if not line:
             continue
         if line.startswith(("来源：", "来源:")):
@@ -545,7 +595,7 @@ def _iter_raw_source_url_pairs(answer: str) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     pending_source = ""
     for raw_line in answer.splitlines():
-        line = raw_line.strip()
+        line = _normalize_raw_result_line_label(raw_line)
         if not line:
             continue
         if line.startswith(("来源：", "来源:")):
@@ -602,8 +652,6 @@ def _contains_aggregate_raw_source_label(answer: str) -> bool:
         normalized = _normalize(source)
         if any(phrase in normalized for phrase in _AGGREGATE_RAW_SOURCE_LABEL_PHRASES):
             return True
-        if any(separator in source for separator in _COMPOSITE_JSON_SOURCE_LABEL_SEPARATORS):
-            return True
     return False
 
 
@@ -613,7 +661,7 @@ def _contains_non_chinese_raw_link_label(answer: str) -> bool:
 
 def _contains_non_specific_raw_date(answer: str) -> bool:
     for raw_line in answer.splitlines():
-        line = raw_line.strip()
+        line = _normalize_raw_result_line_label(raw_line)
         if not line:
             continue
         date_text = ""
@@ -650,21 +698,23 @@ def _appears_truncated(answer: str) -> bool:
 
 
 def _raw_line_starts_result_detail(line: str) -> bool:
-    return line.startswith(_RAW_RESULT_DETAIL_PREFIXES)
+    return _normalize_raw_result_line_label(line).startswith(_RAW_RESULT_DETAIL_PREFIXES)
 
 
 def _raw_line_starts_new_result(line: str, next_line: str) -> bool:
-    if line.startswith(("标题：", "标题:")):
+    normalized_line = _normalize_raw_result_line_label(line)
+    normalized_next_line = _normalize_raw_result_line_label(next_line)
+    if normalized_line.startswith(_RAW_RESULT_START_PREFIXES):
         return True
     if re.match(r"^\s*(?:[-*]|\d+[.、])\s*\S", line):
         return True
-    if _raw_line_starts_result_detail(line):
+    if normalized_line.startswith(_RAW_RESULT_DETAIL_PREFIXES):
         return False
-    return next_line.startswith(_RAW_RESULT_SOURCE_PREFIXES)
+    return normalized_next_line.startswith(_RAW_RESULT_SOURCE_PREFIXES)
 
 
 def _raw_line_completes_result(line: str) -> bool:
-    return line.startswith(_RAW_RESULT_COMPLETION_PREFIXES)
+    return _normalize_raw_result_line_label(line).startswith(_RAW_RESULT_COMPLETION_PREFIXES)
 
 
 def _split_raw_result_blocks(answer: str) -> list[str]:
@@ -717,6 +767,8 @@ def _raw_result_block_has_filterable_defect(prompt_text: str, block: str) -> boo
     if _contains_unusable_raw_url(block):
         return True
     if _contains_non_specific_raw_url(block):
+        return True
+    if _appears_truncated(block):
         return True
     return _contains_malformed_stock_code(prompt_text, block)
 
@@ -779,7 +831,7 @@ def _json_result_item_filter_reason(
         return "quality"
     if not _is_usable_result_url(item.get("url")):
         return "quality"
-    url = str(item.get("url") or "").strip()
+    url = _normalize_url_text(item.get("url"))
     if not _is_specific_result_url(url):
         return "quality"
     if url in seen_urls:
@@ -836,7 +888,8 @@ def _published_date_is_future(published_date: str) -> bool:
 def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
     prompt_text = _normalize(prompt)
     if not _prompt_requests_json_results(prompt_text):
-        return _normalize_raw_answer_for_prompt(prompt_text, answer)
+        normalized = _normalize_raw_answer_for_prompt(prompt_text, answer)
+        return _normalize_raw_answer_urls(normalized)
 
     date_range = _extract_requested_date_range(prompt)
     parsed = _extract_json_results_payload(answer)
@@ -861,7 +914,7 @@ def normalize_answer_for_prompt(prompt: str, answer: str) -> str:
             continue
         filtered_results.append(item)
         if isinstance(item, dict):
-            seen_urls.add(str(item.get("url") or "").strip())
+            seen_urls.add(_normalize_url_text(item.get("url")))
 
     if not changed:
         return answer
@@ -904,7 +957,7 @@ def _assess_json_results_answer(prompt: str, answer: str) -> AnswerQuality:
             return AnswerQuality(False, "answer JSON result contains citation marker artifacts")
         if not _is_usable_result_url(item.get("url")):
             return AnswerQuality(False, "answer JSON result has an unusable URL")
-        url = str(item.get("url") or "").strip()
+        url = _normalize_url_text(item.get("url"))
         if not _is_specific_result_url(url):
             return AnswerQuality(False, "answer JSON result URL is not specific")
         if url in seen_urls:
@@ -1003,10 +1056,21 @@ def assess_search_answer_quality(
     if _contains_malformed_stock_code(prompt_text, raw_answer):
         return AnswerQuality(False, "answer contains malformed stock code")
 
-    if _prompt_requests_multiple_items(prompt_text) and len(answer_text) < 120:
+    declares_no_results = bool(_NO_RESULT_CONDITION_RE.search(answer_text))
+    if (
+        _prompt_requests_multiple_items(prompt_text)
+        and len(answer_text) < 120
+        and not declares_no_results
+    ):
         return AnswerQuality(False, "answer is too short for the requested list")
 
-    if len(answer_text) < 80 and not _has_usable_citation(citations):
+    prompt_wants_short_answer = bool(_SHORT_ANSWER_PROMPT_RE.search(prompt_text))
+    if (
+        len(answer_text) < 80
+        and not declares_no_results
+        and not prompt_wants_short_answer
+        and not _has_usable_citation(citations)
+    ):
         return AnswerQuality(False, "short answer has no usable citations")
 
     return AnswerQuality(True)

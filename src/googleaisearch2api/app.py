@@ -50,6 +50,7 @@ from .pool import (
     BrowserPoolSaturatedError,
     BrowserPoolTimeoutError,
 )
+from .prompting import simplify_search_prompt
 from .proxy_recovery import ProxyAutoRecovery
 from .proxy_sessions import (
     ProxySessionConfigError,
@@ -62,9 +63,10 @@ from .proxy_sessions import (
     resolve_proxy_base_username,
 )
 from .quality import (
-    answer_has_empty_json_results,
+    answer_is_empty_json_results,
     assess_search_answer_quality,
     normalize_answer_for_prompt,
+    prompt_requests_json_results,
 )
 from .query_adapter import (
     build_prompt_from_query_request,
@@ -92,42 +94,27 @@ class Services:
 
 def _normalize_result_for_prompt(prompt: str, result: GoogleAiResult) -> GoogleAiResult:
     normalized_answer = normalize_answer_for_prompt(prompt, result.answer_text)
+    if answer_is_empty_json_results(normalized_answer) and not prompt_requests_json_results(prompt):
+        normalized_answer = _empty_results_natural_language_answer(prompt)
     if normalized_answer == result.answer_text:
         return result
     return result.model_copy(update={"answer_text": normalized_answer})
 
 
-def _auto_empty_json_result_error(
-    engine_label: str,
-    prompt: str,
-    result: GoogleAiResult,
-    config: ServiceConfig,
-) -> str | None:
-    if config.search_engine != "auto":
-        return None
-    if not answer_has_empty_json_results(prompt, result.answer_text):
-        return None
-    return f"{engine_label} returned empty JSON results in auto mode"
-
-
-def _normalize_result_for_prompt(prompt: str, result: GoogleAiResult) -> GoogleAiResult:
-    normalized_answer = normalize_answer_for_prompt(prompt, result.answer_text)
-    if normalized_answer == result.answer_text:
-        return result
-    return result.model_copy(update={"answer_text": normalized_answer})
-
-
-def _auto_empty_json_result_error(
-    engine_label: str,
-    prompt: str,
-    result: GoogleAiResult,
-    config: ServiceConfig,
-) -> str | None:
-    if config.search_engine != "auto":
-        return None
-    if not answer_has_empty_json_results(prompt, result.answer_text):
-        return None
-    return f"{engine_label} returned empty JSON results in auto mode"
+def _empty_results_natural_language_answer(prompt: str) -> str:
+    if any("\u4e00" <= char <= "\u9fff" for char in prompt):
+        return (
+            "没有找到足够直接相关、可验证的公开结果。建议放宽时间范围、减少限定关键词"
+            "或改用公司全称后再查；当前不编造来源、日期或链接。如果这是行情或公告跟踪"
+            "请求，可以把时间范围扩大到最近一个月再重试。本次结果更适合作为没有直接"
+            "证据的答复，而不是返回占位条目；后续可尝试公司全称、证券代码、公告关键词"
+            "或更宽日期范围。"
+        )
+    return (
+        "No directly relevant, verifiable public results were found. Try broadening "
+        "the date range or simplifying the keywords; this response does not invent "
+        "sources, dates, or links."
+    )
 
 
 class DuckAiCircuitBreaker:
@@ -314,15 +301,19 @@ def _run_google_ai(
     prompt: str,
     stream: bool,
     requested_model: str | None,
+    max_sticky_attempts: int | None = None,
 ) -> tuple[ServiceConfig, str, str, object]:
     services = get_services(request)
     config = services.store.get_config()
     model_name = _resolve_model(requested_model, config)
-    max_attempts = (
-        services.settings.google_ai_blocked_retry_count + 1
-        if config.resin_sticky_session_enabled
-        else 1
-    )
+    if max_sticky_attempts is not None:
+        max_attempts = max(1, max_sticky_attempts)
+    else:
+        max_attempts = (
+            services.settings.google_ai_blocked_retry_count + 1
+            if config.resin_sticky_session_enabled
+            else 1
+        )
 
     for attempt_index in range(max_attempts):
         selection: ProxySessionSelection | None = None
@@ -330,6 +321,11 @@ def _run_google_ai(
         try:
             selection = services.proxy_selector.select(config, engine="google")
         except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
+            _trigger_proxy_auto_recovery_if_pool_empty(
+                services,
+                config,
+                reason="google-sticky-selection-unavailable",
+            )
             request_id = services.store.start_request(
                 endpoint=endpoint,
                 engine="google",
@@ -388,23 +384,6 @@ def _run_google_ai(
                     error_message=message,
                 )
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
-            empty_json_message = _auto_empty_json_result_error(
-                "Google",
-                prompt,
-                result,
-                config,
-            )
-            if empty_json_message is not None:
-                services.store.finish_request_error(
-                    request_id,
-                    empty_json_message,
-                    duration_ms,
-                    result=result,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=empty_json_message,
-                )
             services.store.finish_request_success(request_id, result, duration_ms)
             if selection is not None:
                 services.proxy_session_store.finish_request_success(
@@ -551,10 +530,17 @@ def _run_duck_ai(
     prompt: str,
     stream: bool,
     requested_model: str | None,
+    attempt_index: int = 0,
+    max_attempts: int | None = None,
 ) -> tuple[ServiceConfig, str, str, object]:
     services = get_services(request)
     config = services.store.get_config()
     model_name = _resolve_model(requested_model, config)
+    resolved_max_attempts = (
+        max_attempts
+        if max_attempts is not None
+        else (2 if config.resin_sticky_session_enabled else 1)
+    )
     selection: ProxySessionSelection | None = None
     effective_config = config
 
@@ -637,23 +623,6 @@ def _run_duck_ai(
                 result=result,
             )
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
-        empty_json_message = _auto_empty_json_result_error(
-            "Duck.ai",
-            prompt,
-            result,
-            config,
-        )
-        if empty_json_message is not None:
-            services.store.finish_request_error(
-                request_id,
-                empty_json_message,
-                duration_ms,
-                result=result,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=empty_json_message,
-            )
         services.store.finish_request_success(request_id, result, duration_ms)
         services.duck_circuit.record_success()
         if selection is not None:
@@ -706,6 +675,7 @@ def _run_duck_ai(
         ) from exc
     except DuckAiTimeoutError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.duck_pool.reset()
         services.store.finish_request_error(request_id, str(exc), duration_ms)
         if selection is not None:
             services.proxy_session_store.mark_duck_canary_error(
@@ -718,12 +688,30 @@ def _run_duck_ai(
             blocked=False,
             error_message=str(exc),
         )
+        if selection is not None and attempt_index + 1 < resolved_max_attempts:
+            logger.warning(
+                "Duck.ai sticky proxy session {} timed out; retrying request "
+                "with another session ({}/{})",
+                selection.session.proxy_username,
+                attempt_index + 1,
+                resolved_max_attempts - 1,
+            )
+            return _run_duck_ai(
+                request=request,
+                endpoint=endpoint,
+                prompt=prompt,
+                stream=stream,
+                requested_model=requested_model,
+                attempt_index=attempt_index + 1,
+                max_attempts=resolved_max_attempts,
+            )
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail=str(exc),
         ) from exc
     except DuckAiRuntimeError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.duck_pool.reset()
         services.store.finish_request_error(request_id, str(exc), duration_ms)
         if selection is not None:
             services.proxy_session_store.mark_duck_canary_error(
@@ -736,9 +724,27 @@ def _run_duck_ai(
             blocked=False,
             error_message=str(exc),
         )
+        if selection is not None and attempt_index + 1 < resolved_max_attempts:
+            logger.warning(
+                "Duck.ai sticky proxy session {} failed; retrying request "
+                "with another session ({}/{})",
+                selection.session.proxy_username,
+                attempt_index + 1,
+                resolved_max_attempts - 1,
+            )
+            return _run_duck_ai(
+                request=request,
+                endpoint=endpoint,
+                prompt=prompt,
+                stream=stream,
+                requested_model=requested_model,
+                attempt_index=attempt_index + 1,
+                max_attempts=resolved_max_attempts,
+            )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.duck_pool.reset()
         services.store.finish_request_error(request_id, repr(exc), duration_ms)
         if selection is not None:
             services.proxy_session_store.mark_duck_canary_error(
@@ -877,6 +883,10 @@ def _run_search_ai(
             requested_model=requested_model,
         )
 
+    # Real traffic evidence (2026-07-16): auto mode forced max_sticky_attempts=1, so
+    # with multiple selectable sessions it burned the first session on Google block and
+    # immediately fell through to Duck even though other ready sticky sessions existed.
+    # Reuse the normal sticky retry budget when sticky sessions are enabled.
     try:
         return _run_google_ai(
             request=request,
@@ -1073,7 +1083,7 @@ def create_app() -> FastAPI:
         }
 
     def _query_response(payload: QueryRequest, request: Request):
-        prompt = build_prompt_from_query_request(payload)
+        prompt = simplify_search_prompt(build_prompt_from_query_request(payload))
         _, model_name, request_id, result = _run_search_ai(
             request=request,
             endpoint="/query",
@@ -1128,7 +1138,7 @@ def create_app() -> FastAPI:
     @app.post("/v1/chat/completions", dependencies=[Depends(require_api_token)])
     def chat_completions(payload: ChatCompletionsRequest, request: Request):
         try:
-            prompt = build_prompt_from_messages(payload.messages)
+            prompt = simplify_search_prompt(build_prompt_from_messages(payload.messages))
         except OpenAICompatibilityError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1151,7 +1161,7 @@ def create_app() -> FastAPI:
     @app.post("/v1/responses", dependencies=[Depends(require_api_token)])
     def responses_api(payload: ResponsesRequest, request: Request):
         try:
-            prompt = build_prompt_from_responses_request(payload)
+            prompt = simplify_search_prompt(build_prompt_from_responses_request(payload))
         except OpenAICompatibilityError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1306,7 +1316,7 @@ def create_app() -> FastAPI:
             _run_search_ai(
                 request=request,
                 endpoint="/console/probe",
-                prompt=probe_prompt,
+                prompt=simplify_search_prompt(probe_prompt),
                 stream=False,
                 requested_model=None,
             )

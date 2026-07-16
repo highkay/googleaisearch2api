@@ -607,15 +607,26 @@ class ProxySessionStore:
 
     def select_duck_session(self, proxy_base_username: str) -> ProxySessionSnapshot | None:
         now = utc_now()
+        duck_ok_rank = case((ProxySessionRow.duck_canary_status == "ok", 0), else_=1)
         with self._session_factory() as session:
             row = session.scalars(
                 select(ProxySessionRow)
                 .where(ProxySessionRow.proxy_base_username == proxy_base_username)
-                .where(ProxySessionRow.duck_canary_status == "ok")
+                .where(
+                    or_(
+                        ProxySessionRow.duck_canary_status == "ok",
+                        and_(
+                            ProxySessionRow.duck_canary_success_count > 0,
+                            ProxySessionRow.duck_canary_status != "rate_limited",
+                        ),
+                    )
+                )
                 .where(ProxySessionRow.status != STATUS_RETIRED)
                 .where(ProxySessionRow.duplicate_of_session_id.is_(None))
                 .order_by(
+                    duck_ok_rank.asc(),
                     ProxySessionRow.duck_canary_rate_limit_count.asc(),
+                    ProxySessionRow.duck_canary_error_count.asc(),
                     ProxySessionRow.request_error_count.asc(),
                     ProxySessionRow.last_selected_at.asc().nullsfirst(),
                     ProxySessionRow.duck_canary_success_count.desc(),
