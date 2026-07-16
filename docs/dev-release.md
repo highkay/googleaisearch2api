@@ -151,3 +151,12 @@ curl -sS http://127.0.0.1:9010/v1/chat/completions \
 - 稳定性根因用真实 `/healthz`、SQLite `proxy_sessions`/`request_logs`、容器日志取证，再改代码
 - 选择器/提取逻辑与并发模型拆开改，并分别跑对应测试
 - probe 脚本（`scripts/probe_*.py`）可在容器外并行跑，但不要和在线 worker 抢同一代理会话预算
+
+
+## Sticky Hot Pool 行为（2026-07 起）
+
+- **Hot 池**仅包含 `status=active` 的 sticky session（canary 成功或真实 Google 成功后晋升）。
+- cooldown 到期**不会**自动重新进入线上选择；必须由 recovery canary 再次晋升。
+- `auto` 在 Hot 池为空，或 recovery 占用 browser gate 时，**直接走 Duck**，不占 Google worker。
+- recovery 与 Google worker 互斥占用 browser gate；Duck 不受此限制。
+- Google block 的 IPv4/IPv6 会合并进 session 的 `ip_vector`，供 known-block 跳过匹配。

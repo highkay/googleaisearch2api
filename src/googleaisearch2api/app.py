@@ -44,8 +44,10 @@ from .openai_adapter import (
     iter_chat_completion_stream,
     iter_responses_api_stream,
 )
+from .browser_gate import BrowserResourceGate
 from .pool import (
     BrowserPool,
+    BrowserPoolBusyError,
     BrowserPoolClosedError,
     BrowserPoolSaturatedError,
     BrowserPoolTimeoutError,
@@ -90,6 +92,7 @@ class Services:
     proxy_session_store: ProxySessionStore
     proxy_selector: ProxySessionSelector
     proxy_auto_recovery: ProxyAutoRecovery
+    browser_gate: BrowserResourceGate
 
 
 def _normalize_result_for_prompt(prompt: str, result: GoogleAiResult) -> GoogleAiResult:
@@ -163,12 +166,21 @@ def create_services(settings: AppSettings) -> Services:
         proxy_session_store,
         allow_fallback_to_base=settings.proxy_allow_fallback_to_base,
     )
-    proxy_auto_recovery = ProxyAutoRecovery(settings, store)
+    browser_gate = BrowserResourceGate()
+    proxy_auto_recovery = ProxyAutoRecovery(
+        settings,
+        store,
+        browser_gate=browser_gate,
+    )
     pool = BrowserPool(
         worker_count=settings.max_concurrent_requests,
         queue_capacity=settings.request_queue_size,
         blocked_retry_count=settings.google_ai_blocked_retry_count,
+        browser_gate=browser_gate,
+        gate_holder_prefix="google-worker",
     )
+    # Duck is the availability floor during Google recovery; it does not take the
+    # exclusive browser gate so canaries do not block fallback traffic.
     duck_pool = BrowserPool(
         worker_count=settings.duck_ai_workers,
         queue_capacity=settings.duck_ai_queue_size,
@@ -184,6 +196,7 @@ def create_services(settings: AppSettings) -> Services:
         proxy_session_store=proxy_session_store,
         proxy_selector=proxy_selector,
         proxy_auto_recovery=proxy_auto_recovery,
+        browser_gate=browser_gate,
     )
 
 
@@ -398,6 +411,13 @@ def _run_google_ai(
             services.store.finish_request_error(request_id, str(exc), duration_ms)
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=str(exc),
+            ) from exc
+        except BrowserPoolBusyError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=str(exc),
             ) from exc
         except BrowserPoolClosedError as exc:
@@ -773,12 +793,16 @@ def _should_try_duck_fallback(exc: HTTPException) -> bool:
 
 
 def _should_route_auto_directly_to_duck(services: Services, config: ServiceConfig) -> bool:
+    # While recovery holds exclusive browser budget, skip Google hot-path entirely.
+    if services.proxy_auto_recovery.is_running() or services.browser_gate.is_exclusive():
+        return True
     if not config.resin_sticky_session_enabled or services.settings.proxy_allow_fallback_to_base:
         return False
     try:
         base_username = resolve_proxy_base_username(config)
     except ProxySessionConfigError:
         return False
+    # Hot pool only counts status=active sessions.
     return services.proxy_session_store.count_selectable_sessions(base_username) == 0
 
 
@@ -866,15 +890,21 @@ def _run_search_ai(
         )
 
     if _should_route_auto_directly_to_duck(services, config):
-        logger.warning(
-            "Google sticky proxy session pool is empty; routing auto request directly "
-            "to Duck.ai fallback."
-        )
-        _trigger_proxy_auto_recovery_if_pool_empty(
-            services,
-            config,
-            reason="auto-pool-empty",
-        )
+        if services.proxy_auto_recovery.is_running() or services.browser_gate.is_exclusive():
+            logger.warning(
+                "Proxy auto recovery holds the browser gate; routing auto request "
+                "directly to Duck.ai fallback."
+            )
+        else:
+            logger.warning(
+                "Google sticky hot pool is empty (no active sessions); routing auto "
+                "request directly to Duck.ai fallback."
+            )
+            _trigger_proxy_auto_recovery_if_pool_empty(
+                services,
+                config,
+                reason="auto-pool-empty",
+            )
         return _run_duck_ai(
             request=request,
             endpoint=endpoint,
@@ -1008,6 +1038,7 @@ def create_app() -> FastAPI:
             "resin_sticky_session_enabled": config.resin_sticky_session_enabled,
             "sticky_active_sessions": proxy_session_summary.get("active", 0),
             "sticky_selectable_sessions": proxy_session_summary.get("selectable", 0),
+            "sticky_hot_pool_sessions": proxy_session_summary.get("selectable", 0),
             "headless": config.browser_headless,
             "workers": pool_summary.worker_count,
             "busy_workers": pool_summary.busy_workers,
@@ -1018,6 +1049,7 @@ def create_app() -> FastAPI:
             "duck_ai_busy_workers": duck_pool_summary.busy_workers,
             "duck_ai_queued_requests": duck_pool_summary.queued_requests,
             "duck_ai_cooldown_remaining_seconds": services.duck_circuit.remaining_seconds(),
+            "browser_gate": services.browser_gate.status(),
             "proxy_auto_recovery": services.proxy_auto_recovery.status(),
             "accepting_requests": pool_summary.accepting_requests,
         }

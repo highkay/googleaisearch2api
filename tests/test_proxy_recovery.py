@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+from googleaisearch2api.browser_gate import BrowserResourceGate
 from googleaisearch2api.config import AppSettings, ServiceConfig
 from googleaisearch2api.proxy_recovery import ProxyAutoRecovery
 

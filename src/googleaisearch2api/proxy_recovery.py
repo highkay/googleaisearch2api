@@ -10,6 +10,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from .browser_gate import BrowserResourceGate
 from .config import AppSettings, ServiceConfig
 from .proxy_sessions import ProxySessionConfigError, resolve_proxy_base_username
 from .store import ConfigStore
@@ -40,12 +41,16 @@ class ProxyAutoRecovery:
         *,
         script_path: Path | None = None,
         command_runner: CommandRunner = subprocess.run,
+        browser_gate: BrowserResourceGate | None = None,
+        exclusive_timeout_s: float = 60.0,
     ) -> None:
         self._settings = settings
         self._config_store = config_store
         self._script_path = script_path or _default_probe_script_path()
         self._repo_root = self._script_path.parent.parent
         self._command_runner = command_runner
+        self._browser_gate = browser_gate
+        self._exclusive_timeout_s = exclusive_timeout_s
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._run_lock = threading.Lock()
@@ -75,6 +80,10 @@ class ProxyAutoRecovery:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
+
+    def is_running(self) -> bool:
+        with self._state_lock:
+            return self._running
 
     def status(self) -> dict[str, object]:
         with self._state_lock:
@@ -157,7 +166,23 @@ class ProxyAutoRecovery:
             self._last_exit_code = None
             self._last_error = None
             self._last_skipped_reason = None
+        gate_holder = f"proxy-auto-recovery:{reason}"
+        gate_acquired = False
         try:
+            if self._browser_gate is not None:
+                gate_acquired = self._browser_gate.acquire_exclusive(
+                    gate_holder,
+                    timeout_s=self._exclusive_timeout_s,
+                )
+                if not gate_acquired:
+                    self._record_skip(
+                        "browser resource gate busy; recovery deferred until API workers idle"
+                    )
+                    logger.info(
+                        "Skipping proxy auto recovery probe: browser gate busy (reason={})",
+                        reason,
+                    )
+                    return False
             config = self._config_store.get_config()
             command = self._build_command(config)
             logger.info(
@@ -212,6 +237,8 @@ class ProxyAutoRecovery:
             logger.exception("Proxy auto recovery probe failed unexpectedly")
             return False
         finally:
+            if gate_acquired and self._browser_gate is not None:
+                self._browser_gate.release_exclusive(gate_holder)
             with self._state_lock:
                 self._running = False
                 self._last_finished_at = datetime.now(UTC)

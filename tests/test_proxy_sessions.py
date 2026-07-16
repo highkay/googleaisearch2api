@@ -212,7 +212,9 @@ def test_request_success_clears_stale_cooldown_reason(tmp_path: Path) -> None:
     assert snapshot.retire_reason is None
 
 
-def test_expired_proven_cooldown_session_is_selectable(tmp_path: Path) -> None:
+def test_expired_proven_cooldown_session_stays_out_of_hot_pool(tmp_path: Path) -> None:
+    # Hot pool is status=active only. Expired cooldowns must be re-canaried by recovery
+    # before they become selectable again.
     store = _make_store(tmp_path)
     snapshot = store.upsert_proxy_session(
         proxy_base_username="openai",
@@ -234,9 +236,14 @@ def test_expired_proven_cooldown_session_is_selectable(tmp_path: Path) -> None:
         browser_proxy_password="pass",
         resin_sticky_session_enabled=True,
     )
-    selection = selector.select(config)
 
     assert store.count_active_sessions("openai") == 0
+    assert store.count_selectable_sessions("openai") == 0
+    with pytest.raises(ProxySessionUnavailableError, match="No active sticky"):
+        selector.select(config)
+
+    store.mark_canary_success(snapshot.id)
+    selection = selector.select(config)
     assert store.count_selectable_sessions("openai") == 1
     assert selection is not None
     assert selection.session.proxy_username == "openai.user1"
@@ -478,6 +485,34 @@ def test_find_google_blocked_session_for_ip_uses_exact_base_and_ip(tmp_path: Pat
         )
         is None
     )
+
+
+def test_mark_canary_blocked_merges_dual_stack_block_ips_into_vector(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    snapshot = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    store.update_egress(
+        proxy_session_id=snapshot.id,
+        ips=["203.0.113.10"],
+        source="test",
+    )
+    blocked = store.mark_canary_blocked(
+        snapshot.id,
+        error_message="blocked",
+        block_ips=["203.0.113.10", "2001:db8::1"],
+    )
+    assert "203.0.113.10" in blocked.ip_vector
+    assert "2001:db8::1" in blocked.ip_vector
+    found = store.find_google_blocked_session_for_ips(
+        "openai",
+        ["2001:db8::1"],
+        exclude_session_id=999,
+    )
+    assert found is not None
+    assert found.proxy_username == "openai.user1"
 
 
 def test_find_google_blocked_session_for_ip_uses_google_block_observation(

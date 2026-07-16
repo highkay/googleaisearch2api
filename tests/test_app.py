@@ -82,10 +82,17 @@ class FakePool:
 class FakeProxyAutoRecovery:
     def __init__(self) -> None:
         self.reasons: list[str] = []
+        self.running = False
 
     def trigger_async(self, *, reason: str = "event") -> bool:
         self.reasons.append(reason)
         return True
+
+    def is_running(self) -> bool:
+        return self.running
+
+    def status(self) -> dict[str, object]:
+        return {"enabled": True, "running": self.running}
 
     def close(self) -> None:
         pass

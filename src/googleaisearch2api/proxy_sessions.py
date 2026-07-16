@@ -41,6 +41,29 @@ class ProxySessionUnavailableError(RuntimeError):
     pass
 
 
+def _parse_ip_vector_json(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return normalize_ip_vector([str(item) for item in loaded])
+
+
+def _merge_block_ips_into_row(row: ProxySessionRow, block_ips: list[str] | None) -> list[str]:
+    merged = normalize_ip_vector([*_parse_ip_vector_json(row.ip_vector_json), *(block_ips or [])])
+    if not merged:
+        return []
+    row.ip_vector_json = json.dumps(merged, ensure_ascii=False)
+    row.ip_vector_hash = hash_ip_vector(merged)
+    if not row.primary_ip:
+        row.primary_ip = merged[0]
+    return merged
+
+
 @dataclass(frozen=True, slots=True)
 class ProxySessionSnapshot:
     id: int
@@ -50,6 +73,7 @@ class ProxySessionSnapshot:
     status: str
     epoch: int
     primary_ip: str | None
+    ip_vector: list[str]
     ip_vector_hash: str | None
     iplark_min_quality_score: int | None
     google_canary_status: str
@@ -75,6 +99,9 @@ class ProxySessionSnapshot:
 
     @classmethod
     def from_row(cls, row: ProxySessionRow) -> ProxySessionSnapshot:
+        ip_vector = _parse_ip_vector_json(row.ip_vector_json)
+        if not ip_vector and row.primary_ip:
+            ip_vector = normalize_ip_vector([row.primary_ip])
         return cls(
             id=row.id,
             proxy_base_username=row.proxy_base_username,
@@ -83,6 +110,7 @@ class ProxySessionSnapshot:
             status=row.status,
             epoch=row.epoch,
             primary_ip=row.primary_ip,
+            ip_vector=ip_vector,
             ip_vector_hash=row.ip_vector_hash,
             iplark_min_quality_score=row.iplark_min_quality_score,
             google_canary_status=row.google_canary_status or "unknown",
@@ -208,19 +236,12 @@ def is_risk_metadata_retire_reason(reason: str | None) -> bool:
 
 
 def _selectable_session_filter(now: datetime):
-    previously_proven = or_(
-        ProxySessionRow.request_success_count > 0,
-        ProxySessionRow.canary_success_count > 0,
-    )
-    return or_(
-        ProxySessionRow.status == STATUS_ACTIVE,
-        and_(
-            ProxySessionRow.status == STATUS_COOLDOWN,
-            ProxySessionRow.cooldown_until.is_not(None),
-            ProxySessionRow.cooldown_until <= now,
-            previously_proven,
-        ),
-    )
+    # Hot pool only: status=active sessions promoted by canary or real Google success.
+    # Expired cooldowns stay cold until recovery re-canaries them. Live evidence showed
+    # cooldown-expired "proven" sessions re-entering selection and immediately burning
+    # on Google unusual-traffic, while active remained 0.
+    del now  # kept for call-site compatibility
+    return ProxySessionRow.status == STATUS_ACTIVE
 
 
 class ProxySessionStore:
@@ -461,8 +482,11 @@ class ProxySessionStore:
             row.last_blocked_at = now
             row.cooldown_until = now + timedelta(hours=DEFAULT_BLOCK_COOLDOWN_HOURS)
             row.updated_at = now
+            # Merge dual-stack block IPs into the session vector so future known-block
+            # checks can match either IPv4 or IPv6 Google reported.
+            _merge_block_ips_into_row(row, block_ips)
             session.add(row)
-            for ip in block_ips or []:
+            for ip in normalize_ip_vector(block_ips or []):
                 session.add(
                     ProxyIpObservationRow(
                         proxy_session_id=proxy_session_id,
@@ -682,6 +706,7 @@ class ProxySessionStore:
                 row.status = STATUS_COOLDOWN
                 row.last_blocked_at = now
                 row.cooldown_until = now + timedelta(hours=DEFAULT_BLOCK_COOLDOWN_HOURS)
+                _merge_block_ips_into_row(row, block_ips)
             else:
                 row.request_error_count += 1
             row.updated_at = now
@@ -699,7 +724,7 @@ class ProxySessionStore:
                     created_at=now,
                 )
             )
-            for ip in block_ips or []:
+            for ip in normalize_ip_vector(block_ips or []):
                 session.add(
                     ProxyIpObservationRow(
                         proxy_session_id=proxy_session_id,
@@ -773,7 +798,20 @@ class ProxySessionStore:
         *,
         exclude_session_id: int | None = None,
     ) -> ProxySessionSnapshot | None:
-        normalized = normalize_ip_vector([primary_ip])
+        return self.find_google_blocked_session_for_ips(
+            proxy_base_username,
+            [primary_ip],
+            exclude_session_id=exclude_session_id,
+        )
+
+    def find_google_blocked_session_for_ips(
+        self,
+        proxy_base_username: str,
+        ips: list[str] | tuple[str, ...] | set[str],
+        *,
+        exclude_session_id: int | None = None,
+    ) -> ProxySessionSnapshot | None:
+        normalized = normalize_ip_vector(ips)
         if not normalized:
             return None
 
@@ -785,50 +823,50 @@ class ProxySessionStore:
                 ProxySessionRow.last_blocked_at.is_not(None),
             )
 
-        statement = (
-            select(ProxySessionRow)
-            .where(ProxySessionRow.proxy_base_username == proxy_base_username)
-            .where(ProxySessionRow.primary_ip == normalized[0])
-            .where(blocked_status_filter())
-            .order_by(
-                ProxySessionRow.last_blocked_at.desc().nullslast(),
-                ProxySessionRow.updated_at.desc(),
-                ProxySessionRow.id.asc(),
-            )
-            .limit(1)
-        )
-        if exclude_session_id is not None:
-            statement = statement.where(ProxySessionRow.id != exclude_session_id)
-
         with self._session_factory() as session:
-            row = session.scalars(statement).first()
-            if row is not None:
-                return ProxySessionSnapshot.from_row(row)
+            for candidate_ip in normalized:
+                statement = (
+                    select(ProxySessionRow)
+                    .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+                    .where(ProxySessionRow.primary_ip == candidate_ip)
+                    .where(blocked_status_filter())
+                    .order_by(
+                        ProxySessionRow.last_blocked_at.desc().nullslast(),
+                        ProxySessionRow.updated_at.desc(),
+                        ProxySessionRow.id.asc(),
+                    )
+                    .limit(1)
+                )
+                if exclude_session_id is not None:
+                    statement = statement.where(ProxySessionRow.id != exclude_session_id)
+                row = session.scalars(statement).first()
+                if row is not None:
+                    return ProxySessionSnapshot.from_row(row)
 
-            observation_statement = (
-                select(ProxySessionRow)
-                .join(
-                    ProxyIpObservationRow,
-                    ProxyIpObservationRow.proxy_session_id == ProxySessionRow.id,
+                observation_statement = (
+                    select(ProxySessionRow)
+                    .join(
+                        ProxyIpObservationRow,
+                        ProxyIpObservationRow.proxy_session_id == ProxySessionRow.id,
+                    )
+                    .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+                    .where(ProxyIpObservationRow.source == "google_block")
+                    .where(ProxyIpObservationRow.ip == candidate_ip)
+                    .where(blocked_status_filter())
+                    .order_by(
+                        ProxySessionRow.last_blocked_at.desc().nullslast(),
+                        ProxySessionRow.updated_at.desc(),
+                        ProxySessionRow.id.asc(),
+                    )
+                    .limit(1)
                 )
-                .where(ProxySessionRow.proxy_base_username == proxy_base_username)
-                .where(ProxyIpObservationRow.source == "google_block")
-                .where(ProxyIpObservationRow.ip == normalized[0])
-                .where(blocked_status_filter())
-                .order_by(
-                    ProxySessionRow.last_blocked_at.desc().nullslast(),
-                    ProxySessionRow.updated_at.desc(),
-                    ProxySessionRow.id.asc(),
-                )
-                .limit(1)
-            )
-            if exclude_session_id is not None:
-                observation_statement = observation_statement.where(
-                    ProxySessionRow.id != exclude_session_id
-                )
-            row = session.scalars(observation_statement).first()
-            if row is not None:
-                return ProxySessionSnapshot.from_row(row)
+                if exclude_session_id is not None:
+                    observation_statement = observation_statement.where(
+                        ProxySessionRow.id != exclude_session_id
+                    )
+                row = session.scalars(observation_statement).first()
+                if row is not None:
+                    return ProxySessionSnapshot.from_row(row)
             return None
 
     def find_google_blocked_prefix_for_ip(

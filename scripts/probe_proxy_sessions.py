@@ -466,6 +466,15 @@ def _run_iplark(
     return snapshot, result
 
 
+def _snapshot_ip_candidates(snapshot: ProxySessionSnapshot) -> list[str]:
+    from googleaisearch2api.proxy_sessions import normalize_ip_vector
+
+    candidates = list(getattr(snapshot, "ip_vector", None) or [])
+    if snapshot.primary_ip:
+        candidates.append(snapshot.primary_ip)
+    return normalize_ip_vector(candidates)
+
+
 def _skip_known_google_blocked_ip(
     store: ProxySessionStore,
     snapshot: ProxySessionSnapshot,
@@ -473,19 +482,20 @@ def _skip_known_google_blocked_ip(
     base_username: str,
     enabled: bool,
 ) -> ProxySessionSnapshot:
-    if not enabled or not snapshot.primary_ip:
+    candidates = _snapshot_ip_candidates(snapshot)
+    if not enabled or not candidates:
         return snapshot
 
-    blocked = store.find_google_blocked_session_for_ip(
+    blocked = store.find_google_blocked_session_for_ips(
         base_username,
-        snapshot.primary_ip,
+        candidates,
         exclude_session_id=snapshot.id,
     )
     if blocked is None:
         return snapshot
 
     message = (
-        f"egress IP {snapshot.primary_ip} matched Google-blocked session "
+        f"egress IP(s) {', '.join(candidates)} matched Google-blocked session "
         f"{blocked.proxy_username}"
     )
     store.record_event(
@@ -493,6 +503,7 @@ def _skip_known_google_blocked_ip(
         event_type="known_google_blocked_ip_skipped",
         message=message,
         raw_json={
+            "candidate_ips": candidates,
             "matched_session_id": blocked.id,
             "matched_proxy_username": blocked.proxy_username,
             "matched_primary_ip": blocked.primary_ip,

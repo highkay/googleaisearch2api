@@ -54,6 +54,7 @@ def _snapshot(
         status=status,
         epoch=0,
         primary_ip=primary_ip,
+        ip_vector=[primary_ip] if primary_ip else [],
         ip_vector_hash="hash",
         iplark_min_quality_score=34,
         google_canary_status=google_canary_status,
@@ -344,6 +345,7 @@ class _FakeKnownBlockedStore:
         self.blocked = blocked
         self.events: list[dict] = []
         self.cooldown_reasons: list[str] = []
+        self.looked_up_ips: list[list[str]] = []
 
     def find_google_blocked_session_for_ip(
         self,
@@ -352,9 +354,22 @@ class _FakeKnownBlockedStore:
         *,
         exclude_session_id: int | None = None,
     ) -> ProxySessionSnapshot | None:
+        return self.find_google_blocked_session_for_ips(
+            proxy_base_username,
+            [primary_ip],
+            exclude_session_id=exclude_session_id,
+        )
+
+    def find_google_blocked_session_for_ips(
+        self,
+        proxy_base_username: str,
+        ips: list[str],
+        *,
+        exclude_session_id: int | None = None,
+    ) -> ProxySessionSnapshot | None:
         assert proxy_base_username == "openai"
-        assert primary_ip == "203.0.113.10"
         assert exclude_session_id == 2
+        self.looked_up_ips.append(list(ips))
         return self.blocked
 
     def record_event(self, **kwargs: object) -> None:

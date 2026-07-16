@@ -11,6 +11,7 @@ from typing import Protocol
 from loguru import logger
 
 from .browser import GoogleAiBlockedError, GoogleAiRunner
+from .browser_gate import BrowserResourceGate
 from .config import ServiceConfig
 from .schemas import GoogleAiResult, RuntimePoolSummary
 
@@ -37,6 +38,10 @@ class BrowserPoolTimeoutError(BrowserPoolError):
     pass
 
 
+class BrowserPoolBusyError(BrowserPoolError):
+    pass
+
+
 @dataclass(slots=True)
 class _PoolJob:
     config: ServiceConfig
@@ -58,6 +63,8 @@ class BrowserPool:
         worker_poll_interval_s: float = 0.25,
         request_timeout_buffer_ms: int = 5_000,
         blocked_retry_count: int = 0,
+        browser_gate: BrowserResourceGate | None = None,
+        gate_holder_prefix: str = "browser-worker",
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
@@ -73,6 +80,8 @@ class BrowserPool:
         self._worker_poll_interval_s = worker_poll_interval_s
         self._request_timeout_buffer_ms = request_timeout_buffer_ms
         self._blocked_retry_count = blocked_retry_count
+        self._browser_gate = browser_gate
+        self._gate_holder_prefix = gate_holder_prefix
         self._jobs: queue.Queue[object] = queue.Queue(maxsize=queue_capacity)
         self._lock = threading.Lock()
         self._closed = False
@@ -212,7 +221,7 @@ class BrowserPool:
                     continue
                 self._mark_worker_busy(worker_index, busy=True)
                 try:
-                    result = self._run_prompt_with_blocked_retries(worker_index, runner, job)
+                    result = self._run_prompt_with_gate(worker_index, runner, job)
                 except Exception as exc:
                     self._set_worker_error(worker_index, repr(exc))
                     if not job.future.done():
@@ -232,6 +241,24 @@ class BrowserPool:
                 runner.close()
             except Exception:
                 logger.exception("Failed to close browser runner for worker {}", worker_index + 1)
+
+    def _run_prompt_with_gate(
+        self,
+        worker_index: int,
+        runner: RunnerProtocol,
+        job: _PoolJob,
+    ) -> GoogleAiResult:
+        if self._browser_gate is None:
+            return self._run_prompt_with_blocked_retries(worker_index, runner, job)
+
+        holder = f"{self._gate_holder_prefix}-{worker_index + 1}"
+        with self._browser_gate.shared(holder) as acquired:
+            if not acquired:
+                raise BrowserPoolBusyError(
+                    "Browser resource gate is held by proxy auto recovery; "
+                    "live browser work is deferred."
+                )
+            return self._run_prompt_with_blocked_retries(worker_index, runner, job)
 
     def _run_prompt_with_blocked_retries(
         self,
