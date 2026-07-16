@@ -1,48 +1,17 @@
 # 开发 → 发布 → 本地更新流程
 
-本文把本仓库已经在用的发布路径固化成可重复步骤。目标：
+本文是本仓库**标准发布路径**。每次功能/修复上线都按此执行，避免本地 ad-hoc 镜像与 GHCR 分叉。
+
+## 目标闭环
 
 ```text
-本地改代码 → pytest → push main → GitHub Actions 构建 GHCR 镜像 → 本地 pull/up → healthz/smoke
+改代码
+  → uv run pytest / ruff
+  → git commit + push origin main
+  → GitHub Actions 构建并推送 GHCR
+  → 本地 pull sha-* 镜像并 recreate
+  → healthz / smoke 验证
 ```
-
-## 1. 本地开发
-
-```bash
-uv sync --extra dev
-uv run ruff check .
-uv run ruff format .
-uv run pytest
-```
-
-如果改了 Google AI 选择器或页面提取逻辑，先重新取证：
-
-```bash
-uv run python scripts/probe_google_ai.py --prompt "What changed in OpenAI Responses API?"
-```
-
-开发态容器（挂源码，非默认生产路径）：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-```
-
-## 2. 提交与触发镜像构建
-
-```bash
-git status
-git add <files>
-git commit -m "..."
-git push origin main
-```
-
-`main` 分支 push 会触发 `.github/workflows/docker-publish.yml`：
-
-| 触发 | 镜像标签 |
-|------|----------|
-| push `main` | `latest`, `main`, `sha-<7位>` |
-| tag `v*.*.*` | `v*.*.*`, `sha-<7位>` |
-| `workflow_dispatch` | 当前分支名 + `sha-<7位>`（默认分支还会带 `latest`） |
 
 镜像名：
 
@@ -50,86 +19,154 @@ git push origin main
 ghcr.io/highkay/googleaisearch2api
 ```
 
-查看构建：
+| 触发 | 标签 |
+|------|------|
+| push `main` | `latest`, `main`, `sha-<7位>` |
+| tag `v*.*.*` | `v*.*.*`, `sha-<7位>` |
+| `workflow_dispatch` | 分支名 + `sha-<7位>`（默认分支另加 `latest`） |
+
+Workflow：`.github/workflows/docker-publish.yml`
+
+---
+
+## 1. 本地开发与自检
 
 ```bash
-# 需要 gh 已登录
+cd /path/to/googleaisearch2api
+uv sync --extra dev
+uv run ruff check .
+uv run ruff format .
+uv run pytest
+```
+
+改 Google AI 选择器/提取逻辑前先取证：
+
+```bash
+uv run python scripts/probe_google_ai.py --prompt "What changed in OpenAI Responses API?"
+```
+
+开发态 Compose（挂源码，非生产默认）：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+生产默认 Compose **不挂源码**，只跑镜像里的代码。
+
+---
+
+## 2. 审查后提交并推送
+
+```bash
+git status
+git diff
+uv run pytest -q
+uv run ruff check .
+
+git add <files>   # 不要提交 .env / .env.backup* / .deploy-backups/
+git commit -m "简述改了什么以及为什么"
+git push origin main
+```
+
+`push main` 即触发 GHCR 构建。记录短 SHA：
+
+```bash
+git rev-parse --short=7 HEAD
+# 例: 25e1512
+```
+
+查看 Action：
+
+```bash
+# 有 gh CLI
 gh run list --workflow=docker-publish.yml --limit 5
 gh run watch
+
+# 无 gh：浏览器打开
+# https://github.com/highkay/googleaisearch2api/actions
 ```
 
-没有 `gh` 时，直接打开：
-
-```text
-https://github.com/highkay/googleaisearch2api/actions
-```
-
-## 3. 本地从 GHCR 更新
-
-推荐用仓库脚本（会 pull、recreate、healthz、可选 smoke）：
+也可用 API 轮询：
 
 ```bash
-./scripts/update_from_ghcr.sh
+curl -sS "https://api.github.com/repos/highkay/googleaisearch2api/actions/runs?per_page=3" \
+  | python3 -c 'import sys,json
+for r in json.load(sys.stdin)["workflow_runs"][:3]:
+  print(r["status"], r["conclusion"], r["head_sha"][:7], r["html_url"])'
 ```
 
-指定不可变 sha（生产更稳）：
+**务必等 `status=completed` 且 `conclusion=success` 再拉镜像。**
+
+---
+
+## 3. 本地更新 GHCR 镜像（推荐脚本）
 
 ```bash
-./scripts/update_from_ghcr.sh sha-abc1234
-# 或
-GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:sha-abc1234 \
-  ./scripts/update_from_ghcr.sh
+# 生产更稳：钉死本次 commit 的 sha
+./scripts/update_from_ghcr.sh sha-<7位>
+
+# 或跟踪 latest（每次 main 都会动）
+./scripts/update_from_ghcr.sh latest
 ```
 
-等价手工步骤：
+脚本会：
+
+1. 设置 `GOOGLEAISEARCH2API_IMAGE` / `PULL_POLICY=always`
+2. `docker compose pull`
+3. `docker compose up -d --force-recreate`
+4. 轮询 `/healthz` 直到 `ok=true`
+5. 若 shell 有 `API_TOKEN`，可选跑 `scripts/smoke_api.py`
+
+### 手工等价步骤
 
 ```bash
-# 若 GHCR 包为 private，先登录
-# echo "$GITHUB_TOKEN" | docker login ghcr.io -u USERNAME --password-stdin
-
-export GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:latest
+export GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:sha-<7位>
 export GOOGLEAISEARCH2API_PULL_POLICY=always
 docker compose pull
-docker compose up -d
-curl -fsS http://127.0.0.1:9010/healthz
-uv run python scripts/smoke_api.py --base-url http://127.0.0.1:9010
+docker compose up -d --force-recreate
+curl -fsS http://127.0.0.1:${APP_PORT:-9010}/healthz | python3 -m json.tool
 ```
 
-相关 `.env` 变量（见 `.env.example`）：
+建议同步写入 `.env`（数据卷不受影响）：
 
 ```env
-GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:latest
-GOOGLEAISEARCH2API_PULL_POLICY=always
+GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:sha-<7位>
+GOOGLEAISEARCH2API_PULL_POLICY=never
 ```
 
-数据卷 `googleaisearch2api-data` 会保留 SQLite（配置、请求日志、sticky session 状态），更新镜像不会清空会话池。
+`PULL_POLICY=never` 适合镜像已 pull 到本地后，避免 GHCR 偶发网络抖动导致 recreate 失败；下次升级前再改为 `always` 或直接用脚本。
 
-## 4. 回滚
+若包为 private：
 
 ```bash
-# 回到上一个已知好的 sha
-GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:sha-<old> \
-  GOOGLEAISEARCH2API_PULL_POLICY=always \
-  ./scripts/update_from_ghcr.sh
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
 ```
 
-或在 `.env` 里改 `GOOGLEAISEARCH2API_IMAGE` 后：
+数据卷 `googleaisearch2api-data` 保留 SQLite（配置、日志、sticky 状态）；**换镜像不会清空会话池**。
+
+---
+
+## 4. 发布后验收清单
 
 ```bash
-docker compose pull && docker compose up -d
+# 镜像是否为目标 sha
+docker inspect googleaisearch2api-googleaisearch2api-1 --format '{{.Config.Image}}'
+
+# 健康
+curl -fsS http://127.0.0.1:9010/healthz | python3 -m json.tool
 ```
 
-## 5. 发布后稳定性检查清单
+关注字段：
 
-1. `GET /healthz` 返回 `ok=true`，`accepting_requests=true`
-2. 关注：
-   - `sticky_active_sessions` / `sticky_selectable_sessions`
-   - `workers_with_errors`
-   - `proxy_auto_recovery.last_success`（为 `false` 时说明 canary 没补到 active）
-3. 看容器日志是否反复出现：
-   - `Google sticky proxy session pool is empty`
-   - 同一批 `google_canary_blocked` 会话被 recovery 反复探测
-4. 真实请求：
+| 字段 | 期望 |
+|------|------|
+| `ok` / `accepting_requests` | true |
+| `sticky_hot_pool_sessions` / `sticky_active_sessions` | 有 Google 时 ≥1 更好；0 则 auto 应走 Duck |
+| `browser_gate.busy` | 空闲时 false |
+| `proxy_auto_recovery.last_success` | canary 补到 active 后应为 true |
+| `workers_with_errors` | 最好 0 |
+
+真实请求：
 
 ```bash
 curl -sS http://127.0.0.1:9010/v1/chat/completions \
@@ -138,25 +175,59 @@ curl -sS http://127.0.0.1:9010/v1/chat/completions \
   -d '{"model":"google-search","messages":[{"role":"user","content":"What is 19 plus 23? Reply with only the number."}]}'
 ```
 
-## 6. 已知运行时约束（不要绕过）
+---
 
-- 入口是 `udm=50&aep=11`，不是 `google.com/ai`
+## 5. 回滚
+
+```bash
+# 回上一已知好的 sha
+./scripts/update_from_ghcr.sh sha-<old>
+
+# 或改 .env 后
+# GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:sha-<old>
+# GOOGLEAISEARCH2API_PULL_POLICY=always
+docker compose pull && docker compose up -d --force-recreate
+```
+
+---
+
+## 6. 运行时约束（不要绕过）
+
+- Google 入口是 `udm=50&aep=11`，不是 `google.com/ai`
 - 每个 browser worker 独占 runner/browser/context
-- Docker 必须 `init: true`，避免 Chrome 僵尸进程堆 PID
-- sticky session 自动恢复默认只做少量 Google canary；`last_success=true` 仅表示 probe 进程成功拿到 active 目标，不是“随便 exit 0”
-- `SEARCH_ENGINE=auto` 会在 Google sticky 失败后降级 Duck.ai，但应先用 sticky 重试预算换会话，而不是一碰 block 就立刻放弃其它 ready session
+- Compose 保持 `init: true`，回收 Chrome 僵尸进程
+- **Hot 池**只含 `status=active`；cooldown 到期不会自动再进线上选择
+- recovery 与 Google worker 互斥 browser gate；`auto` 在热池为空或 recovery 运行时直走 Duck
+- `proxy_auto_recovery.last_success=true` 表示 canary 达到 active 目标，不是“进程随便 exit 0”
+- 300+ sticky IP 是**库存**；线上只需要少量 Hot active，质量靠 canary 动态筛
 
-## 7. 并行开发建议
+---
 
-- 稳定性根因用真实 `/healthz`、SQLite `proxy_sessions`/`request_logs`、容器日志取证，再改代码
-- 选择器/提取逻辑与并发模型拆开改，并分别跑对应测试
-- probe 脚本（`scripts/probe_*.py`）可在容器外并行跑，但不要和在线 worker 抢同一代理会话预算
+## 7. 一页速查（复制即用）
 
+```bash
+# --- 开发自检 ---
+uv run ruff check . && uv run pytest -q
 
-## Sticky Hot Pool 行为（2026-07 起）
+# --- 提交发布 ---
+git add -A   # 先检查，排除 .env*
+git commit -m "..."
+git push origin main
+SHA=$(git rev-parse --short=7 HEAD)
+echo "waiting for GHCR sha-$SHA ..."
 
-- **Hot 池**仅包含 `status=active` 的 sticky session（canary 成功或真实 Google 成功后晋升）。
-- cooldown 到期**不会**自动重新进入线上选择；必须由 recovery canary 再次晋升。
-- `auto` 在 Hot 池为空，或 recovery 占用 browser gate 时，**直接走 Duck**，不占 Google worker。
-- recovery 与 Google worker 互斥占用 browser gate；Duck 不受此限制。
-- Google block 的 IPv4/IPv6 会合并进 session 的 `ip_vector`，供 known-block 跳过匹配。
+# --- 等 Action success 后本地更新 ---
+./scripts/update_from_ghcr.sh "sha-$SHA"
+
+# --- 验收 ---
+curl -fsS http://127.0.0.1:9010/healthz | python3 -m json.tool
+docker inspect googleaisearch2api-googleaisearch2api-1 --format '{{.Config.Image}}'
+```
+
+---
+
+## 8. 并行开发建议
+
+- 根因用真实 `/healthz`、SQLite、容器日志取证后再改
+- 选择器/提取逻辑与并发模型拆开改，各自跑对应测试
+- 大规模 `probe_proxy_sessions` 与在线流量错峰；recovery 已与 Google worker 互斥，仍避免无意义狂扫 300 IP

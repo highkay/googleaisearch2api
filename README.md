@@ -45,12 +45,13 @@ docker compose up -d
 
 默认 Compose 使用 GitHub Actions 发布到 GHCR 的镜像：`ghcr.io/highkay/googleaisearch2api:latest`。它不再挂载源码目录，也不会在容器启动时重新执行 `uv sync`。这样可以直接复用镜像里已经构建好的运行环境，避免宿主机仓库里的 `.python-version=3.13` 触发容器冷启动下载 Python，导致服务长时间不可用。
 
-开发发布闭环（push `main` → Actions 构建 GHCR → 本地更新）见 [docs/dev-release.md](docs/dev-release.md)。快捷更新：
+**开发发布闭环**（必读）：[docs/dev-release.md](docs/dev-release.md)
 
 ```bash
-./scripts/update_from_ghcr.sh
-# 或钉死某次构建
-./scripts/update_from_ghcr.sh sha-<7位>
+uv run pytest -q
+git push origin main
+# 等 Actions success 后：
+./scripts/update_from_ghcr.sh sha-$(git rev-parse --short=7 HEAD)
 ```
 
 ## 启动后验证

@@ -81,14 +81,22 @@ def test_browser_pool_queues_until_a_worker_is_released() -> None:
 
     pool = BrowserPool(worker_count=2, queue_capacity=2, runner_factory=FakeRunner)
     try:
-        threads = [
-            threading.Thread(target=lambda prompt=prompt: pool.execute(ServiceConfig(), prompt))
-            for prompt in ("one", "two", "three")
-        ]
+        # Start the first two jobs first so both workers are occupied before the third
+        # is enqueued. Launching all three at once can race put_nowait against an empty
+        # queue and spuriously raise BrowserPoolSaturatedError.
+        first = threading.Thread(target=lambda: pool.execute(ServiceConfig(), "one"))
+        second = threading.Thread(target=lambda: pool.execute(ServiceConfig(), "two"))
+        first.start()
+        second.start()
 
-        for thread in threads:
-            thread.start()
-        for thread in threads:
+        deadline = time.monotonic() + 5
+        while len(starts) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(starts) == 2
+
+        third = threading.Thread(target=lambda: pool.execute(ServiceConfig(), "three"))
+        third.start()
+        for thread in (first, second, third):
             thread.join(timeout=5)
 
         by_prompt = {prompt: started_at for prompt, started_at in starts}

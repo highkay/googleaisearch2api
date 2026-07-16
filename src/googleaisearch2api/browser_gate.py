@@ -52,7 +52,12 @@ class BrowserResourceGate:
             self._exclusive_holder = holder
             return True
 
-    def acquire_exclusive(self, holder: str = "recovery", *, timeout_s: float | None = 30.0) -> bool:
+    def acquire_exclusive(
+        self,
+        holder: str = "recovery",
+        *,
+        timeout_s: float | None = 30.0,
+    ) -> bool:
         deadline = None if timeout_s is None else time.monotonic() + max(timeout_s, 0.0)
         with self._cv:
             while self._exclusive_holder is not None or self._shared_count > 0:
@@ -83,7 +88,12 @@ class BrowserResourceGate:
                 self.release_shared()
 
     @contextmanager
-    def exclusive(self, holder: str = "recovery", *, timeout_s: float | None = 30.0) -> Iterator[bool]:
+    def exclusive(
+        self,
+        holder: str = "recovery",
+        *,
+        timeout_s: float | None = 30.0,
+    ) -> Iterator[bool]:
         acquired = self.acquire_exclusive(holder, timeout_s=timeout_s)
         try:
             yield acquired

@@ -25,6 +25,7 @@ from .browser import (
     GoogleAiTimeoutError,
     GoogleAiUnavailableError,
 )
+from .browser_gate import BrowserResourceGate
 from .config import (
     DEFAULT_API_TOKEN,
     AppSettings,
@@ -44,7 +45,6 @@ from .openai_adapter import (
     iter_chat_completion_stream,
     iter_responses_api_stream,
 )
-from .browser_gate import BrowserResourceGate
 from .pool import (
     BrowserPool,
     BrowserPoolBusyError,
@@ -274,9 +274,7 @@ def _proxy_session_summary(services: Services, config: ServiceConfig) -> dict[st
         base_username = resolve_proxy_base_username(config)
     except ProxySessionConfigError:
         return summary
-    summary["selectable"] = services.proxy_session_store.count_selectable_sessions(
-        base_username
-    )
+    summary["selectable"] = services.proxy_session_store.count_selectable_sessions(base_username)
     return summary
 
 

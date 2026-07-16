@@ -4,12 +4,11 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from test_app import FakePool, FakeProxyAutoRecovery, _auth_headers, _install_fake_duck_pool
 
 from googleaisearch2api.app import create_app
 from googleaisearch2api.config import ServiceConfigUpdate, get_settings
 from googleaisearch2api.schemas import Citation, GoogleAiResult
-
-from test_app import FakePool, FakeProxyAutoRecovery, _auth_headers, _install_fake_duck_pool
 
 
 @pytest.fixture

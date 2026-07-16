@@ -18,3 +18,15 @@
 - 如果要改并发模型，必须保留“每个 worker 独占 runner/browser/context”的线程边界。
 - 优先保持实现线性、少状态、少隐式缓存。
 - 对外兼容层可以演进，但不要把未验证的 Google 内部 HTTP 端点当成稳定协议写死。
+- sticky **Hot 池**只含 `status=active`；cooldown 到期不会自动再进线上选择。
+- recovery 与 Google worker 互斥 browser gate；`auto` 在热池为空或 recovery 运行时直走 Duck。
+
+## Release
+
+标准闭环见 `docs/dev-release.md`：
+
+```text
+pytest → commit/push main → 等 Actions 推 GHCR → ./scripts/update_from_ghcr.sh sha-<7位>
+```
+
+不要默认提交 `.env`、`.env.backup*`、`.deploy-backups/`。

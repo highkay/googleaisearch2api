@@ -20,6 +20,8 @@ fi
 export GOOGLEAISEARCH2API_IMAGE="$IMAGE"
 export GOOGLEAISEARCH2API_PULL_POLICY="${GOOGLEAISEARCH2API_PULL_POLICY:-always}"
 
+PIN_ENV="${PIN_ENV:-1}"
+
 echo "==> Using image: $GOOGLEAISEARCH2API_IMAGE"
 echo "==> Pull policy: $GOOGLEAISEARCH2API_PULL_POLICY"
 
@@ -61,6 +63,36 @@ if payload.get("accepting_requests") is False:
     raise SystemExit("healthz accepting_requests=false")
 print("healthz OK")
 PY
+
+RUNNING_IMAGE="$(docker compose ps --format '{{.Image}}' 2>/dev/null | head -n1 || true)"
+echo "==> Running image: ${RUNNING_IMAGE:-unknown}"
+
+if [[ "$PIN_ENV" == "1" && -f .env ]]; then
+  python3 - <<PY
+from pathlib import Path
+image = ${IMAGE@Q}
+path = Path(".env")
+lines = []
+seen_image = False
+seen_pull = False
+for line in path.read_text().splitlines():
+    if line.startswith("GOOGLEAISEARCH2API_IMAGE="):
+        lines.append(f"GOOGLEAISEARCH2API_IMAGE={image}")
+        seen_image = True
+    elif line.startswith("GOOGLEAISEARCH2API_PULL_POLICY="):
+        # Pin to never after a successful pull so later recreate won't depend on GHCR.
+        lines.append("GOOGLEAISEARCH2API_PULL_POLICY=never")
+        seen_pull = True
+    else:
+        lines.append(line)
+if not seen_image:
+    lines.append(f"GOOGLEAISEARCH2API_IMAGE={image}")
+if not seen_pull:
+    lines.append("GOOGLEAISEARCH2API_PULL_POLICY=never")
+path.write_text("\\n".join(lines) + "\\n")
+print(f"pinned .env -> {image} (PULL_POLICY=never)")
+PY
+fi
 
 if [[ "$RUN_SMOKE" == "1" ]]; then
   if [[ -n "${API_TOKEN:-}" ]]; then
