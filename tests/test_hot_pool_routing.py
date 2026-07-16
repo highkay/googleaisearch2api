@@ -18,6 +18,12 @@ def test_app(tmp_path, monkeypatch) -> Iterator:
     monkeypatch.setenv("API_TOKEN", "secret-token")
     monkeypatch.setenv("BROWSER_WORKERS", "1")
     monkeypatch.setenv("REQUEST_QUEUE_SIZE", "1")
+    monkeypatch.setenv("PROXY_AUTO_RECOVERY_ENABLED", "false")
+    monkeypatch.setenv("PROXY_AUTO_RECOVERY_RUN_ON_STARTUP", "false")
+    monkeypatch.setenv("BROWSER_PROXY_SERVER", "")
+    monkeypatch.setenv("BROWSER_PROXY_USERNAME", "")
+    monkeypatch.setenv("BROWSER_PROXY_PASSWORD", "")
+    monkeypatch.setenv("RESIN_STICKY_SESSION_ENABLED", "false")
     get_settings.cache_clear()
     app = create_app()
     try:

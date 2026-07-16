@@ -7,7 +7,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from loguru import logger
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .config import ServiceConfig, ServiceConfigUpdate
 from .db import RequestLogRow, ServiceConfigRow, utc_now
@@ -112,30 +112,39 @@ class ConfigStore:
 
     def _get_or_create_row(self, session) -> ServiceConfigRow:
         row = session.get(ServiceConfigRow, 1)
-        if row is None:
-            row = ServiceConfigRow(
-                id=1,
-                default_model=self._defaults.default_model,
-                search_engine=self._defaults.search_engine,
-                api_token=self._defaults.api_token,
-                browser_channel="chrome",
-                browser_executable_path=None,
-                browser_headless=self._defaults.browser_headless,
-                browser_user_agent=self._defaults.browser_user_agent,
-                browser_locale=self._defaults.browser_locale,
-                browser_base_url=self._defaults.browser_base_url,
-                browser_timeout_ms=self._defaults.browser_timeout_ms,
-                answer_timeout_ms=self._defaults.answer_timeout_ms,
-                browser_proxy_server=self._defaults.browser_proxy_server,
-                browser_proxy_username=self._defaults.browser_proxy_username,
-                browser_proxy_password=self._defaults.browser_proxy_password,
-                browser_proxy_bypass=self._defaults.browser_proxy_bypass,
-                resin_sticky_session_enabled=self._defaults.resin_sticky_session_enabled,
-                updated_at=utc_now(),
-            )
-            session.add(row)
+        if row is not None:
+            return row
+        row = ServiceConfigRow(
+            id=1,
+            default_model=self._defaults.default_model,
+            search_engine=self._defaults.search_engine,
+            api_token=self._defaults.api_token,
+            browser_channel="chrome",
+            browser_executable_path=None,
+            browser_headless=self._defaults.browser_headless,
+            browser_user_agent=self._defaults.browser_user_agent,
+            browser_locale=self._defaults.browser_locale,
+            browser_base_url=self._defaults.browser_base_url,
+            browser_timeout_ms=self._defaults.browser_timeout_ms,
+            answer_timeout_ms=self._defaults.answer_timeout_ms,
+            browser_proxy_server=self._defaults.browser_proxy_server,
+            browser_proxy_username=self._defaults.browser_proxy_username,
+            browser_proxy_password=self._defaults.browser_proxy_password,
+            browser_proxy_bypass=self._defaults.browser_proxy_bypass,
+            resin_sticky_session_enabled=self._defaults.resin_sticky_session_enabled,
+            updated_at=utc_now(),
+        )
+        session.add(row)
+        try:
             session.commit()
-            session.refresh(row)
+        except IntegrityError:
+            # Concurrent first-boot writers can both attempt insert of id=1.
+            session.rollback()
+            row = session.get(ServiceConfigRow, 1)
+            if row is None:
+                raise
+            return row
+        session.refresh(row)
         return row
 
     def get_config(self) -> ServiceConfig:
