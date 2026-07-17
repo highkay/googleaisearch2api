@@ -241,8 +241,10 @@ docker inspect googleaisearch2api-googleaisearch2api-1 --format '{{.Config.Image
 2. 并发 `curl_cffi`（默认 16 worker）测隧道 / 出口 IP / Google **IP 级阻断**  
    （`enablejs` 壳页不算 block；纯 HTTP 正常会返回，浏览器 canary 再验）
 3. 失败 → 记录 egress IP（若有）并 cooldown；**不占** browser `max-probes`
-4. 通过 → 再跑少量浏览器 canary（`MAX_PROBES`），成功 → Hot `active`
-5. 事件触发（池空）只扫已有 inventory，且用较小 `EVENT_FAST_HTTP_SCAN_LIMIT`，**不**做 index discovery
+4. L0 通过后：**按 `primary_ip` 去重**（同一出口只保留 1 个 session）+ 跳过本 session 已 canary blocked  
+5. 浏览器 canary 前：known blocked IP/prefix **预过滤**（不占 `max-probes`）；预算按真实 canary 计  
+6. 通过 canary → Hot `active`；达 `TARGET_ACTIVE` 可提前停  
+7. 事件触发（池空）只扫已有 inventory，且用较小 `EVENT_FAST_HTTP_SCAN_LIMIT`，**不**做 index discovery
 
 相关环境变量：
 

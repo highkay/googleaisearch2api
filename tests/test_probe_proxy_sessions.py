@@ -18,9 +18,11 @@ assert _SPEC is not None and _SPEC.loader is not None
 _SCRIPT = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_SCRIPT)
 
+_browser_canary_rank = _SCRIPT._browser_canary_rank
 _candidate_indices = _SCRIPT._candidate_indices
 _canary_answer_matches = _SCRIPT._canary_answer_matches
 _candidate_existing_sessions = _SCRIPT._candidate_existing_sessions
+_dedupe_browser_candidates_by_ip = _SCRIPT._dedupe_browser_candidates_by_ip
 _discover_missing_index_sessions = _SCRIPT._discover_missing_index_sessions
 _fresh_active_checked_after = _SCRIPT._fresh_active_checked_after
 _merge_existing_with_index_discovery = _SCRIPT._merge_existing_with_index_discovery
@@ -379,6 +381,61 @@ def test_discover_missing_index_sessions_skips_known_usernames() -> None:
         ("Default", "user1", "Default.user1"),
         ("Default", "user3", "Default.user3"),
     ]
+
+
+def test_browser_canary_rank_prefers_unknown_over_blocked() -> None:
+    ok = _snapshot(status=STATUS_RISK_CHECKED, id=1, google_canary_status="ok")
+    unknown = _snapshot(status=STATUS_RISK_CHECKED, id=2, google_canary_status="unknown")
+    blocked = _snapshot(status=STATUS_RISK_CHECKED, id=3, google_canary_status="blocked")
+    no_ip = _snapshot(
+        status=STATUS_RISK_CHECKED,
+        id=4,
+        primary_ip=None,
+        google_canary_status="unknown",
+    )
+
+    ranked = sorted([blocked, no_ip, ok, unknown], key=_browser_canary_rank)
+    assert [item.id for item in ranked] == [1, 2, 3, 4]
+
+
+def test_dedupe_browser_candidates_keeps_one_session_per_ip() -> None:
+    a1 = _snapshot(
+        status=STATUS_RISK_CHECKED,
+        id=10,
+        proxy_username="Default.user10",
+        primary_ip="203.0.113.10",
+        request_block_count=0,
+    )
+    a2 = _snapshot(
+        status=STATUS_RISK_CHECKED,
+        id=11,
+        proxy_username="Default.user11",
+        primary_ip="203.0.113.10",
+        request_success_count=5,
+    )
+    b1 = _snapshot(
+        status=STATUS_RISK_CHECKED,
+        id=20,
+        proxy_username="Default.user20",
+        primary_ip="198.51.100.20",
+        google_canary_status="blocked",
+    )
+    c1 = _snapshot(
+        status=STATUS_RISK_CHECKED,
+        id=30,
+        proxy_username="Default.user30",
+        primary_ip="192.0.2.30",
+    )
+
+    selected, skipped = _dedupe_browser_candidates_by_ip(
+        [(a2, None), (a1, None), (b1, None), (c1, None)]
+    )
+
+    # a2 ranks above a1 (higher success history) for the shared IP; b1 soft-skipped.
+    assert [item[0].id for item in selected] == [11, 30]
+    assert {item[0].id for item in skipped} == {10, 20}
+    assert any("duplicate egress IP" in reason for _, _, reason in skipped)
+    assert any("already google_canary_status=blocked" in reason for _, _, reason in skipped)
 
 
 def test_merge_existing_with_index_discovery_is_union_existing_then_missing() -> None:

@@ -64,6 +64,75 @@ def _session_failure_score(snapshot: ProxySessionSnapshot) -> int:
     )
 
 
+def _browser_canary_rank(snapshot: ProxySessionSnapshot) -> tuple[int, int, int, int, int]:
+    """Rank L0 survivors for expensive browser canaries.
+
+    Prefer never-blocked egress IPs, then lower historical failure, then higher
+    success history. Sessions without a known primary IP sort last (need egress).
+    """
+    google_canary = (snapshot.google_canary_status or "").strip().lower()
+    if google_canary == "ok":
+        canary_rank = 0
+    elif google_canary in {"", "unknown"}:
+        canary_rank = 1
+    elif google_canary == "blocked":
+        canary_rank = 3
+    else:
+        canary_rank = 2
+    has_ip_rank = 0 if snapshot.primary_ip else 1
+    return (
+        has_ip_rank,
+        canary_rank,
+        _session_failure_score(snapshot),
+        -_session_success_score(snapshot),
+        snapshot.id,
+    )
+
+
+def _dedupe_browser_candidates_by_ip(
+    passed: list[tuple[ProxySessionSnapshot, dict[str, object] | None]],
+) -> tuple[
+    list[tuple[ProxySessionSnapshot, dict[str, object] | None]],
+    list[tuple[ProxySessionSnapshot, dict[str, object] | None, str]],
+]:
+    """Keep one best session per primary_ip before browser canary.
+
+    Returns (selected, skipped_with_reason). Sessions without primary_ip are kept
+    (they still need egress discovery) but only once each by session id.
+    """
+    selected: list[tuple[ProxySessionSnapshot, dict[str, object] | None]] = []
+    skipped: list[tuple[ProxySessionSnapshot, dict[str, object] | None, str]] = []
+    seen_ips: set[str] = set()
+    ordered = sorted(passed, key=lambda item: _browser_canary_rank(item[0]))
+    for snapshot, payload in ordered:
+        ip = (snapshot.primary_ip or "").strip()
+        if not ip:
+            selected.append((snapshot, payload))
+            continue
+        if ip in seen_ips:
+            skipped.append(
+                (
+                    snapshot,
+                    payload,
+                    f"duplicate egress IP {ip}; browser canary budget uses one session per IP",
+                )
+            )
+            continue
+        # Soft-skip: same IP already proven blocked on this session — do not re-burn budget.
+        if (snapshot.google_canary_status or "").strip().lower() == "blocked":
+            skipped.append(
+                (
+                    snapshot,
+                    payload,
+                    f"primary IP {ip} already google_canary_status=blocked on this session",
+                )
+            )
+            continue
+        seen_ips.add(ip)
+        selected.append((snapshot, payload))
+    return selected, skipped
+
+
 def _cooldown_is_ready(snapshot: ProxySessionSnapshot, now: datetime) -> bool:
     if snapshot.cooldown_until is None:
         return True
@@ -1119,6 +1188,10 @@ def main() -> None:
     probed_count = 0
     fast_http_screened = 0
     fast_http_rejected = 0
+    browser_ip_deduped = 0
+    known_block_prefiltered = 0
+    # IPs already spent on a browser canary in this process (avoid same-IP re-burn).
+    canary_probed_ips: set[str] = set()
 
     def append_record(
         snapshot: ProxySessionSnapshot,
@@ -1136,12 +1209,31 @@ def main() -> None:
             }
         )
 
+    def apply_known_block_filters(
+        snapshot: ProxySessionSnapshot,
+    ) -> ProxySessionSnapshot:
+        checked = _skip_known_google_blocked_ip(
+            store,
+            snapshot,
+            base_username=base_username,
+            enabled=not args.allow_known_google_blocked_ip,
+        )
+        if checked is snapshot:
+            checked = _skip_known_google_blocked_prefix(
+                store,
+                snapshot,
+                base_username=base_username,
+                enabled=not args.allow_known_google_blocked_prefix,
+                min_blocked_count=args.known_google_blocked_prefix_min_count,
+            )
+        return checked
+
     def run_browser_stages(
         snapshot: ProxySessionSnapshot,
         *,
         fast_http_payload: dict[str, object] | None,
     ) -> None:
-        nonlocal probed_count
+        nonlocal probed_count, known_block_prefiltered
         # Full-pool fast sweeps keep screening everyone; only browser canaries stop early.
         if stop_target_reached() or (args.max_probes > 0 and probed_count >= args.max_probes):
             append_record(
@@ -1155,9 +1247,29 @@ def main() -> None:
             )
             return
 
-        probed_count += 1
         candidate_config = build_proxy_config_for_session(base_config, snapshot.proxy_username)
         iplark_result = None
+
+        # Cheap known-bad IP/prefix filter BEFORE spending browser max-probes budget.
+        if snapshot.primary_ip:
+            pre = apply_known_block_filters(snapshot)
+            if pre is not snapshot or pre.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+                known_block_prefiltered += 1
+                append_record(
+                    pre,
+                    iplark_result=iplark_result,
+                    fast_http_payload=fast_http_payload,
+                )
+                return
+            snapshot = pre
+            ip_key = snapshot.primary_ip.strip()
+            if ip_key in canary_probed_ips:
+                append_record(
+                    snapshot,
+                    skipped=f"egress IP {ip_key} already browser-probed in this run",
+                    fast_http_payload=fast_http_payload,
+                )
+                return
 
         egress_stage_ran = False
         if not (args.fast_http_prefilter and snapshot.primary_ip):
@@ -1204,30 +1316,46 @@ def main() -> None:
             )
             return
 
-        known_block_stage_applied = False
-        checked_snapshot = _skip_known_google_blocked_ip(
-            store,
-            snapshot,
-            base_username=base_username,
-            enabled=not args.allow_known_google_blocked_ip,
-        )
-        if checked_snapshot is snapshot:
-            checked_snapshot = _skip_known_google_blocked_prefix(
-                store,
-                snapshot,
-                base_username=base_username,
-                enabled=not args.allow_known_google_blocked_prefix,
-                min_blocked_count=args.known_google_blocked_prefix_min_count,
-            )
-        known_block_stage_applied = checked_snapshot is not snapshot
-        snapshot = checked_snapshot
-        if _should_stop_after_terminal_stage(snapshot, stage_ran=known_block_stage_applied):
+        # If IP was only discovered during egress, apply known-block filters now
+        # (still before the expensive canary when possible).
+        if snapshot.primary_ip:
+            checked = apply_known_block_filters(snapshot)
+            if checked is not snapshot or checked.status in {STATUS_COOLDOWN, STATUS_RETIRED}:
+                known_block_prefiltered += 1
+                append_record(
+                    checked,
+                    iplark_result=iplark_result,
+                    fast_http_payload=fast_http_payload,
+                )
+                return
+            snapshot = checked
+            ip_key = snapshot.primary_ip.strip()
+            if ip_key in canary_probed_ips:
+                append_record(
+                    snapshot,
+                    skipped=f"egress IP {ip_key} already browser-probed in this run",
+                    iplark_result=iplark_result,
+                    fast_http_payload=fast_http_payload,
+                )
+                return
+
+        # max-probes counts real browser canaries only (not known-block prefilters).
+        if stop_target_reached() or (args.max_probes > 0 and probed_count >= args.max_probes):
             append_record(
                 snapshot,
+                skipped=(
+                    "hot target already met"
+                    if stop_target_reached()
+                    else "browser probe budget exhausted"
+                ),
                 iplark_result=iplark_result,
                 fast_http_payload=fast_http_payload,
             )
             return
+
+        probed_count += 1
+        if snapshot.primary_ip:
+            canary_probed_ips.add(snapshot.primary_ip.strip())
 
         if not args.skip_duck_canary:
             snapshot = _run_duck_canary(
@@ -1344,17 +1472,14 @@ def main() -> None:
     else:
         passed = [(snapshot, None) for snapshot in to_screen]
 
-    # Keep a stable-ish canary order: prefer lower historical failure scores.
-    passed.sort(
-        key=lambda item: (
-            _session_failure_score(item[0]),
-            -_session_success_score(item[0]),
-            item[0].id,
-        )
-    )
+    # Phase 2b: rank + one-session-per-IP before burning browser canary budget.
+    browser_candidates, ip_dupes = _dedupe_browser_candidates_by_ip(passed)
+    browser_ip_deduped = len(ip_dupes)
+    for snapshot, fast_http_payload, reason in ip_dupes:
+        append_record(snapshot, skipped=reason, fast_http_payload=fast_http_payload)
 
-    # Phase 3: expensive browser canaries only for L0 survivors.
-    for snapshot, fast_http_payload in passed:
+    # Phase 3: expensive browser canaries only for L0 survivors (IP-deduped).
+    for snapshot, fast_http_payload in browser_candidates:
         if not args.full_fast_http_sweep and stop_target_reached():
             break
         run_browser_stages(snapshot, fast_http_payload=fast_http_payload)
@@ -1367,6 +1492,10 @@ def main() -> None:
         "fast_http_screened": fast_http_screened,
         "fast_http_rejected": fast_http_rejected,
         "fast_http_passed": len(passed),
+        "browser_candidates": len(browser_candidates),
+        "browser_ip_deduped": browser_ip_deduped,
+        "known_block_prefiltered": known_block_prefiltered,
+        "browser_unique_ips_probed": len(canary_probed_ips),
         "candidate_mode": candidate_mode,
         "candidate_total": len(candidate_snapshots),
         "full_fast_http_sweep": args.full_fast_http_sweep,
