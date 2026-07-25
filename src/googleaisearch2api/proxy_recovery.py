@@ -33,6 +33,9 @@ def _tail(value: str | None, *, limit: int = 4_000) -> str:
     return text[-limit:]
 
 
+SelectableSessionCounter = Callable[[str], int]
+
+
 class ProxyAutoRecovery:
     def __init__(
         self,
@@ -43,6 +46,7 @@ class ProxyAutoRecovery:
         command_runner: CommandRunner = subprocess.run,
         browser_gate: BrowserResourceGate | None = None,
         exclusive_timeout_s: float = 60.0,
+        count_selectable_sessions: SelectableSessionCounter | None = None,
     ) -> None:
         self._settings = settings
         self._config_store = config_store
@@ -51,6 +55,7 @@ class ProxyAutoRecovery:
         self._command_runner = command_runner
         self._browser_gate = browser_gate
         self._exclusive_timeout_s = exclusive_timeout_s
+        self._count_selectable_sessions = count_selectable_sessions
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._run_lock = threading.Lock()
@@ -269,16 +274,23 @@ class ProxyAutoRecovery:
         if self._settings.proxy_auto_recovery_end < self._settings.proxy_auto_recovery_start:
             raise ValueError("PROXY_AUTO_RECOVERY_END must be >= PROXY_AUTO_RECOVERY_START")
 
+        base_username = resolve_proxy_base_username(config)
+        # Production 2026-07-25: Default hot pool hit active=0 with 994/1000 sessions
+        # retired mostly as stale egress duplicates. Sticky exits rotate; L0 re-probe of
+        # retired inventory recovered fresh IPs (8/8 sample ok). When the hot pool is
+        # empty, escalate event recovery to a full sweep and re-open retired rows.
+        pool_empty = self._hot_pool_is_empty(base_username)
         # Interval/startup: full-pool = existing inventory ∪ missing user{START}..END.
-        # Event triggers: inventory-only + smaller fast-scan budget (request-path light).
-        full_pool_sweep = reason in {"interval", "startup", "manual", "test"}
+        # Empty hot pool: same full sweep (event-only light scans cannot refill active).
+        # Other event triggers: inventory-only + smaller fast-scan budget.
+        full_pool_sweep = pool_empty or reason in {"interval", "startup", "manual", "test"}
         fast_scan_limit = (
             self._settings.proxy_auto_recovery_fast_http_scan_limit
             if full_pool_sweep
             else self._settings.proxy_auto_recovery_event_fast_http_scan_limit
         )
+        retry_retired = self._settings.proxy_auto_recovery_retry_retired or pool_empty
 
-        base_username = resolve_proxy_base_username(config)
         command = [
             sys.executable,
             str(self._script_path),
@@ -296,7 +308,7 @@ class ProxyAutoRecovery:
             command.extend(["--max-probes", str(self._settings.proxy_auto_recovery_max_probes)])
         if self._settings.proxy_auto_recovery_skip_duck_canary:
             command.append("--skip-duck-canary")
-        if self._settings.proxy_auto_recovery_retry_retired:
+        if retry_retired:
             command.append("--retry-retired")
         if self._settings.proxy_auto_recovery_fast_http_prefilter:
             command.extend(
@@ -349,6 +361,18 @@ class ProxyAutoRecovery:
             if full_pool_sweep:
                 command.append("--discover-missing-indices")
         return command
+
+    def _hot_pool_is_empty(self, base_username: str) -> bool:
+        if self._count_selectable_sessions is None:
+            return False
+        try:
+            return self._count_selectable_sessions(base_username) <= 0
+        except Exception as exc:  # noqa: BLE001 - never block recovery on counter errors
+            logger.warning(
+                "Could not count selectable sticky sessions for recovery planning: {}",
+                exc,
+            )
+            return False
 
     def _consume_trigger_budget(self) -> bool:
         min_interval = self._settings.proxy_auto_recovery_min_trigger_interval_seconds

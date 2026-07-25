@@ -85,7 +85,10 @@ def test_auto_routes_to_duck_while_recovery_holds_gate(test_app) -> None:
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck while recovering."
     assert google_pool.prompts == []
-    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert len(duck_pool.prompts) == 1
+    # Duck path naturalizes prompts; keep the original ask, drop keyword/SERP shape.
+    assert "Question" in duck_pool.prompts[0]
+    assert "natural language" in duck_pool.prompts[0].lower()
 
 
 def test_healthz_exposes_hot_pool_and_browser_gate(test_app) -> None:

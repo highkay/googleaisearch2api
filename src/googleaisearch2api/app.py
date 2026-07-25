@@ -52,7 +52,7 @@ from .pool import (
     BrowserPoolSaturatedError,
     BrowserPoolTimeoutError,
 )
-from .prompting import simplify_search_prompt
+from .prompting import adapt_prompt_for_engine, simplify_search_prompt
 from .proxy_recovery import ProxyAutoRecovery
 from .proxy_sessions import (
     ProxySessionConfigError,
@@ -171,6 +171,7 @@ def create_services(settings: AppSettings) -> Services:
         settings,
         store,
         browser_gate=browser_gate,
+        count_selectable_sessions=proxy_session_store.count_selectable_sessions,
     )
     pool = BrowserPool(
         worker_count=settings.max_concurrent_requests,
@@ -554,6 +555,8 @@ def _run_duck_ai(
     services = get_services(request)
     config = services.store.get_config()
     model_name = _resolve_model(requested_model, config)
+    # Duck is a conversational NL assistant; rewrite keyword/SERP-shaped prompts.
+    duck_prompt = adapt_prompt_for_engine(prompt, engine="duck")
     resolved_max_attempts = (
         max_attempts
         if max_attempts is not None
@@ -568,7 +571,7 @@ def _run_duck_ai(
             endpoint=endpoint,
             engine="duck",
             model_name=model_name,
-            prompt_preview=prompt,
+            prompt_preview=duck_prompt,
             client_ip=request.client.host if request.client else None,
             stream=stream,
             config=config,
@@ -593,7 +596,7 @@ def _run_duck_ai(
             endpoint=endpoint,
             engine="duck",
             model_name=model_name,
-            prompt_preview=prompt,
+            prompt_preview=duck_prompt,
             client_ip=request.client.host if request.client else None,
             stream=stream,
             config=config,
@@ -610,7 +613,7 @@ def _run_duck_ai(
         endpoint=endpoint,
         engine="duck",
         model_name=model_name,
-        prompt_preview=prompt,
+        prompt_preview=duck_prompt,
         client_ip=request.client.host if request.client else None,
         stream=stream,
         config=effective_config,
@@ -626,12 +629,17 @@ def _run_duck_ai(
     try:
         result = services.duck_pool.execute(
             effective_config,
-            prompt,
+            duck_prompt,
             blocked_retry_count=0,
         )
+        # Keep JSON-shape normalization against the original caller prompt when needed.
         result = _normalize_result_for_prompt(prompt, result)
         duration_ms = int((time.perf_counter() - started_at) * 1000)
-        quality = assess_search_answer_quality(prompt, result.answer_text, result.citations)
+        quality = assess_search_answer_quality(
+            duck_prompt,
+            result.answer_text,
+            result.citations,
+        )
         if not quality.ok:
             message = f"Duck.ai answer failed quality check: {quality.reason}"
             services.store.finish_request_error(

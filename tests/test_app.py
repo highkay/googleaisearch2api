@@ -349,7 +349,9 @@ def test_query_duck_engine_uses_duck_pool_only(test_app) -> None:
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck answer."
     assert google_pool.prompts == []
-    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert len(duck_pool.prompts) == 1
+    assert "Question" in duck_pool.prompts[0]
+    assert "natural language" in duck_pool.prompts[0].lower()
     assert duck_pool.blocked_retry_counts == [0]
     assert recent[0].engine == "duck"
 
@@ -445,7 +447,9 @@ def test_query_auto_falls_back_to_duck_when_google_is_unavailable(test_app) -> N
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck fallback."
     assert google_pool.prompts == ["User request:\nQuestion"]
-    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert len(duck_pool.prompts) == 1
+    assert "Question" in duck_pool.prompts[0]
+    assert "natural language" in duck_pool.prompts[0].lower()
     assert [record.engine for record in recent] == ["duck", "google"]
     assert [record.status for record in recent] == ["ok", "error"]
 
@@ -519,7 +523,9 @@ def test_query_auto_retries_sticky_sessions_before_duck_fallback(test_app) -> No
         "openai.user2",
         "openai.user3",
     ]
-    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert len(duck_pool.prompts) == 1
+    assert "Question" in duck_pool.prompts[0]
+    assert "natural language" in duck_pool.prompts[0].lower()
     assert [record.engine for record in recent] == ["duck", "google", "google", "google"]
     assert [record.status for record in recent] == ["ok", "error", "error", "error"]
     assert "google-blocked-pool-below-target" in recovery.reasons
@@ -558,7 +564,9 @@ def test_query_auto_routes_directly_to_duck_when_sticky_pool_is_empty(test_app) 
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck direct fallback."
     assert google_pool.prompts == []
-    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert len(duck_pool.prompts) == 1
+    assert "Question" in duck_pool.prompts[0]
+    assert "natural language" in duck_pool.prompts[0].lower()
     assert recent[0].engine == "duck"
     assert recent[0].status == "ok"
 
@@ -617,7 +625,9 @@ def test_query_auto_falls_back_to_duck_when_google_answer_quality_fails(
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck fallback."
     assert google_pool.prompts == ["User request:\nQuestion"]
-    assert duck_pool.prompts == ["User request:\nQuestion"]
+    assert len(duck_pool.prompts) == 1
+    assert "Question" in duck_pool.prompts[0]
+    assert "natural language" in duck_pool.prompts[0].lower()
     assert [record.engine for record in recent] == ["duck", "google"]
     assert [record.status for record in recent] == ["ok", "error"]
     assert "quality check" in (recent[1].error_message or "")
@@ -655,9 +665,10 @@ def test_query_auto_falls_back_to_duck_when_google_list_answer_is_too_short(
     assert google_pool.prompts == [
         "User request:\n台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条"
     ]
-    assert duck_pool.prompts == [
-        "User request:\n台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条"
-    ]
+    assert len(duck_pool.prompts) == 1
+    assert "台积电" in duck_pool.prompts[0]
+    assert "最多返回 5 条" not in duck_pool.prompts[0]
+    assert "请用自然语言完整回答" in duck_pool.prompts[0]
     assert [record.engine for record in recent] == ["duck", "google"]
     assert [record.status for record in recent] == ["ok", "error"]
     assert "too short for the requested list" in (recent[1].error_message or "")

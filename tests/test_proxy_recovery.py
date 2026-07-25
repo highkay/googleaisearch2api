@@ -183,6 +183,8 @@ def test_proxy_auto_recovery_event_trigger_skips_index_discovery(tmp_path: Path)
         _FakeConfigStore(_sticky_config()),
         script_path=script_path,
         command_runner=runner,
+        # Non-empty hot pool keeps event recovery light (inventory-only, capped L0).
+        count_selectable_sessions=lambda _base: 3,
     )
 
     assert recovery.run_once(reason="empty-pool") is True
@@ -192,9 +194,50 @@ def test_proxy_auto_recovery_event_trigger_skips_index_discovery(tmp_path: Path)
     assert "--discover-missing-indices" not in command
     assert "--full-fast-http-sweep" not in command
     assert "--no-full-fast-http-sweep" in command
+    assert "--retry-retired" not in command
     assert command[command.index("--start") + 1] == "1"
     assert command[command.index("--end") + 1] == "500"
     assert command[command.index("--fast-http-scan-limit") + 1] == "40"
+
+
+def test_proxy_auto_recovery_empty_hot_pool_retries_retired_and_full_sweeps(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings(
+        _env_file=None,
+        APP_DATA_DIR=tmp_path,
+        PROXY_AUTO_RECOVERY_ENABLED=True,
+        PROXY_AUTO_RECOVERY_EXISTING_SESSIONS=True,
+        PROXY_AUTO_RECOVERY_RETRY_RETIRED=False,
+        PROXY_AUTO_RECOVERY_START=1,
+        PROXY_AUTO_RECOVERY_END=500,
+        PROXY_AUTO_RECOVERY_EVENT_FAST_HTTP_SCAN_LIMIT=40,
+        PROXY_AUTO_RECOVERY_FAST_HTTP_SCAN_LIMIT=0,
+    )
+    script_path = _make_probe_script(tmp_path)
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout='{"active_sessions": 0}', stderr="")
+
+    recovery = ProxyAutoRecovery(
+        settings,
+        _FakeConfigStore(_sticky_config()),
+        script_path=script_path,
+        command_runner=runner,
+        count_selectable_sessions=lambda _base: 0,
+    )
+
+    assert recovery.run_once(reason="auto-pool-empty") is True
+
+    command = calls[0]
+    assert "--existing-sessions" in command
+    assert "--discover-missing-indices" in command
+    assert "--full-fast-http-sweep" in command
+    assert "--retry-retired" in command
+    # Empty pool escalates to the unlimited full-pool L0 budget, not the event cap.
+    assert command[command.index("--fast-http-scan-limit") + 1] == "0"
 
 
 def test_proxy_auto_recovery_trigger_async_runs_probe_once(tmp_path: Path) -> None:
