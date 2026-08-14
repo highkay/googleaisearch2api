@@ -83,7 +83,9 @@ class HybridGoogleAiRunner(GoogleAiRunner):
         return GoogleAiResult(
             answer_text=answer,
             citations=[],
-            final_url=result.final_url,
+            # Strip the folif query string: it carries the prompt and minted
+            # session tokens that must not leak into request logs or responses.
+            final_url=result.final_url.split("?", 1)[0],
             page_title="",
             body_excerpt=answer[:800],
         )

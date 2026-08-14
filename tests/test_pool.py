@@ -775,3 +775,36 @@ def test_summary_reports_poisoned_and_abandoned() -> None:
         wedge_long.set()
         wedge_short.set()
         pool.close()
+
+
+def test_watchdog_respawns_crashed_worker() -> None:
+    calls = {"count": 0}
+
+    class HealthyRunner:
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            return _result(prompt)
+
+        def close(self) -> None:
+            return None
+
+    def factory() -> HealthyRunner:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("browser launch failed")
+        return HealthyRunner()
+
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=factory,
+        watchdog_poll_interval_s=0.05,
+    )
+    try:
+        # First factory call (during __init__) raises; the watchdog must detect
+        # the dead worker and respawn a healthy replacement.
+        _wait_until(lambda: calls["count"] >= 2)
+        result = pool.execute(ServiceConfig(), "after-crash")
+        assert result.answer_text == "answer for after-crash"
+        assert pool.get_summary().abandoned_workers == 1
+    finally:
+        pool.close()

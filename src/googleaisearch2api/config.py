@@ -74,8 +74,11 @@ class ServiceConfig(BaseModel):
         return _mask_secret(self.browser_proxy_password)
 
     def pool_wait_timeout_ms(self, *, buffer_ms: int = 5_000) -> int:
+        # `_run_prompt_once` can navigate up to 4 times per attempt (initial
+        # query URL, base-page retry, and two query-URL gotos on the
+        # failed-submit path), so budget 4 * browser_timeout_ms per attempt.
         attempt_ms = (
-            (self.browser_timeout_ms * 3)
+            (self.browser_timeout_ms * 4)
             + min(self.answer_timeout_ms, 15_000)
             + self.answer_timeout_ms
             + SUBMIT_OVERHEAD_MS

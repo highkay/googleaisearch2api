@@ -69,6 +69,7 @@ class BrowserPool:
         request_timeout_override_s: float | None = None,
         worker_hard_timeout_s: float | None = None,
         watchdog_poll_interval_s: float = 1.0,
+        dead_worker_respawn_backoff_s: float = 10.0,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
@@ -82,6 +83,8 @@ class BrowserPool:
             raise ValueError("worker_hard_timeout_s must be positive when set")
         if watchdog_poll_interval_s <= 0:
             raise ValueError("watchdog_poll_interval_s must be positive")
+        if dead_worker_respawn_backoff_s <= 0:
+            raise ValueError("dead_worker_respawn_backoff_s must be positive")
 
         self._worker_count = worker_count
         self._runner_factory = runner_factory
@@ -93,6 +96,7 @@ class BrowserPool:
         self._request_timeout_override_s = request_timeout_override_s
         self._worker_hard_timeout_s = worker_hard_timeout_s
         self._watchdog_poll_interval_s = watchdog_poll_interval_s
+        self._dead_worker_respawn_backoff_s = dead_worker_respawn_backoff_s
         self._jobs: queue.Queue[object] = queue.Queue(maxsize=queue_capacity)
         self._lock = threading.Lock()
         self._closed = False
@@ -110,6 +114,7 @@ class BrowserPool:
         self._live_workers: dict[int, threading.Thread] = {}
         self._job_started_at: dict[int, float] = {}
         self._job_deadline: dict[int, float] = {}
+        self._dead_respawn_at: dict[int, float] = {}
         self._abandoned_count = 0
         self._watchdog_stop = threading.Event()
 
@@ -245,8 +250,14 @@ class BrowserPool:
         )
 
     def _worker_main(self, worker_index: int, token: object, holder: str) -> None:
-        runner = self._runner_factory()
         generation_seen = 0
+
+        try:
+            runner = self._runner_factory()
+        except Exception:
+            logger.exception("Browser pool worker {} failed to create its runner", worker_index + 1)
+            self._set_worker_error(worker_index, token, "worker crashed (runner factory)")
+            return
 
         try:
             while True:
@@ -429,7 +440,11 @@ class BrowserPool:
     def _resolve_hard_timeout_s(self, job: _PoolJob) -> float:
         if self._worker_hard_timeout_s is not None:
             return self._worker_hard_timeout_s
-        return job.config.browser_worker_hard_timeout_s
+        # The worker-side blocked-retry loop runs run_prompt up to
+        # (blocked_retry_count + 1) times, so the hard deadline must scale the
+        # same way the request timeout does — otherwise a legitimately
+        # block-retrying worker would be abandoned mid-job by the watchdog.
+        return job.config.browser_worker_hard_timeout_s * (job.blocked_retry_count + 1)
 
     def _resolve_request_timeout_s(
         self,
@@ -447,6 +462,8 @@ class BrowserPool:
         while not self._watchdog_stop.wait(timeout=self._watchdog_poll_interval_s):
             for worker_index in self._find_wedged_workers():
                 self._abandon_worker(worker_index)
+            for worker_index in self._find_dead_workers():
+                self._respawn_dead_worker(worker_index)
 
     def _find_wedged_workers(self) -> list[int]:
         now = time.monotonic()
@@ -458,6 +475,37 @@ class BrowserPool:
                 and (deadline := self._job_deadline.get(worker_index)) is not None
                 and now > deadline
             ]
+
+    def _find_dead_workers(self) -> list[int]:
+        with self._lock:
+            return [
+                worker_index
+                for worker_index in range(self._worker_count)
+                if (thread := self._live_workers.get(worker_index)) is not None
+                and not thread.is_alive()
+                and worker_index not in self._busy_workers
+            ]
+
+    def _respawn_dead_worker(self, worker_index: int) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            thread = self._live_workers.get(worker_index)
+            if thread is None or thread.is_alive():
+                return
+            if worker_index in self._busy_workers:
+                return
+            # Bound the respawn rate so a persistently failing runner factory
+            # cannot turn into a hot thread-spawn loop.
+            last = self._dead_respawn_at.get(worker_index)
+            if last is not None and time.monotonic() - last < self._dead_worker_respawn_backoff_s:
+                return
+            self._dead_respawn_at[worker_index] = time.monotonic()
+            self._slot_epoch[worker_index] += 1
+            self._spawn_worker(worker_index)
+            self._worker_errors[worker_index] = None
+            self._abandoned_count += 1
+            logger.warning("respawned crashed browser worker {}", worker_index + 1)
 
     def _abandon_worker(self, worker_index: int) -> None:
         with self._lock:

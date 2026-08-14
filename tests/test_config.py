@@ -107,7 +107,7 @@ def test_from_settings_maps_ai_mode_http_enabled(tmp_path: Path) -> None:
 
 def test_pool_wait_timeout_covers_patchright_retry_worst_case() -> None:
     config = ServiceConfig(browser_timeout_ms=90_000, answer_timeout_ms=45_000)
-    attempt_ms = (90_000 * 3) + 15_000 + 45_000 + 18_000
+    attempt_ms = (90_000 * 4) + 15_000 + 45_000 + 18_000
     assert config.pool_wait_timeout_ms() >= 2 * attempt_ms
 
 
