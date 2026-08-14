@@ -7,7 +7,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_API_TOKEN = "change-me-google-search"
-SEARCH_ENGINE_OPTIONS = {"google", "duck", "auto"}
+SEARCH_ENGINE_OPTIONS = {"google", "duck", "gemini", "auto"}
 
 
 def _mask_secret(value: str | None) -> str:
@@ -29,6 +29,7 @@ def _normalize_search_engine(value: str) -> str:
 class ServiceConfig(BaseModel):
     default_model: str = "google-search"
     search_engine: str = "google"
+    ai_mode_http_enabled: bool = False
     api_token: str = DEFAULT_API_TOKEN
     browser_headless: bool = True
     browser_user_agent: str | None = None
@@ -73,6 +74,7 @@ class ServiceConfig(BaseModel):
         return cls(
             default_model=settings.default_model,
             search_engine=settings.search_engine,
+            ai_mode_http_enabled=settings.ai_mode_http_enabled,
             api_token=settings.api_token,
             browser_headless=settings.browser_headless,
             browser_user_agent=settings.browser_user_agent or None,
@@ -158,6 +160,10 @@ class AppSettings(BaseSettings):
     proxy_allow_fallback_to_base: bool = Field(
         default=False,
         validation_alias="PROXY_ALLOW_FALLBACK_TO_BASE",
+    )
+    ai_mode_http_enabled: bool = Field(
+        default=False,
+        validation_alias="AI_MODE_HTTP_ENABLED",
     )
 
     browser_proxy_server: str = Field(default="", validation_alias="BROWSER_PROXY_SERVER")

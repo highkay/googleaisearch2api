@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from googleaisearch2api.config import AppSettings
+from googleaisearch2api.config import AppSettings, ServiceConfig
 
 
 def test_browser_worker_settings_support_current_and_legacy_env_names(tmp_path: Path) -> None:
@@ -76,3 +76,30 @@ def test_browser_worker_settings_support_current_and_legacy_env_names(tmp_path: 
     assert default_settings.proxy_auto_recovery_retry_retired is False
     assert default_settings.proxy_auto_recovery_skip_duck_canary is True
     assert default_settings.proxy_auto_recovery_canary_repeats == 1
+
+
+def test_search_engine_accepts_gemini() -> None:
+    config = ServiceConfig(search_engine="gemini")
+    assert config.search_engine == "gemini"
+
+
+def test_ai_mode_http_enabled_defaults_false(tmp_path: Path) -> None:
+    assert ServiceConfig().ai_mode_http_enabled is False
+    default_settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert default_settings.ai_mode_http_enabled is False
+
+
+def test_ai_mode_http_enabled_env_alias(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_MODE_HTTP_ENABLED", "true")
+    settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert settings.ai_mode_http_enabled is True
+
+
+def test_from_settings_maps_ai_mode_http_enabled(tmp_path: Path) -> None:
+    settings = AppSettings(
+        _env_file=None,
+        APP_DATA_DIR=tmp_path,
+        AI_MODE_HTTP_ENABLED=True,
+    )
+    config = ServiceConfig.from_settings(settings)
+    assert config.ai_mode_http_enabled is True
