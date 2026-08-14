@@ -123,6 +123,9 @@ class ServiceConfig(BaseModel):
 class ServiceConfigUpdate(BaseModel):
     default_model: str
     search_engine: str = "google"
+    gemini_upstream_base_url: str | None = None
+    gemini_upstream_api_key: str | None = None
+    gemini_upstream_model: str = "gemini-3.7-flash"
     api_token: str
     browser_headless: bool
     browser_user_agent: str | None = None

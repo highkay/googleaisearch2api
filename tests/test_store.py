@@ -100,6 +100,65 @@ def test_update_config_and_summary(tmp_path: Path) -> None:
     assert recent[0].proxy_iplark_score == 76
 
 
+def _base_update(**overrides: object) -> ServiceConfigUpdate:
+    fields: dict[str, object] = {
+        "default_model": "google-search",
+        "api_token": "secret-token",
+        "browser_headless": True,
+        "browser_locale": "en-US",
+        "browser_base_url": "https://www.google.com/search?udm=50&aep=11&hl=en",
+        "browser_timeout_ms": 90_000,
+        "answer_timeout_ms": 45_000,
+    }
+    fields.update(overrides)
+    return ServiceConfigUpdate(**fields)
+
+
+def test_update_config_persists_gemini_upstream_fields(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    config = store.update_config(
+        _base_update(
+            gemini_upstream_base_url="https://api.example.com/v1",
+            gemini_upstream_api_key="sk-upstream-key",
+            gemini_upstream_model="gemini-3.0-pro",
+        )
+    )
+    assert config.gemini_upstream_base_url == "https://api.example.com/v1"
+    assert config.gemini_upstream_api_key == "sk-upstream-key"
+    assert config.gemini_upstream_model == "gemini-3.0-pro"
+
+    reloaded = store.get_config()
+    assert reloaded.gemini_upstream_base_url == "https://api.example.com/v1"
+    assert reloaded.gemini_upstream_api_key == "sk-upstream-key"
+    assert reloaded.gemini_upstream_model == "gemini-3.0-pro"
+
+
+def test_update_config_blank_gemini_upstream_values_reset_to_defaults(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    initial = store.get_config()
+    assert initial.gemini_upstream_base_url is None
+    assert initial.gemini_upstream_api_key is None
+    assert initial.gemini_upstream_model == "gemini-3.7-flash"
+
+    store.update_config(
+        _base_update(
+            gemini_upstream_base_url="https://api.example.com/v1",
+            gemini_upstream_api_key="sk-upstream-key",
+            gemini_upstream_model="gemini-3.0-pro",
+        )
+    )
+    config = store.update_config(
+        _base_update(
+            gemini_upstream_base_url="",
+            gemini_upstream_api_key=None,
+            gemini_upstream_model="",
+        )
+    )
+    assert config.gemini_upstream_base_url is None
+    assert config.gemini_upstream_api_key is None
+    assert config.gemini_upstream_model == "gemini-3.0-pro"
+
+
 def test_request_logs_redact_secrets_and_trim_old_rows(tmp_path: Path) -> None:
     store = _make_store(tmp_path, request_log_max_rows=2)
     config = store.get_config()

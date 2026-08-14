@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from googleaisearch2api.config import AppSettings, ServiceConfig
+from googleaisearch2api.config import AppSettings, ServiceConfig, ServiceConfigUpdate
 
 
 def test_browser_worker_settings_support_current_and_legacy_env_names(tmp_path: Path) -> None:
@@ -106,6 +106,37 @@ def test_gemini_upstream_knobs_from_env(tmp_path: Path, monkeypatch) -> None:
     config = ServiceConfig.from_settings(settings)
     assert config.gemini_upstream_base_url == "http://127.0.0.1:8081"
     assert config.gemini_upstream_api_key == "sk-key"
+
+
+def test_service_config_update_accepts_gemini_upstream_fields() -> None:
+    update = ServiceConfigUpdate(
+        default_model="google-search",
+        api_token="secret-token",
+        browser_headless=True,
+        browser_locale="en-US",
+        browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+        browser_timeout_ms=90_000,
+        answer_timeout_ms=45_000,
+        gemini_upstream_base_url="https://api.example.com/v1",
+        gemini_upstream_api_key="sk-upstream-key",
+        gemini_upstream_model="gemini-3.0-pro",
+    )
+    assert update.gemini_upstream_base_url == "https://api.example.com/v1"
+    assert update.gemini_upstream_api_key == "sk-upstream-key"
+    assert update.gemini_upstream_model == "gemini-3.0-pro"
+
+    defaults = ServiceConfigUpdate(
+        default_model="google-search",
+        api_token="secret-token",
+        browser_headless=True,
+        browser_locale="en-US",
+        browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+        browser_timeout_ms=90_000,
+        answer_timeout_ms=45_000,
+    )
+    assert defaults.gemini_upstream_base_url is None
+    assert defaults.gemini_upstream_api_key is None
+    assert defaults.gemini_upstream_model == "gemini-3.7-flash"
 
 
 def test_ai_mode_http_enabled_defaults_false(tmp_path: Path) -> None:

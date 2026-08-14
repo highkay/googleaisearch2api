@@ -108,6 +108,11 @@ class ConfigStore:
             browser_proxy_password=row.browser_proxy_password,
             browser_proxy_bypass=row.browser_proxy_bypass,
             resin_sticky_session_enabled=bool(row.resin_sticky_session_enabled),
+            gemini_upstream_base_url=row.gemini_upstream_base_url,
+            gemini_upstream_api_key=row.gemini_upstream_api_key,
+            gemini_upstream_model=(
+                row.gemini_upstream_model or self._defaults.gemini_upstream_model
+            ),
         )
 
     def _get_or_create_row(self, session) -> ServiceConfigRow:
@@ -132,6 +137,9 @@ class ConfigStore:
             browser_proxy_password=self._defaults.browser_proxy_password,
             browser_proxy_bypass=self._defaults.browser_proxy_bypass,
             resin_sticky_session_enabled=self._defaults.resin_sticky_session_enabled,
+            gemini_upstream_base_url=self._defaults.gemini_upstream_base_url,
+            gemini_upstream_api_key=self._defaults.gemini_upstream_api_key,
+            gemini_upstream_model=self._defaults.gemini_upstream_model,
             updated_at=utc_now(),
         )
         session.add(row)
@@ -171,6 +179,11 @@ class ConfigStore:
             row.browser_proxy_password = _coalesce_blank(update.browser_proxy_password)
             row.browser_proxy_bypass = _coalesce_blank(update.browser_proxy_bypass)
             row.resin_sticky_session_enabled = update.resin_sticky_session_enabled
+            row.gemini_upstream_base_url = _coalesce_blank(update.gemini_upstream_base_url)
+            row.gemini_upstream_api_key = _coalesce_blank(update.gemini_upstream_api_key)
+            row.gemini_upstream_model = (
+                update.gemini_upstream_model or ""
+            ).strip() or row.gemini_upstream_model
             row.updated_at = utc_now()
             session.add(row)
             session.commit()

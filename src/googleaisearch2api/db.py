@@ -34,6 +34,9 @@ class ServiceConfigRow(Base):
     browser_proxy_password: Mapped[str | None] = mapped_column(Text, nullable=True)
     browser_proxy_bypass: Mapped[str | None] = mapped_column(Text, nullable=True)
     resin_sticky_session_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    gemini_upstream_base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gemini_upstream_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gemini_upstream_model: Mapped[str] = mapped_column(Text, default="gemini-3.7-flash")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -181,6 +184,11 @@ def _ensure_service_config_columns(engine) -> None:
     _ensure_column(engine, "service_config", "search_engine", "VARCHAR(32) DEFAULT 'google'")
     _ensure_column(engine, "service_config", "browser_user_agent", "TEXT")
     _ensure_column(engine, "service_config", "resin_sticky_session_enabled", "BOOLEAN DEFAULT 0")
+    _ensure_column(engine, "service_config", "gemini_upstream_base_url", "TEXT")
+    _ensure_column(engine, "service_config", "gemini_upstream_api_key", "TEXT")
+    _ensure_column(
+        engine, "service_config", "gemini_upstream_model", "TEXT DEFAULT 'gemini-3.7-flash'"
+    )
 
 
 def _ensure_request_log_columns(engine) -> None:

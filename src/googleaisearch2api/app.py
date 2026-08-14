@@ -1539,6 +1539,9 @@ def create_app() -> FastAPI:
         request: Request,
         default_model: str = Form(...),
         search_engine: str = Form("google"),
+        gemini_upstream_base_url: str = Form(""),
+        gemini_upstream_api_key: str = Form(""),
+        gemini_upstream_model: str = Form("gemini-3.7-flash"),
         api_token: str = Form(""),
         browser_headless: str | None = Form(None),
         browser_user_agent: str = Form(""),
@@ -1563,6 +1566,15 @@ def create_app() -> FastAPI:
         update = ServiceConfigUpdate(
             default_model=default_model,
             search_engine=search_engine,
+            gemini_upstream_base_url=(
+                gemini_upstream_base_url.strip() or current_config.gemini_upstream_base_url
+            ),
+            gemini_upstream_api_key=(
+                gemini_upstream_api_key.strip() or current_config.gemini_upstream_api_key or ""
+            ),
+            gemini_upstream_model=(
+                gemini_upstream_model.strip() or current_config.gemini_upstream_model
+            ),
             api_token=api_token.strip() or current_config.api_token,
             browser_headless=_coerce_checkbox(browser_headless),
             browser_user_agent=browser_user_agent,

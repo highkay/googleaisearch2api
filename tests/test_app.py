@@ -361,6 +361,48 @@ def test_console_settings_preserve_and_clear_hidden_secrets(test_app) -> None:
     assert cleared.browser_proxy_password is None
 
 
+def test_console_settings_persist_and_preserve_gemini_upstream_fields(test_app) -> None:
+    with TestClient(test_app) as client:
+        client.post(
+            "/console/login",
+            data={"console_token": "secret-token", "next": "/console"},
+            follow_redirects=False,
+        )
+
+        save_response = client.post(
+            "/console/settings",
+            data=_build_settings_form(
+                gemini_upstream_base_url="https://api.example.com/v1",
+                gemini_upstream_api_key="sk-upstream-key",
+                gemini_upstream_model="gemini-3.0-pro",
+            ),
+            follow_redirects=False,
+        )
+        saved = test_app.state.services.store.get_config()
+
+        preserve_response = client.post(
+            "/console/settings",
+            data=_build_settings_form(
+                gemini_upstream_base_url="",
+                gemini_upstream_api_key="",
+                # FastAPI swaps an empty-string Form value for its default, so
+                # the blank-model fallback path is exercised with whitespace.
+                gemini_upstream_model="  ",
+            ),
+            follow_redirects=False,
+        )
+        preserved = test_app.state.services.store.get_config()
+
+    assert save_response.status_code == 303
+    assert saved.gemini_upstream_base_url == "https://api.example.com/v1"
+    assert saved.gemini_upstream_api_key == "sk-upstream-key"
+    assert saved.gemini_upstream_model == "gemini-3.0-pro"
+    assert preserve_response.status_code == 303
+    assert preserved.gemini_upstream_base_url == "https://api.example.com/v1"
+    assert preserved.gemini_upstream_api_key == "sk-upstream-key"
+    assert preserved.gemini_upstream_model == "gemini-3.0-pro"
+
+
 def test_network_exposed_app_requires_non_default_api_token(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("APP_HOST", "0.0.0.0")
