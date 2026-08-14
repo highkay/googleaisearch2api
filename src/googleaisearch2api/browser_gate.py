@@ -9,22 +9,25 @@ from contextlib import contextmanager
 class BrowserResourceGate:
     """Serialize expensive browser usage between API workers and recovery probes.
 
-    Shared mode is used by request workers. Exclusive mode is used by proxy auto
-    recovery so canary Chrome processes do not compete with live traffic for PID
-    and memory (observed failure: fork: Resource temporarily unavailable).
+    Shared mode is used by request workers; holders are tracked by name so a
+    wedged worker's slot can be force-released later without dropping a
+    replacement worker's slot (stale late releases are per-name no-ops).
+    Exclusive mode is used by proxy auto recovery so canary Chrome processes do
+    not compete with live traffic for PID and memory (observed failure: fork:
+    Resource temporarily unavailable).
     """
 
     def __init__(self) -> None:
         self._cv = threading.Condition(threading.Lock())
         self._exclusive_holder: str | None = None
-        self._shared_count = 0
+        self._holders: dict[str, float] = {}
 
     def status(self) -> dict[str, object]:
         with self._cv:
             return {
                 "exclusive_holder": self._exclusive_holder,
-                "shared_holders": self._shared_count,
-                "busy": self._exclusive_holder is not None or self._shared_count > 0,
+                "shared_holders": len(self._holders),
+                "busy": self._exclusive_holder is not None or bool(self._holders),
             }
 
     def is_exclusive(self) -> bool:
@@ -32,22 +35,24 @@ class BrowserResourceGate:
             return self._exclusive_holder is not None
 
     def try_acquire_shared(self, holder: str = "worker") -> bool:
-        del holder  # reserved for future diagnostics
         with self._cv:
             if self._exclusive_holder is not None:
                 return False
-            self._shared_count += 1
+            if holder not in self._holders:
+                self._holders[holder] = time.monotonic()
             return True
 
-    def release_shared(self) -> None:
+    def release_shared(self, holder: str = "worker") -> None:
         with self._cv:
-            if self._shared_count > 0:
-                self._shared_count -= 1
+            self._holders.pop(holder, None)
             self._cv.notify_all()
+
+    def release_shared_for(self, holder: str = "worker") -> None:
+        self.release_shared(holder)
 
     def try_acquire_exclusive(self, holder: str = "recovery") -> bool:
         with self._cv:
-            if self._exclusive_holder is not None or self._shared_count > 0:
+            if self._exclusive_holder is not None or self._holders:
                 return False
             self._exclusive_holder = holder
             return True
@@ -60,7 +65,7 @@ class BrowserResourceGate:
     ) -> bool:
         deadline = None if timeout_s is None else time.monotonic() + max(timeout_s, 0.0)
         with self._cv:
-            while self._exclusive_holder is not None or self._shared_count > 0:
+            while self._exclusive_holder is not None or self._holders:
                 if deadline is None:
                     self._cv.wait()
                     continue
@@ -85,7 +90,7 @@ class BrowserResourceGate:
             yield acquired
         finally:
             if acquired:
-                self.release_shared()
+                self.release_shared(holder)
 
     @contextmanager
     def exclusive(
