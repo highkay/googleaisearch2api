@@ -55,3 +55,19 @@ def test_adapt_prompt_for_duck_keeps_clear_natural_questions() -> None:
     assert "请用自然语言完整回答" in duck
     assert "电力板块为什么走强" in duck
 
+
+def test_adapt_prompt_for_engine_gemini_uses_conversational_path() -> None:
+    prompt = (
+        "搜索并用自然语言简要回答，列出关键发现、来源和日期；"
+        "如果没有足够直接相关的信息，直接说明未找到：\n"
+        "美国袭击伊朗 霍尔木兹海峡 A股 风险传导 site:gov.cn "
+        "最多返回 5 条。时间范围必须限制在 2026-07-15 至 2026-07-17（含）之间。"
+    )
+
+    gemini = adapt_prompt_for_engine(prompt, engine="gemini")
+    duck = adapt_prompt_for_engine(prompt, engine="duck")
+
+    assert gemini == duck
+    assert "site:gov.cn" not in gemini
+    assert "最多返回 5 条" not in gemini
+    assert "请用自然语言完整回答" in gemini

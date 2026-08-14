@@ -12,9 +12,7 @@ _SITE_OPERATOR_RE = re.compile(r"(?i)\bsite:\S+")
 _HARD_DATE_WINDOW_RE = re.compile(
     r"(?is)(?:时间范围必须限制在|时间范围优先|时间范围)[^。；;\n]{0,120}"
 )
-_MAX_RESULTS_RE = re.compile(
-    r"(?is)(?:最多返回|最多引用约|最多引用)\s*\d+\s*条[^。；;\n]{0,40}"
-)
+_MAX_RESULTS_RE = re.compile(r"(?is)(?:最多返回|最多引用约|最多引用)\s*\d+\s*条[^。；;\n]{0,40}")
 _STRICT_SOURCE_RE = re.compile(
     r"(?is)(?:只保留直接相关[^。；;\n]{0,40}|限定站点[：:][^。；;\n]+|补充要求[：:][^。；;\n]+)"
 )
@@ -55,12 +53,13 @@ def simplify_search_prompt(prompt: str) -> str:
 def adapt_prompt_for_engine(prompt: str, *, engine: str) -> str:
     """Engine-specific prompt shaping after shared simplify.
 
-    Google can keep retrieval-shaped asks. Duck.ai is a conversational NL assistant:
-    keyword piles, site: operators, and hard SERP constraints cause keyword echo and
-    weak answers in production (2026-07-17 request_logs).
+    Google can keep retrieval-shaped asks. Duck.ai and Gemini web are
+    conversational NL assistants: keyword piles, site: operators, and hard
+    SERP constraints cause keyword echo and weak answers in production
+    (2026-07-17 request_logs).
     """
     simplified = simplify_search_prompt(prompt)
-    if (engine or "").strip().lower() != "duck":
+    if (engine or "").strip().lower() not in {"duck", "gemini"}:
         return simplified
     return _naturalize_for_duck(simplified)
 
