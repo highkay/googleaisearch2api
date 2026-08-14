@@ -8,6 +8,8 @@ from googleaisearch2api.gemini_upstream import (
     GeminiUpstreamClient,
     GeminiUpstreamRuntimeError,
     extract_inline_citations,
+    extract_structured_citations,
+    strip_inline_markdown_links,
 )
 
 
@@ -176,3 +178,59 @@ def test_extract_inline_citations_dedupes_and_normalizes() -> None:
     citations = extract_inline_citations("See https://d.com/1. and [Title](https://d.com/1#frag).")
     assert len(citations) == 1
     assert citations[0].url == "https://d.com/1"
+
+
+def test_extract_structured_citations_parses_dedupes_and_normalizes() -> None:
+    payload = {
+        "citations": [
+            {"url": "https://a.com/x", "title": "Source A", "snippet": "about a"},
+            {"url": "https://a.com/x#:~:text=dup", "title": "Source A dup", "snippet": "dup"},
+            {"url": "https://b.com/y", "title": "Source B", "snippet": "about b"},
+            {"url": "not-a-url", "title": "skip", "snippet": ""},
+            {"url": "https://c.com/z", "title": None, "snippet": None},
+        ]
+    }
+    citations = extract_structured_citations(payload)
+    assert [(c.title, c.url, c.snippet) for c in citations] == [
+        ("Source A", "https://a.com/x", "about a"),
+        ("Source B", "https://b.com/y", "about b"),
+        ("https://c.com/z", "https://c.com/z", ""),
+    ]
+
+
+def test_extract_structured_citations_ignores_non_list() -> None:
+    assert extract_structured_citations({}) == []
+    assert extract_structured_citations({"citations": "nope"}) == []
+    assert extract_structured_citations({"citations": [{"no": "url"}]}) == []
+
+
+def test_run_prefers_structured_citations_over_inline(monkeypatch) -> None:
+    content = "Answer [inline](https://inline.example.com)"
+    payload = {
+        "choices": [{"message": {"content": content}}],
+        "citations": [{"url": "https://grounded.example.com", "title": "Grounded", "snippet": "s"}],
+    }
+    session = _FakeSession(_FakeResponse(200, payload))
+    _install_fake_session(monkeypatch, session)
+    client = GeminiUpstreamClient(base_url="http://127.0.0.1:8081")
+    answer, citations = client.run("q")
+    assert answer == "Answer inline"
+    assert [(c.title, c.url, c.snippet) for c in citations] == [
+        ("Grounded", "https://grounded.example.com", "s")
+    ]
+
+
+def test_strip_inline_markdown_links() -> None:
+    text = "See [A](https://a.com) and [B](https://b.com/x) for details."
+    assert strip_inline_markdown_links(text) == "See A and B for details."
+    assert strip_inline_markdown_links("no links here") == "no links here"
+
+
+def test_run_falls_back_to_inline_when_no_structured_citations(monkeypatch) -> None:
+    content = "Answer [Only](https://inline.example.com)"
+    session = _FakeSession(_FakeResponse(200, _ok_payload(content)))
+    _install_fake_session(monkeypatch, session)
+    client = GeminiUpstreamClient(base_url="http://127.0.0.1:8081")
+    answer, citations = client.run("q")
+    assert answer == content
+    assert [(c.title, c.url) for c in citations] == [("Only", "https://inline.example.com")]

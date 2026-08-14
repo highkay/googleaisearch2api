@@ -18,6 +18,7 @@ class StrictModel(BaseModel):
 class Citation(StrictModel):
     title: str
     url: str
+    snippet: str = ""
 
 
 class GoogleAiResult(StrictModel):
