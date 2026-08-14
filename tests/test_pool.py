@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 
 import pytest
 
-from googleaisearch2api.browser import GoogleAiBlockedError
+from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiUnavailableError
 from googleaisearch2api.config import ServiceConfig
 from googleaisearch2api.hybrid_runner import HybridGoogleAiRunner
 from googleaisearch2api.pool import (
@@ -22,6 +23,15 @@ def _result(prompt: str) -> GoogleAiResult:
         final_url="https://www.google.com/search?udm=50",
         page_title="Google Search",
     )
+
+
+def _wait_until(predicate: Callable[[], bool], timeout_s: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    pytest.fail("condition not met within timeout")
 
 
 def test_browser_pool_runs_one_runner_per_worker_concurrently() -> None:
@@ -176,14 +186,133 @@ def test_browser_pool_times_out_and_recycles_stuck_work() -> None:
         queue_capacity=1,
         runner_factory=BlockingRunner,
         request_timeout_buffer_ms=50,
+        request_timeout_override_s=0.55,
     )
     config = ServiceConfig(browser_timeout_ms=100, answer_timeout_ms=100)
     try:
         with pytest.raises(BrowserPoolTimeoutError):
             pool.execute(config, "stuck")
-        assert pool.get_summary().generation == 1
+        assert pool.get_summary().generation == 0
+        release.set()
+        result = pool.execute(config, "again")
+        assert result.answer_text == "answer for again"
     finally:
         release.set()
+        pool.close()
+
+
+def test_timeout_poisons_only_the_involved_worker() -> None:
+    release = threading.Event()
+
+    class TrackedRunner:
+        def __init__(self) -> None:
+            self.prompt_calls = 0
+            self.close_calls = 0
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            self.prompt_calls += 1
+            release.wait(timeout=5)
+            return _result(prompt)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    fakes: list[TrackedRunner] = []
+
+    def factory() -> TrackedRunner:
+        fake = TrackedRunner()
+        fakes.append(fake)
+        return fake
+
+    pool = BrowserPool(
+        worker_count=2,
+        queue_capacity=2,
+        runner_factory=factory,
+        worker_poll_interval_s=0.05,
+        request_timeout_override_s=0.55,
+    )
+    try:
+        with pytest.raises(BrowserPoolTimeoutError):
+            pool.execute(ServiceConfig(), "stuck")
+
+        _wait_until(lambda: sum(fake.prompt_calls for fake in fakes) == 1)
+        involved = next(fake for fake in fakes if fake.prompt_calls == 1)
+        uninvolved = next(fake for fake in fakes if fake.prompt_calls == 0)
+
+        assert involved.close_calls == 0
+        assert uninvolved.close_calls == 0
+
+        release.set()
+        _wait_until(lambda: involved.close_calls >= 1)
+        assert uninvolved.close_calls == 0
+    finally:
+        release.set()
+        pool.close()
+
+
+def test_timeout_worker_serves_again_after_release() -> None:
+    release = threading.Event()
+
+    class BlockingRunner:
+        def __init__(self) -> None:
+            self.prompt_calls = 0
+            self.close_calls = 0
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            self.prompt_calls += 1
+            release.wait(timeout=5)
+            return _result(prompt)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    runner = BlockingRunner()
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=lambda: runner,
+        worker_poll_interval_s=0.05,
+        request_timeout_override_s=0.55,
+    )
+    try:
+        with pytest.raises(BrowserPoolTimeoutError):
+            pool.execute(ServiceConfig(), "stuck")
+
+        release.set()
+        result = pool.execute(ServiceConfig(), "recovered")
+
+        assert result.answer_text == "answer for recovered"
+        assert runner.prompt_calls == 2
+        assert runner.close_calls == 1
+    finally:
+        release.set()
+        pool.close()
+
+
+def test_pool_recycles_runner_after_unavailable_error() -> None:
+    class UnavailableRunner:
+        def __init__(self) -> None:
+            self.prompt_calls = 0
+            self.close_calls = 0
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            self.prompt_calls += 1
+            raise GoogleAiUnavailableError(
+                "Google AI Mode is not available for this browser session."
+            )
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    runner = UnavailableRunner()
+    pool = BrowserPool(worker_count=1, queue_capacity=1, runner_factory=lambda: runner)
+    try:
+        with pytest.raises(GoogleAiUnavailableError):
+            pool.execute(ServiceConfig(), "nope")
+
+        assert runner.prompt_calls == 1
+        assert runner.close_calls == 1
+    finally:
         pool.close()
 
 

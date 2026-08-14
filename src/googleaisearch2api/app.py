@@ -466,7 +466,6 @@ def _run_google_ai(
                 reason="google-blocked-pool-below-target",
             )
             if selection is not None:
-                services.pool.reset()
                 if attempt_index + 1 < max_attempts:
                     logger.warning(
                         "Google blocked sticky proxy session {}; retrying request "
@@ -510,7 +509,6 @@ def _run_google_ai(
                     config,
                     reason="google-unavailable-pool-below-target",
                 )
-                services.pool.reset()
                 if attempt_index + 1 < max_attempts:
                     logger.warning(
                         "Google sticky proxy session {} returned a non-answer page; "

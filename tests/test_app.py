@@ -1121,7 +1121,7 @@ def test_query_reselects_sticky_proxy_session_after_google_block(test_app) -> No
         "openai.user2",
     ]
     assert pool.blocked_retry_counts == [0, 0]
-    assert pool.reset_calls == 1
+    assert pool.reset_calls == 0
 
     requests_by_proxy = {record.proxy_username: record for record in recent}
     assert requests_by_proxy["openai.user1"].status == "error"
@@ -1203,7 +1203,7 @@ def test_query_reselects_sticky_proxy_session_after_google_non_answer_page(
         "openai.user1",
         "openai.user2",
     ]
-    assert pool.reset_calls == 1
+    assert pool.reset_calls == 0
     requests_by_proxy = {record.proxy_username: record for record in recent}
     assert requests_by_proxy["openai.user1"].status == "error"
     assert requests_by_proxy["openai.user2"].status == "ok"

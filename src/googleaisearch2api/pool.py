@@ -10,7 +10,7 @@ from typing import Protocol
 
 from loguru import logger
 
-from .browser import GoogleAiBlockedError, GoogleAiRunner
+from .browser import GoogleAiBlockedError, GoogleAiRunner, GoogleAiUnavailableError
 from .browser_gate import BrowserResourceGate
 from .config import ServiceConfig
 from .schemas import GoogleAiResult, RuntimePoolSummary
@@ -65,6 +65,7 @@ class BrowserPool:
         blocked_retry_count: int = 0,
         browser_gate: BrowserResourceGate | None = None,
         gate_holder_prefix: str = "browser-worker",
+        request_timeout_override_s: float | None = None,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
@@ -82,11 +83,14 @@ class BrowserPool:
         self._blocked_retry_count = blocked_retry_count
         self._browser_gate = browser_gate
         self._gate_holder_prefix = gate_holder_prefix
+        self._request_timeout_override_s = request_timeout_override_s
         self._jobs: queue.Queue[object] = queue.Queue(maxsize=queue_capacity)
         self._lock = threading.Lock()
         self._closed = False
         self._generation = 0
         self._busy_workers: set[int] = set()
+        self._job_worker: dict[int, int] = {}
+        self._poisoned: set[int] = set()
         self._worker_errors: dict[int, str | None] = {index: None for index in range(worker_count)}
         self._workers: list[threading.Thread] = []
 
@@ -142,7 +146,15 @@ class BrowserPool:
             return future.result(timeout=timeout_s)
         except FutureTimeoutError as exc:
             future.cancel()
-            self.reset()
+            with self._lock:
+                worker_index = self._job_worker.pop(id(job), None)
+                if worker_index is not None:
+                    self._poisoned.add(worker_index)
+                    logger.warning(
+                        "Browser worker {} exceeded the request wait timeout; "
+                        "poisoning it for recycle.",
+                        worker_index + 1,
+                    )
             raise BrowserPoolTimeoutError(
                 "Browser worker exceeded the request wait timeout and was scheduled for recycle."
             ) from exc
@@ -219,6 +231,8 @@ class BrowserPool:
                 if job.future.cancelled():
                     self._jobs.task_done()
                     continue
+                with self._lock:
+                    self._job_worker[id(job)] = worker_index
                 self._mark_worker_busy(worker_index, busy=True)
                 try:
                     result = self._run_prompt_with_gate(worker_index, runner, job)
@@ -232,6 +246,8 @@ class BrowserPool:
                         job.future.set_result(result)
                 finally:
                     self._mark_worker_busy(worker_index, busy=False)
+                    with self._lock:
+                        self._job_worker.pop(id(job), None)
                     self._jobs.task_done()
         except Exception:
             logger.exception("Browser pool worker {} crashed", worker_index + 1)
@@ -287,6 +303,15 @@ class BrowserPool:
                     attempt + 1,
                     blocked_retry_count,
                 )
+            except GoogleAiUnavailableError:
+                try:
+                    runner.close()
+                except Exception:
+                    logger.exception(
+                        "Failed to recycle unavailable browser runner for worker {}",
+                        worker_index + 1,
+                    )
+                raise
 
         raise BrowserPoolError("Browser blocked retry loop exited unexpectedly.")
 
@@ -298,6 +323,21 @@ class BrowserPool:
     ) -> int:
         with self._lock:
             generation = self._generation
+            poisoned = worker_index in self._poisoned
+            if poisoned:
+                self._poisoned.discard(worker_index)
+
+        if poisoned:
+            try:
+                runner.close()
+            except Exception:
+                logger.exception(
+                    "Failed to recycle poisoned browser worker {}",
+                    worker_index + 1,
+                )
+            else:
+                logger.info("Recycled poisoned browser worker {}", worker_index + 1)
+            return generation
 
         if generation == generation_seen:
             return generation_seen
@@ -328,6 +368,8 @@ class BrowserPool:
         *,
         blocked_retry_count: int,
     ) -> float:
+        if self._request_timeout_override_s is not None:
+            return self._request_timeout_override_s
         timeout_ms = config.pool_wait_timeout_ms(buffer_ms=self._request_timeout_buffer_ms)
         timeout_ms *= blocked_retry_count + 1
         return timeout_ms / 1000
