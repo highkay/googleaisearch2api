@@ -1338,3 +1338,13 @@ def test_responses_rejects_tools_field(test_app) -> None:
         )
 
     assert response.status_code == 422
+
+
+def test_healthz_reports_stuck_workers(test_app) -> None:
+    with TestClient(test_app) as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["stuck_workers"] == 0
+    assert payload["poisoned_workers"] == 0

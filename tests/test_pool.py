@@ -7,6 +7,7 @@ from collections.abc import Callable
 import pytest
 
 from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiUnavailableError
+from googleaisearch2api.browser_gate import BrowserResourceGate
 from googleaisearch2api.config import ServiceConfig
 from googleaisearch2api.hybrid_runner import HybridGoogleAiRunner
 from googleaisearch2api.pool import (
@@ -427,4 +428,350 @@ def test_hybrid_runner_slots_into_browser_pool() -> None:
         assert result.answer_text == "answer for hybrid prompt"
         assert runner.prompts == ["hybrid prompt"]
     finally:
+        pool.close()
+
+
+def test_watchdog_abandons_wedged_worker_and_respawns() -> None:
+    wedge = threading.Event()  # set at teardown only, so runner 0 stays wedged
+    runners: list[object] = []
+
+    class WedgeOnceRunner:
+        def __init__(self) -> None:
+            self.prompt_calls = 0
+            self.close_calls = 0
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            self.prompt_calls += 1
+            if runners and runners[0] is self:
+                wedge.wait(timeout=10)
+            return _result(prompt)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    def factory() -> WedgeOnceRunner:
+        runner = WedgeOnceRunner()
+        runners.append(runner)
+        return runner
+
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=factory,
+        worker_hard_timeout_s=0.5,
+        watchdog_poll_interval_s=0.1,
+        request_timeout_override_s=0.2,
+    )
+    try:
+        with pytest.raises(BrowserPoolTimeoutError):
+            pool.execute(ServiceConfig(), "stuck")
+
+        _wait_until(lambda: len(runners) == 2 and pool.get_summary().abandoned_workers == 1)
+
+        result = pool.execute(ServiceConfig(), "fresh")
+        assert result.answer_text == "answer for fresh"
+        assert runners[1].prompt_calls == 1
+    finally:
+        wedge.set()
+        pool.close()
+
+
+def test_watchdog_releases_abandoned_workers_gate_slot() -> None:
+    wedge = threading.Event()
+    gate = BrowserResourceGate()
+    runners: list[object] = []
+
+    class WedgeOnceRunner:
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            if runners and runners[0] is self:
+                wedge.wait(timeout=10)
+            return _result(prompt)
+
+        def close(self) -> None:
+            pass
+
+    def factory() -> WedgeOnceRunner:
+        runner = WedgeOnceRunner()
+        runners.append(runner)
+        return runner
+
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=factory,
+        browser_gate=gate,
+        worker_hard_timeout_s=0.5,
+        watchdog_poll_interval_s=0.1,
+        request_timeout_override_s=0.2,
+    )
+    try:
+        with pytest.raises(BrowserPoolTimeoutError):
+            pool.execute(ServiceConfig(), "stuck")
+
+        _wait_until(lambda: gate.status()["shared_holders"] == 0)
+        assert gate.acquire_exclusive("recovery", timeout_s=0.3) is True
+        gate.release_exclusive("recovery")
+    finally:
+        wedge.set()
+        pool.close()
+
+
+def test_watchdog_does_not_respawn_slow_but_alive_worker() -> None:
+    class SlowOnceRunner:
+        def __init__(self) -> None:
+            self.prompt_calls = 0
+            self.close_calls = 0
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            self.prompt_calls += 1
+            if self.prompt_calls == 1:
+                # Slow but alive: returns after the request timeout (0.2s) yet
+                # well before the hard deadline (2s), so poison-recycle, not
+                # respawn, must handle it.
+                time.sleep(0.4)
+            return _result(prompt)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    runners: list[SlowOnceRunner] = []
+
+    def factory() -> SlowOnceRunner:
+        runner = SlowOnceRunner()
+        runners.append(runner)
+        return runner
+
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=factory,
+        worker_hard_timeout_s=2.0,
+        watchdog_poll_interval_s=0.05,
+        request_timeout_override_s=0.2,
+    )
+    try:
+        with pytest.raises(BrowserPoolTimeoutError):
+            pool.execute(ServiceConfig(), "slow")
+
+        assert pool.get_summary().abandoned_workers == 0
+        assert len(runners) == 1
+
+        _wait_until(lambda: runners[0].close_calls == 1)
+        assert pool.get_summary().abandoned_workers == 0
+        assert len(runners) == 1
+
+        result = pool.execute(ServiceConfig(), "again")
+        assert result.answer_text == "answer for again"
+        assert pool.get_summary().abandoned_workers == 0
+        assert len(runners) == 1
+        assert runners[0].close_calls == 1
+    finally:
+        pool.close()
+
+
+def test_stale_slot_state_does_not_corrupt_replacement() -> None:
+    release_old = threading.Event()
+    release_new = threading.Event()
+    runners: list[object] = []
+
+    class StaleStateRunner:
+        def __init__(self) -> None:
+            self.prompt_calls = 0
+            self.close_calls = 0
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            self.prompt_calls += 1
+            gate_event = release_old if runners and runners[0] is self else release_new
+            gate_event.wait(timeout=10)
+            return _result(prompt)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    def factory() -> StaleStateRunner:
+        runner = StaleStateRunner()
+        runners.append(runner)
+        return runner
+
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=factory,
+        watchdog_poll_interval_s=0.05,
+    )
+    try:
+        wedged_config = ServiceConfig(browser_worker_hard_timeout_seconds=0.5)
+        fresh_config = ServiceConfig(browser_worker_hard_timeout_seconds=60.0)
+        stuck_results: list[GoogleAiResult] = []
+        fresh_results: list[GoogleAiResult] = []
+
+        stuck_thread = threading.Thread(
+            target=lambda: stuck_results.append(pool.execute(wedged_config, "stuck"))
+        )
+        stuck_thread.start()
+        _wait_until(lambda: len(runners) == 2 and pool.get_summary().abandoned_workers == 1)
+
+        fresh_thread = threading.Thread(
+            target=lambda: fresh_results.append(pool.execute(fresh_config, "fresh"))
+        )
+        fresh_thread.start()
+        _wait_until(lambda: runners[1].prompt_calls == 1)
+        assert pool.get_summary().busy_workers == 1
+
+        # The abandoned thread returns late while the replacement is busy; its
+        # stale not-busy write must not clear the replacement's busy state.
+        release_old.set()
+        _wait_until(lambda: runners[0].close_calls == 1)
+        assert pool.get_summary().busy_workers == 1
+        assert pool.get_summary().abandoned_workers == 1
+
+        release_new.set()
+        fresh_thread.join(timeout=5)
+        stuck_thread.join(timeout=5)
+        assert [result.answer_text for result in fresh_results] == ["answer for fresh"]
+        assert [result.answer_text for result in stuck_results] == ["answer for stuck"]
+
+        summary = pool.get_summary()
+        assert summary.busy_workers == 0
+        assert summary.abandoned_workers == 1
+    finally:
+        release_old.set()
+        release_new.set()
+        pool.close()
+
+
+def test_close_with_orphaned_worker_returns() -> None:
+    wedge = threading.Event()
+
+    class WedgedRunner:
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            wedge.wait(timeout=10)
+            return _result(prompt)
+
+        def close(self) -> None:
+            pass
+
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=WedgedRunner,
+        worker_hard_timeout_s=0.5,
+        watchdog_poll_interval_s=0.05,
+        request_timeout_override_s=0.2,
+    )
+    with pytest.raises(BrowserPoolTimeoutError):
+        pool.execute(ServiceConfig(), "stuck")
+    _wait_until(lambda: pool.get_summary().abandoned_workers == 1)
+
+    started_at = time.monotonic()
+    pool.close()
+    elapsed_s = time.monotonic() - started_at
+    wedge.set()  # free the orphaned daemon thread for a clean interpreter exit
+
+    assert elapsed_s < 5.0
+
+
+class _SpyingGate(BrowserResourceGate):
+    def __init__(self) -> None:
+        super().__init__()
+        self._spy_lock = threading.Lock()
+        self.acquired_holders: list[str] = []
+
+    def try_acquire_shared(self, holder: str = "worker") -> bool:
+        with self._spy_lock:
+            self.acquired_holders.append(holder)
+        return super().try_acquire_shared(holder)
+
+
+def test_respawned_worker_uses_new_generation_holder() -> None:
+    wedge = threading.Event()
+    gate = _SpyingGate()
+    runners: list[object] = []
+
+    class WedgeOnceRunner:
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            if runners and runners[0] is self:
+                wedge.wait(timeout=10)
+            return _result(prompt)
+
+        def close(self) -> None:
+            pass
+
+    def factory() -> WedgeOnceRunner:
+        runner = WedgeOnceRunner()
+        runners.append(runner)
+        return runner
+
+    pool = BrowserPool(
+        worker_count=1,
+        queue_capacity=1,
+        runner_factory=factory,
+        browser_gate=gate,
+        worker_hard_timeout_s=0.5,
+        watchdog_poll_interval_s=0.05,
+        request_timeout_override_s=0.2,
+    )
+    try:
+        with pytest.raises(BrowserPoolTimeoutError):
+            pool.execute(ServiceConfig(), "stuck")
+        _wait_until(lambda: pool.get_summary().abandoned_workers == 1)
+
+        result = pool.execute(ServiceConfig(), "fresh")
+        assert result.answer_text == "answer for fresh"
+        _wait_until(lambda: len(set(gate.acquired_holders)) >= 2)
+
+        assert "browser-worker-1-g0" in gate.acquired_holders
+        assert "browser-worker-1-g1" in gate.acquired_holders
+    finally:
+        wedge.set()
+        pool.close()
+
+
+def test_summary_reports_poisoned_and_abandoned() -> None:
+    wedge_long = threading.Event()
+    wedge_short = threading.Event()
+    runners: list[object] = []
+
+    class PromptBlockingRunner:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            gate_event = wedge_long if prompt == "stuck-long" else wedge_short
+            gate_event.wait(timeout=10)
+            return _result(prompt)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    def factory() -> PromptBlockingRunner:
+        runner = PromptBlockingRunner()
+        runners.append(runner)
+        return runner
+
+    pool = BrowserPool(
+        worker_count=2,
+        queue_capacity=2,
+        runner_factory=factory,
+        watchdog_poll_interval_s=0.05,
+        request_timeout_override_s=0.2,
+    )
+    try:
+        long_config = ServiceConfig(browser_worker_hard_timeout_seconds=10.0)
+        short_config = ServiceConfig(browser_worker_hard_timeout_seconds=0.5)
+
+        with pytest.raises(BrowserPoolTimeoutError):
+            pool.execute(long_config, "stuck-long")
+        with pytest.raises(BrowserPoolTimeoutError):
+            pool.execute(short_config, "stuck-short")
+
+        _wait_until(lambda: pool.get_summary().abandoned_workers == 1)
+
+        summary = pool.get_summary()
+        assert summary.poisoned_workers == 1
+        assert summary.abandoned_workers == 1
+        assert len(runners) == 3  # 2 initial + 1 replacement
+    finally:
+        wedge_long.set()
+        wedge_short.set()
         pool.close()

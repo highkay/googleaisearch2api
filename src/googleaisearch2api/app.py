@@ -1178,6 +1178,8 @@ def create_app() -> FastAPI:
             "queued_requests": pool_summary.queued_requests,
             "queue_capacity": pool_summary.queue_capacity,
             "workers_with_errors": pool_summary.workers_with_errors,
+            "poisoned_workers": pool_summary.poisoned_workers,
+            "stuck_workers": pool_summary.abandoned_workers,
             "duck_ai_workers": duck_pool_summary.worker_count,
             "duck_ai_busy_workers": duck_pool_summary.busy_workers,
             "duck_ai_queued_requests": duck_pool_summary.queued_requests,

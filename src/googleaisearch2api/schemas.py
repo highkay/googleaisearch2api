@@ -72,6 +72,8 @@ class RuntimePoolSummary(StrictModel):
     accepting_requests: bool = True
     generation: int = 0
     workers_with_errors: int = 0
+    poisoned_workers: int = 0
+    abandoned_workers: int = 0
 
 
 class ChatContentPart(StrictModel):

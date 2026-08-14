@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -66,6 +67,8 @@ class BrowserPool:
         browser_gate: BrowserResourceGate | None = None,
         gate_holder_prefix: str = "browser-worker",
         request_timeout_override_s: float | None = None,
+        worker_hard_timeout_s: float | None = None,
+        watchdog_poll_interval_s: float = 1.0,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
@@ -75,6 +78,10 @@ class BrowserPool:
             raise ValueError("request_timeout_buffer_ms must be at least 0")
         if blocked_retry_count < 0:
             raise ValueError("blocked_retry_count must be at least 0")
+        if worker_hard_timeout_s is not None and worker_hard_timeout_s <= 0:
+            raise ValueError("worker_hard_timeout_s must be positive when set")
+        if watchdog_poll_interval_s <= 0:
+            raise ValueError("watchdog_poll_interval_s must be positive")
 
         self._worker_count = worker_count
         self._runner_factory = runner_factory
@@ -84,6 +91,8 @@ class BrowserPool:
         self._browser_gate = browser_gate
         self._gate_holder_prefix = gate_holder_prefix
         self._request_timeout_override_s = request_timeout_override_s
+        self._worker_hard_timeout_s = worker_hard_timeout_s
+        self._watchdog_poll_interval_s = watchdog_poll_interval_s
         self._jobs: queue.Queue[object] = queue.Queue(maxsize=queue_capacity)
         self._lock = threading.Lock()
         self._closed = False
@@ -92,17 +101,28 @@ class BrowserPool:
         self._job_worker: dict[int, int] = {}
         self._poisoned: set[int] = set()
         self._worker_errors: dict[int, str | None] = {index: None for index in range(worker_count)}
-        self._workers: list[threading.Thread] = []
+        # Per-slot ownership: the token identifies the thread that currently owns a
+        # slot and is recreated on every watchdog respawn. Once ownership moves,
+        # every late slot-state write by the abandoned thread becomes a no-op.
+        self._slot_owner: dict[int, object] = {}
+        self._slot_epoch: dict[int, int] = {}
+        self._slot_holder: dict[int, str] = {}
+        self._live_workers: dict[int, threading.Thread] = {}
+        self._job_started_at: dict[int, float] = {}
+        self._job_deadline: dict[int, float] = {}
+        self._abandoned_count = 0
+        self._watchdog_stop = threading.Event()
 
         for index in range(worker_count):
-            worker = threading.Thread(
-                target=self._worker_main,
-                name=f"browser-worker-{index + 1}",
-                args=(index,),
-                daemon=True,
-            )
-            worker.start()
-            self._workers.append(worker)
+            self._slot_epoch[index] = 0
+            self._spawn_worker(index)
+
+        self._monitor = threading.Thread(
+            target=self._monitor_main,
+            name="browser-worker-watchdog",
+            daemon=True,
+        )
+        self._monitor.start()
 
     def execute(
         self,
@@ -173,6 +193,9 @@ class BrowserPool:
                 return
             self._closed = True
 
+        self._watchdog_stop.set()
+        self._monitor.join(timeout=2.0)
+
         while True:
             try:
                 item = self._jobs.get_nowait()
@@ -186,10 +209,17 @@ class BrowserPool:
                 job.future.set_exception(BrowserPoolClosedError("Browser pool is shutting down."))
             self._jobs.task_done()
 
-        for _ in self._workers:
+        with self._lock:
+            live_workers = list(self._live_workers.values())
+        for _ in live_workers:
             self._jobs.put(_STOP)
 
-        for worker in self._workers:
+        # Orphaned (abandoned) threads are deliberately NOT joined: they may be
+        # wedged inside a browser call indefinitely. Each worker exclusively owns
+        # its own runner, so an orphan's `finally: runner.close()` runs on its own
+        # thread if/when it ever returns - never cross-thread. Orphans are daemon
+        # threads and die at process exit.
+        for worker in live_workers:
             worker.join(timeout=30)
 
     def get_summary(self) -> RuntimePoolSummary:
@@ -198,6 +228,8 @@ class BrowserPool:
             closed = self._closed
             generation = self._generation
             worker_errors = sum(1 for value in self._worker_errors.values() if value)
+            poisoned_workers = len(self._poisoned)
+            abandoned_workers = self._abandoned_count
 
         return RuntimePoolSummary(
             worker_count=self._worker_count,
@@ -208,9 +240,11 @@ class BrowserPool:
             accepting_requests=not closed,
             generation=generation,
             workers_with_errors=worker_errors,
+            poisoned_workers=poisoned_workers,
+            abandoned_workers=abandoned_workers,
         )
 
-    def _worker_main(self, worker_index: int) -> None:
+    def _worker_main(self, worker_index: int, token: object, holder: str) -> None:
         runner = self._runner_factory()
         generation_seen = 0
 
@@ -219,7 +253,9 @@ class BrowserPool:
                 try:
                     item = self._jobs.get(timeout=self._worker_poll_interval_s)
                 except queue.Empty:
-                    generation_seen = self._sync_generation(worker_index, runner, generation_seen)
+                    generation_seen = self._sync_generation(
+                        worker_index, token, runner, generation_seen
+                    )
                     continue
 
                 if item is _STOP:
@@ -227,31 +263,38 @@ class BrowserPool:
                     break
 
                 job = item
-                generation_seen = self._sync_generation(worker_index, runner, generation_seen)
+                generation_seen = self._sync_generation(
+                    worker_index, token, runner, generation_seen
+                )
                 if job.future.cancelled():
                     self._jobs.task_done()
                     continue
-                with self._lock:
-                    self._job_worker[id(job)] = worker_index
-                self._mark_worker_busy(worker_index, busy=True)
+                self._begin_job(worker_index, token, job)
+                still_owner = True
                 try:
-                    result = self._run_prompt_with_gate(worker_index, runner, job)
+                    result = self._run_prompt_with_gate(worker_index, runner, job, holder)
                 except Exception as exc:
-                    self._set_worker_error(worker_index, repr(exc))
+                    self._set_worker_error(worker_index, token, repr(exc))
                     if not job.future.done():
                         job.future.set_exception(exc)
                 else:
-                    self._set_worker_error(worker_index, None)
+                    self._set_worker_error(worker_index, token, None)
                     if not job.future.done():
                         job.future.set_result(result)
                 finally:
-                    self._mark_worker_busy(worker_index, busy=False)
+                    self._end_job(worker_index, token)
                     with self._lock:
                         self._job_worker.pop(id(job), None)
+                        still_owner = self._slot_owner.get(worker_index) is token
                     self._jobs.task_done()
+                if not still_owner:
+                    # Abandoned: a replacement thread now owns this slot, so this
+                    # thread exits and closes its own runner on its own thread
+                    # (never cross-thread).
+                    break
         except Exception:
             logger.exception("Browser pool worker {} crashed", worker_index + 1)
-            self._set_worker_error(worker_index, "worker crashed")
+            self._set_worker_error(worker_index, token, "worker crashed")
         finally:
             try:
                 runner.close()
@@ -263,11 +306,11 @@ class BrowserPool:
         worker_index: int,
         runner: RunnerProtocol,
         job: _PoolJob,
+        holder: str,
     ) -> GoogleAiResult:
         if self._browser_gate is None:
             return self._run_prompt_with_blocked_retries(worker_index, runner, job)
 
-        holder = f"{self._gate_holder_prefix}-{worker_index + 1}"
         with self._browser_gate.shared(holder) as acquired:
             if not acquired:
                 raise BrowserPoolBusyError(
@@ -318,12 +361,15 @@ class BrowserPool:
     def _sync_generation(
         self,
         worker_index: int,
+        token: object,
         runner: RunnerProtocol,
         generation_seen: int,
     ) -> int:
         with self._lock:
             generation = self._generation
-            poisoned = worker_index in self._poisoned
+            poisoned = (
+                self._slot_owner.get(worker_index) is token and worker_index in self._poisoned
+            )
             if poisoned:
                 self._poisoned.discard(worker_index)
 
@@ -351,16 +397,39 @@ class BrowserPool:
             )
         return generation
 
-    def _mark_worker_busy(self, worker_index: int, *, busy: bool) -> None:
+    def _begin_job(self, worker_index: int, token: object, job: _PoolJob) -> None:
+        started_at = time.monotonic()
         with self._lock:
-            if busy:
-                self._busy_workers.add(worker_index)
-            else:
-                self._busy_workers.discard(worker_index)
+            self._job_worker[id(job)] = worker_index
+            if self._slot_owner.get(worker_index) is not token:
+                return
+            self._busy_workers.add(worker_index)
+            self._job_started_at[worker_index] = started_at
+            self._job_deadline[worker_index] = started_at + self._resolve_hard_timeout_s(job)
 
-    def _set_worker_error(self, worker_index: int, error_message: str | None) -> None:
+    def _end_job(self, worker_index: int, token: object) -> None:
         with self._lock:
+            if self._slot_owner.get(worker_index) is not token:
+                return
+            self._busy_workers.discard(worker_index)
+            self._job_started_at.pop(worker_index, None)
+            self._job_deadline.pop(worker_index, None)
+
+    def _set_worker_error(
+        self,
+        worker_index: int,
+        token: object,
+        error_message: str | None,
+    ) -> None:
+        with self._lock:
+            if self._slot_owner.get(worker_index) is not token:
+                return
             self._worker_errors[worker_index] = error_message
+
+    def _resolve_hard_timeout_s(self, job: _PoolJob) -> float:
+        if self._worker_hard_timeout_s is not None:
+            return self._worker_hard_timeout_s
+        return job.config.browser_worker_hard_timeout_s
 
     def _resolve_request_timeout_s(
         self,
@@ -373,3 +442,61 @@ class BrowserPool:
         timeout_ms = config.pool_wait_timeout_ms(buffer_ms=self._request_timeout_buffer_ms)
         timeout_ms *= blocked_retry_count + 1
         return timeout_ms / 1000
+
+    def _monitor_main(self) -> None:
+        while not self._watchdog_stop.wait(timeout=self._watchdog_poll_interval_s):
+            for worker_index in self._find_wedged_workers():
+                self._abandon_worker(worker_index)
+
+    def _find_wedged_workers(self) -> list[int]:
+        now = time.monotonic()
+        with self._lock:
+            return [
+                worker_index
+                for worker_index in range(self._worker_count)
+                if worker_index in self._busy_workers
+                and (deadline := self._job_deadline.get(worker_index)) is not None
+                and now > deadline
+            ]
+
+    def _abandon_worker(self, worker_index: int) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            deadline = self._job_deadline.get(worker_index)
+            if worker_index not in self._busy_workers or deadline is None:
+                return
+            if time.monotonic() <= deadline:
+                return
+            old_holder = self._slot_holder[worker_index]
+            self._slot_epoch[worker_index] += 1
+            self._spawn_worker(worker_index)
+            self._busy_workers.discard(worker_index)
+            self._poisoned.discard(worker_index)
+            self._worker_errors[worker_index] = None
+            self._job_started_at.pop(worker_index, None)
+            self._job_deadline.pop(worker_index, None)
+            self._abandoned_count += 1
+            logger.warning("abandoned wedged browser worker {}", worker_index + 1)
+
+        # Released outside the lock: freeing the wedged worker's shared gate slot
+        # matters more than the zombie browser it may still hold (surfaced via
+        # healthz) - a permanently held gate would block recovery forever.
+        if self._browser_gate is not None:
+            self._browser_gate.release_shared_for(old_holder)
+        logger.info("spawned replacement worker {}", worker_index + 1)
+
+    def _spawn_worker(self, worker_index: int) -> None:
+        # Caller must hold self._lock.
+        token = object()
+        holder = f"{self._gate_holder_prefix}-{worker_index + 1}-g{self._slot_epoch[worker_index]}"
+        worker = threading.Thread(
+            target=self._worker_main,
+            name=f"browser-worker-{worker_index + 1}",
+            args=(worker_index, token, holder),
+            daemon=True,
+        )
+        self._slot_owner[worker_index] = token
+        self._slot_holder[worker_index] = holder
+        self._live_workers[worker_index] = worker
+        worker.start()
