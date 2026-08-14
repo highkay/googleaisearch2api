@@ -105,7 +105,7 @@ uv run googleaisearch2api
 - `API_TOKEN`: OpenAI 兼容接口的 Bearer Token
 - Console 使用同一个 `API_TOKEN` 登录；敏感字段默认不会回显到页面里
 - `DEFAULT_MODEL`: 对外暴露的模型名
-- `SEARCH_ENGINE`: 搜索引擎选择，支持 `google`、`duck`、`auto`；`auto` 会优先跑 Google，遇到上游不可用类错误再降级到 Duck.ai。
+- `SEARCH_ENGINE`: 搜索引擎选择，支持 `google`、`gemini`、`duck`、`auto`；`auto` 会优先跑 Google，遇到上游不可用类错误再降级到 Gemini web，最后兜底到 Duck.ai。
 - `BROWSER_HEADLESS`: 是否无头运行
 - `BROWSER_USER_AGENT`: 可选，覆盖浏览器级 UA；留空时服务会给 headless Chrome 使用普通 Chrome UA
 - `BROWSER_WORKERS`: 常驻浏览器 worker 数
@@ -115,6 +115,7 @@ uv run googleaisearch2api
 - `DUCK_AI_WORKERS`: Duck.ai 独立浏览器 worker 数；默认 1。实测 Duck.ai 对并发 burst 更敏感，不建议直接拉高。
 - `DUCK_AI_QUEUE_SIZE`: Duck.ai 队列长度；默认 2。
 - `DUCK_AI_COOLDOWN_SECONDS`: Duck.ai 返回限流时的本地熔断冷却时间；默认 120。
+- `AI_MODE_HTTP_ENABLED`: 是否启用 Google AI Mode 混合 HTTP 快路径（浏览器铸 folif token + curl_cffi 查询）；默认 `false`，未验证协议，需先用 `scripts/probe_ai_mode_tokens.py` 测 token TTL 后再开启。
 - `PROXY_AUTO_RECOVERY_ENABLED`: 启用 sticky session 自动恢复；恢复任务默认只做少量 Google canary，不跑 egress/IPLark，以避免恢复过程本身放大浏览器资源占用。
 - `PROXY_AUTO_RECOVERY_MAX_PROBES`: 单次自动恢复最多执行多少个昂贵探针；默认 3。
 - `PROXY_AUTO_RECOVERY_TARGET_ACTIVE`: 触发恢复时希望补到的 Google selectable session 数；这是恢复目标，不是保证值，实际数量仍取决于当前代理出口是否被 Google block。

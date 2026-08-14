@@ -111,9 +111,7 @@ def _emit_report(
     out_path: str | None,
 ) -> None:
     ttl_queries = sum(1 for attempt in attempts if attempt["kind"] == "answer")
-    ttl_seconds = sum(
-        attempt["elapsed_s"] for attempt in attempts if attempt["kind"] == "answer"
-    )
+    ttl_seconds = sum(attempt["elapsed_s"] for attempt in attempts if attempt["kind"] == "answer")
     summary = f"[probe] ttl: {ttl_queries} consecutive answer(s), {ttl_seconds:.2f}s"
     if stale_reason:
         summary += f"; first non-answer kind: {stale_reason}"
@@ -170,9 +168,7 @@ def main() -> None:
         minted, tokens = _mint_tokens(runner, config)
         if not tokens.is_complete():
             missing = ", ".join(
-                name
-                for name in ("xsrf_folif_token", "stkp")
-                if not getattr(tokens, name)
+                name for name in ("xsrf_folif_token", "stkp") if not getattr(tokens, name)
             )
             _fail(f"harvested tokens are incomplete: missing required {missing}", EXIT_MINT_FAILED)
 
