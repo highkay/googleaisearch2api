@@ -7,6 +7,7 @@ import pytest
 
 from googleaisearch2api.browser import GoogleAiBlockedError
 from googleaisearch2api.config import ServiceConfig
+from googleaisearch2api.hybrid_runner import HybridGoogleAiRunner
 from googleaisearch2api.pool import (
     BrowserPool,
     BrowserPoolSaturatedError,
@@ -272,5 +273,29 @@ def test_browser_pool_does_not_retry_blocked_sessions_by_default() -> None:
 
         assert runner.prompt_calls == 1
         assert runner.close_calls == 1
+    finally:
+        pool.close()
+
+
+def test_hybrid_runner_slots_into_browser_pool() -> None:
+    class FakeHybridRunner(HybridGoogleAiRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: list[str] = []
+
+        def run_prompt(self, config: ServiceConfig, prompt: str) -> GoogleAiResult:
+            self.prompts.append(prompt)
+            return _result(prompt)
+
+        def close(self) -> None:
+            pass
+
+    runner = FakeHybridRunner()
+    pool = BrowserPool(worker_count=1, queue_capacity=1, runner_factory=lambda: runner)
+    try:
+        result = pool.execute(ServiceConfig(ai_mode_http_enabled=True), "hybrid prompt")
+
+        assert result.answer_text == "answer for hybrid prompt"
+        assert runner.prompts == ["hybrid prompt"]
     finally:
         pool.close()
