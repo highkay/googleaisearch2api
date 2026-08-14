@@ -6,6 +6,8 @@ services:
     cpus: "${GOOGLEAISEARCH2API_CPUS:-2.0}"
     mem_limit: ${GOOGLEAISEARCH2API_MEMORY_LIMIT:-3g}
     pids_limit: ${GOOGLEAISEARCH2API_PIDS_LIMIT:-512}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${APP_PORT:-9010}:8000"
     environment:
@@ -15,6 +17,9 @@ services:
       APP_DATA_DIR: /app/data
       DEFAULT_MODEL: ${DEFAULT_MODEL:-google-search}
       SEARCH_ENGINE: ${SEARCH_ENGINE:-google}
+      GEMINI_UPSTREAM_BASE_URL: ${GEMINI_UPSTREAM_BASE_URL:-}
+      GEMINI_UPSTREAM_API_KEY: ${GEMINI_UPSTREAM_API_KEY:-}
+      GEMINI_UPSTREAM_MODEL: ${GEMINI_UPSTREAM_MODEL:-gemini-3.7-flash}
       API_TOKEN: ${API_TOKEN:?set API_TOKEN in .env or shell before starting compose}
       BROWSER_HEADLESS: ${BROWSER_HEADLESS:-true}
       BROWSER_USER_AGENT: ${BROWSER_USER_AGENT:-}
@@ -61,7 +66,7 @@ services:
       PROXY_AUTO_RECOVERY_END: ${PROXY_AUTO_RECOVERY_END:-1000}
     volumes:
       - googleaisearch2api-data:/app/data
-    restart: unless-stopped
+    restart: always
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
       interval: 30s
