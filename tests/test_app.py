@@ -7,8 +7,14 @@ from fastapi.testclient import TestClient
 
 from googleaisearch2api.app import create_app
 from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiUnavailableError
-from googleaisearch2api.config import DEFAULT_API_TOKEN, ServiceConfigUpdate, get_settings
+from googleaisearch2api.config import (
+    DEFAULT_API_TOKEN,
+    ServiceConfig,
+    ServiceConfigUpdate,
+    get_settings,
+)
 from googleaisearch2api.duck_ai import DuckAiTimeoutError
+from googleaisearch2api.gemini_upstream import GeminiUpstreamRuntimeError
 from googleaisearch2api.gemini_web import GeminiWebRateLimitedError
 from googleaisearch2api.schemas import Citation, GoogleAiResult
 
@@ -150,6 +156,60 @@ def _install_fake_gemini_client(
     return fake
 
 
+class FakeGeminiUpstreamClient:
+    """Stand-in for `app.GeminiUpstreamClient` (pure HTTP, no browser pool)."""
+
+    def __init__(
+        self,
+        answer_text: str = "Gemini upstream answer.",
+        outcomes: list[tuple[str, list[Citation]] | Exception] | None = None,
+    ) -> None:
+        self.answer_text = answer_text
+        self.outcomes = list(outcomes or [])
+        self.prompts: list[str] = []
+        self.kwargs: list[dict[str, object]] = []
+
+    def __call__(self, **kwargs: object) -> FakeGeminiUpstreamClient:
+        self.kwargs.append(kwargs)
+        return self
+
+    def run(self, prompt: str, *, model: str | None = None) -> tuple[str, list[Citation]]:
+        self.prompts.append(prompt)
+        if self.outcomes:
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        return self.answer_text, [
+            Citation(title="Upstream source", url="https://upstream.example.com")
+        ]
+
+
+def _install_fake_gemini_upstream_client(
+    app,
+    monkeypatch,
+    answer_text: str = "Gemini upstream answer.",
+    outcomes: list[tuple[str, list[Citation]] | Exception] | None = None,
+) -> FakeGeminiUpstreamClient:
+    fake = FakeGeminiUpstreamClient(answer_text=answer_text, outcomes=outcomes)
+    monkeypatch.setattr("googleaisearch2api.app.GeminiUpstreamClient", fake)
+    return fake
+
+
+def _set_gemini_upstream_base_url(
+    app,
+    monkeypatch,
+    base_url: str | None,
+) -> None:
+    store = app.state.services.store
+    original_get_config = store.get_config
+
+    def patched_get_config() -> ServiceConfig:
+        return original_get_config().model_copy(update={"gemini_upstream_base_url": base_url})
+
+    monkeypatch.setattr(store, "get_config", patched_get_config)
+
+
 def _install_fake_pool(
     app,
     answer_text: str = "Browser-backed answer.",
@@ -208,6 +268,9 @@ def test_app(tmp_path, monkeypatch) -> Iterator:
     monkeypatch.setenv("BROWSER_PROXY_USERNAME", "")
     monkeypatch.setenv("BROWSER_PROXY_PASSWORD", "")
     monkeypatch.setenv("RESIN_STICKY_SESSION_ENABLED", "false")
+    # Isolate auto routing from any developer-configured local gateway.
+    monkeypatch.setenv("GEMINI_UPSTREAM_BASE_URL", "")
+    monkeypatch.setenv("GEMINI_UPSTREAM_API_KEY", "")
     get_settings.cache_clear()
     app = create_app()
     try:
@@ -414,6 +477,121 @@ def test_query_gemini_engine_dispatches_to_gemini_client(test_app, monkeypatch) 
     assert gemini_client.proxies == [None]
     assert recent[0].engine == "gemini"
     assert recent[0].status == "ok"
+
+
+def test_query_engine_gemini_upstream_dispatches(test_app, monkeypatch) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "gemini-upstream")
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck answer.")
+        upstream_client = _install_fake_gemini_upstream_client(
+            test_app,
+            monkeypatch,
+            answer_text="Gemini upstream answer.",
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"] == "Gemini upstream answer."
+    assert payload["citations"][0]["url"] == "https://upstream.example.com"
+    assert google_pool.prompts == []
+    assert duck_pool.prompts == []
+    assert len(upstream_client.prompts) == 1
+    assert "natural language" in upstream_client.prompts[0].lower()
+    assert len(upstream_client.kwargs) == 1
+    assert upstream_client.kwargs[0]["base_url"] == ""
+    assert upstream_client.kwargs[0]["api_key"] == ""
+    assert upstream_client.kwargs[0]["model"] == "gemini-3.7-flash"
+    assert recent[0].engine == "gemini-upstream"
+    assert recent[0].status == "ok"
+
+
+def test_query_auto_prefers_gemini_upstream_when_configured(test_app, monkeypatch) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "auto")
+        _set_gemini_upstream_base_url(test_app, monkeypatch, "http://127.0.0.1:8081")
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck answer.")
+        upstream_client = _install_fake_gemini_upstream_client(
+            test_app,
+            monkeypatch,
+            answer_text="Gemini upstream answer.",
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Gemini upstream answer."
+    assert google_pool.prompts == []
+    assert duck_pool.prompts == []
+    assert len(upstream_client.prompts) == 1
+    assert len(upstream_client.kwargs) == 1
+    assert upstream_client.kwargs[0]["base_url"] == "http://127.0.0.1:8081"
+    assert recent[0].engine == "gemini-upstream"
+    assert recent[0].status == "ok"
+
+
+def test_query_auto_falls_back_to_duck_when_gemini_upstream_fails(
+    test_app,
+    monkeypatch,
+) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "auto")
+        _set_gemini_upstream_base_url(test_app, monkeypatch, "http://127.0.0.1:8081")
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback.")
+        _install_fake_gemini_upstream_client(
+            test_app,
+            monkeypatch,
+            outcomes=[GeminiUpstreamRuntimeError("gateway unavailable (test).")],
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Duck fallback."
+    assert google_pool.prompts == []
+    assert len(duck_pool.prompts) == 1
+    assert "Question" in duck_pool.prompts[0]
+    assert [record.engine for record in recent] == ["duck", "gemini-upstream"]
+    assert [record.status for record in recent] == ["ok", "error"]
+
+
+def test_query_auto_uses_google_chain_when_upstream_not_configured(
+    test_app,
+    monkeypatch,
+) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "auto")
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck answer.")
+        upstream_client = _install_fake_gemini_upstream_client(test_app, monkeypatch)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Google answer."
+    assert len(google_pool.prompts) == 1
+    assert duck_pool.prompts == []
+    assert upstream_client.kwargs == []
+    assert upstream_client.prompts == []
 
 
 def test_query_duck_engine_uses_duck_pool_only(test_app) -> None:

@@ -64,6 +64,13 @@ def adapt_prompt_for_engine(prompt: str, *, engine: str) -> str:
     return _naturalize_for_duck(simplified)
 
 
+def adapt_prompt_for_gemini_upstream(prompt: str) -> str:
+    """Gemini web gateway answers without structured citations, so the model
+    must emit source links inline for us to lift them into citations."""
+    base = adapt_prompt_for_engine(prompt, engine="gemini")
+    return f"{base}\n\nCite each key fact with an inline markdown source link [Title](URL)."
+
+
 def _naturalize_for_duck(prompt: str) -> str:
     stripped = prompt.strip()
     if not stripped:

@@ -7,7 +7,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_API_TOKEN = "change-me-google-search"
-SEARCH_ENGINE_OPTIONS = {"google", "duck", "gemini", "auto"}
+SEARCH_ENGINE_OPTIONS = {"google", "duck", "gemini", "gemini-upstream", "auto"}
 
 # GoogleAiRunner.run_prompt retries ONCE on PatchrightError, so the pool wait
 # timeout must cover two worst-case attempts. Constants live here (not in
@@ -38,6 +38,9 @@ class ServiceConfig(BaseModel):
     default_model: str = "google-search"
     search_engine: str = "google"
     ai_mode_http_enabled: bool = False
+    gemini_upstream_base_url: str | None = None
+    gemini_upstream_api_key: str | None = None
+    gemini_upstream_model: str = "gemini-3.7-flash"
     api_token: str = DEFAULT_API_TOKEN
     browser_headless: bool = True
     browser_user_agent: str | None = None
@@ -98,6 +101,9 @@ class ServiceConfig(BaseModel):
             default_model=settings.default_model,
             search_engine=settings.search_engine,
             ai_mode_http_enabled=settings.ai_mode_http_enabled,
+            gemini_upstream_base_url=settings.gemini_upstream_base_url or None,
+            gemini_upstream_api_key=settings.gemini_upstream_api_key or None,
+            gemini_upstream_model=settings.gemini_upstream_model,
             api_token=settings.api_token,
             browser_headless=settings.browser_headless,
             browser_user_agent=settings.browser_user_agent or None,
@@ -192,6 +198,18 @@ class AppSettings(BaseSettings):
     ai_mode_http_enabled: bool = Field(
         default=False,
         validation_alias="AI_MODE_HTTP_ENABLED",
+    )
+    gemini_upstream_base_url: str | None = Field(
+        default=None,
+        validation_alias="GEMINI_UPSTREAM_BASE_URL",
+    )
+    gemini_upstream_api_key: str | None = Field(
+        default=None,
+        validation_alias="GEMINI_UPSTREAM_API_KEY",
+    )
+    gemini_upstream_model: str = Field(
+        default="gemini-3.7-flash",
+        validation_alias="GEMINI_UPSTREAM_MODEL",
     )
 
     browser_proxy_server: str = Field(default="", validation_alias="BROWSER_PROXY_SERVER")

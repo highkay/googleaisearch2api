@@ -83,6 +83,31 @@ def test_search_engine_accepts_gemini() -> None:
     assert config.search_engine == "gemini"
 
 
+def test_search_engine_accepts_gemini_upstream() -> None:
+    config = ServiceConfig(search_engine="gemini-upstream")
+    assert config.search_engine == "gemini-upstream"
+
+
+def test_gemini_upstream_knobs_default_none(tmp_path: Path) -> None:
+    settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert settings.gemini_upstream_base_url is None
+    assert settings.gemini_upstream_api_key is None
+    config = ServiceConfig.from_settings(settings)
+    assert config.gemini_upstream_base_url is None
+    assert config.gemini_upstream_api_key is None
+
+
+def test_gemini_upstream_knobs_from_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_UPSTREAM_BASE_URL", "http://127.0.0.1:8081")
+    monkeypatch.setenv("GEMINI_UPSTREAM_API_KEY", "sk-key")
+    settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert settings.gemini_upstream_base_url == "http://127.0.0.1:8081"
+    assert settings.gemini_upstream_api_key == "sk-key"
+    config = ServiceConfig.from_settings(settings)
+    assert config.gemini_upstream_base_url == "http://127.0.0.1:8081"
+    assert config.gemini_upstream_api_key == "sk-key"
+
+
 def test_ai_mode_http_enabled_defaults_false(tmp_path: Path) -> None:
     assert ServiceConfig().ai_mode_http_enabled is False
     default_settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)

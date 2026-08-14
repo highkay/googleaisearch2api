@@ -37,6 +37,7 @@ from .config import (
 from .db import create_db_engine, create_session_factory, create_tables
 from .duck_ai import DuckAiRateLimitedError, DuckAiRunner, DuckAiRuntimeError, DuckAiTimeoutError
 from .fast_proxy_probe import build_proxy_url
+from .gemini_upstream import GeminiUpstreamClient, GeminiUpstreamRuntimeError
 from .gemini_web import (
     GeminiWebBlockedError,
     GeminiWebClient,
@@ -61,7 +62,11 @@ from .pool import (
     BrowserPoolSaturatedError,
     BrowserPoolTimeoutError,
 )
-from .prompting import adapt_prompt_for_engine, simplify_search_prompt
+from .prompting import (
+    adapt_prompt_for_engine,
+    adapt_prompt_for_gemini_upstream,
+    simplify_search_prompt,
+)
 from .proxy_recovery import ProxyAutoRecovery
 from .proxy_sessions import (
     ProxySessionConfigError,
@@ -878,6 +883,83 @@ def _run_gemini_ai(
         ) from exc
 
 
+def _run_gemini_upstream_ai(
+    *,
+    request: Request,
+    endpoint: str,
+    prompt: str,
+    stream: bool,
+    requested_model: str | None,
+) -> tuple[ServiceConfig, str, str, object]:
+    services = get_services(request)
+    config = services.store.get_config()
+    model_name = _resolve_model(requested_model, config)
+    # gemini-upstream answers without structured citations; ask for inline
+    # markdown source links so extract_inline_citations can lift them.
+    upstream_prompt = adapt_prompt_for_gemini_upstream(prompt)
+    request_id = services.store.start_request(
+        endpoint=endpoint,
+        engine="gemini-upstream",
+        model_name=model_name,
+        prompt_preview=upstream_prompt,
+        client_ip=request.client.host if request.client else None,
+        stream=stream,
+        config=config,
+    )
+    client = GeminiUpstreamClient(
+        base_url=config.gemini_upstream_base_url or "",
+        api_key=config.gemini_upstream_api_key or "",
+        timeout_s=config.answer_timeout_ms / 1000.0,
+        model=config.gemini_upstream_model or "gemini-3.7-flash",
+    )
+    started_at = time.perf_counter()
+    try:
+        answer, citations = client.run(upstream_prompt)
+        result = GoogleAiResult(
+            answer_text=answer,
+            citations=citations,
+            final_url=config.gemini_upstream_base_url or "",
+            page_title="",
+            body_excerpt=answer[:800],
+        )
+        # Keep JSON-shape normalization against the original caller prompt when needed.
+        result = _normalize_result_for_prompt(prompt, result)
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        quality = assess_search_answer_quality(
+            upstream_prompt,
+            result.answer_text,
+            result.citations,
+        )
+        if not quality.ok:
+            message = f"Gemini upstream answer failed quality check: {quality.reason}"
+            services.store.finish_request_error(
+                request_id,
+                message,
+                duration_ms,
+                result=result,
+            )
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
+        services.store.finish_request_success(request_id, result, duration_ms)
+        return config, model_name, request_id, result
+    except HTTPException:
+        raise
+    except GeminiUpstreamRuntimeError as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.store.finish_request_error(request_id, str(exc), duration_ms)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Gemini upstream failed: {exc}",
+        ) from exc
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        services.store.finish_request_error(request_id, repr(exc), duration_ms)
+        logger.exception("Unhandled gemini-upstream request failure")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unhandled gemini-upstream request failure.",
+        ) from exc
+
+
 def _should_try_duck_fallback(exc: HTTPException) -> bool:
     return exc.status_code in {
         status.HTTP_502_BAD_GATEWAY,
@@ -990,6 +1072,14 @@ def _run_search_ai(
             stream=stream,
             requested_model=requested_model,
         )
+    if config.search_engine == "gemini-upstream":
+        return _run_gemini_upstream_ai(
+            request=request,
+            endpoint=endpoint,
+            prompt=prompt,
+            stream=stream,
+            requested_model=requested_model,
+        )
     if config.search_engine != "auto":
         return _run_google_ai(
             request=request,
@@ -998,6 +1088,41 @@ def _run_search_ai(
             stream=stream,
             requested_model=requested_model,
         )
+
+    if config.gemini_upstream_base_url:
+        try:
+            return _run_gemini_upstream_ai(
+                request=request,
+                endpoint=endpoint,
+                prompt=prompt,
+                stream=stream,
+                requested_model=requested_model,
+            )
+        except HTTPException as upstream_exc:
+            if not _should_try_duck_fallback(upstream_exc):
+                raise
+            logger.warning(
+                "Gemini upstream failed with {}; trying Duck.ai fallback: {}",
+                upstream_exc.status_code,
+                upstream_exc.detail,
+            )
+            try:
+                return _run_duck_ai(
+                    request=request,
+                    endpoint=endpoint,
+                    prompt=prompt,
+                    stream=stream,
+                    requested_model=requested_model,
+                )
+            except HTTPException as duck_exc:
+                detail = (
+                    "Gemini upstream and Duck.ai failed. "
+                    f"Gemini upstream: {upstream_exc.detail}; Duck.ai: {duck_exc.detail}"
+                )
+                raise HTTPException(
+                    status_code=duck_exc.status_code,
+                    detail=detail,
+                ) from duck_exc
 
     if _should_route_auto_directly_to_duck(services, config):
         if services.proxy_auto_recovery.is_running() or services.browser_gate.is_exclusive():

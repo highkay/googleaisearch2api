@@ -1,4 +1,8 @@
-from googleaisearch2api.prompting import adapt_prompt_for_engine, simplify_search_prompt
+from googleaisearch2api.prompting import (
+    adapt_prompt_for_engine,
+    adapt_prompt_for_gemini_upstream,
+    simplify_search_prompt,
+)
 
 
 def test_simplify_search_prompt_turns_json_results_wrapper_into_natural_language() -> None:
@@ -71,3 +75,9 @@ def test_adapt_prompt_for_engine_gemini_uses_conversational_path() -> None:
     assert "site:gov.cn" not in gemini
     assert "最多返回 5 条" not in gemini
     assert "请用自然语言完整回答" in gemini
+
+
+def test_adapt_prompt_for_gemini_upstream_requests_inline_links() -> None:
+    out = adapt_prompt_for_gemini_upstream("What is X?")
+    assert "markdown source link [Title](URL)" in out
+    assert "What is X?" in out
