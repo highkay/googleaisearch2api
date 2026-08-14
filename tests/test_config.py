@@ -62,7 +62,7 @@ def test_browser_worker_settings_support_current_and_legacy_env_names(tmp_path: 
     assert default_settings.proxy_auto_recovery_existing_sessions is True
     assert default_settings.proxy_auto_recovery_existing_session_limit == 0
     assert default_settings.proxy_auto_recovery_max_probes == 25
-    assert default_settings.proxy_auto_recovery_timeout_seconds == 1_800
+    assert default_settings.proxy_auto_recovery_timeout_seconds == 300
     assert default_settings.proxy_auto_recovery_min_trigger_interval_seconds == 900
     assert default_settings.proxy_auto_recovery_skip_egress is True
     assert default_settings.proxy_auto_recovery_skip_iplark is True
@@ -103,3 +103,21 @@ def test_from_settings_maps_ai_mode_http_enabled(tmp_path: Path) -> None:
     )
     config = ServiceConfig.from_settings(settings)
     assert config.ai_mode_http_enabled is True
+
+
+def test_pool_wait_timeout_covers_patchright_retry_worst_case() -> None:
+    config = ServiceConfig(browser_timeout_ms=90_000, answer_timeout_ms=45_000)
+    attempt_ms = (90_000 * 3) + 15_000 + 45_000 + 18_000
+    assert config.pool_wait_timeout_ms() >= 2 * attempt_ms
+
+
+def test_browser_worker_hard_timeout_s_defaults_derived() -> None:
+    config = ServiceConfig(browser_timeout_ms=90_000, answer_timeout_ms=45_000)
+    assert config.browser_worker_hard_timeout_s == config.pool_wait_timeout_ms() / 1000 + 60
+
+    explicit = ServiceConfig(
+        browser_timeout_ms=90_000,
+        answer_timeout_ms=45_000,
+        browser_worker_hard_timeout_seconds=42,
+    )
+    assert explicit.browser_worker_hard_timeout_s == 42

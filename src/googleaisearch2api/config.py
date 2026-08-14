@@ -9,6 +9,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_API_TOKEN = "change-me-google-search"
 SEARCH_ENGINE_OPTIONS = {"google", "duck", "gemini", "auto"}
 
+# GoogleAiRunner.run_prompt retries ONCE on PatchrightError, so the pool wait
+# timeout must cover two worst-case attempts. Constants live here (not in
+# browser.py) because browser.py imports config — a config→browser import
+# would be circular. SUBMIT_OVERHEAD_MS mirrors the hardcoded 15s textarea
+# wait + 3s block-check in browser.py _submit_query/_ensure_not_blocked.
+PATCHRIGHT_RETRY_ATTEMPTS = 2
+SUBMIT_OVERHEAD_MS = 18_000
+
 
 def _mask_secret(value: str | None) -> str:
     if not value:
@@ -37,6 +45,7 @@ class ServiceConfig(BaseModel):
     browser_base_url: str = "https://www.google.com/search?udm=50&aep=11&hl=en"
     browser_timeout_ms: int = 90_000
     answer_timeout_ms: int = 45_000
+    browser_worker_hard_timeout_seconds: float | None = None
     browser_proxy_server: str | None = None
     browser_proxy_username: str | None = None
     browser_proxy_password: str | None = None
@@ -65,9 +74,20 @@ class ServiceConfig(BaseModel):
         return _mask_secret(self.browser_proxy_password)
 
     def pool_wait_timeout_ms(self, *, buffer_ms: int = 5_000) -> int:
-        first_wait_ms = min(self.answer_timeout_ms, 15_000)
-        total_ms = (self.browser_timeout_ms * 3) + first_wait_ms + self.answer_timeout_ms
+        attempt_ms = (
+            (self.browser_timeout_ms * 3)
+            + min(self.answer_timeout_ms, 15_000)
+            + self.answer_timeout_ms
+            + SUBMIT_OVERHEAD_MS
+        )
+        total_ms = attempt_ms * PATCHRIGHT_RETRY_ATTEMPTS
         return max(total_ms + buffer_ms, 1_000)
+
+    @property
+    def browser_worker_hard_timeout_s(self) -> float:
+        if self.browser_worker_hard_timeout_seconds is not None:
+            return self.browser_worker_hard_timeout_seconds
+        return self.pool_wait_timeout_ms() / 1000 + 60
 
     @classmethod
     def from_settings(cls, settings: AppSettings) -> ServiceConfig:
@@ -82,6 +102,7 @@ class ServiceConfig(BaseModel):
             browser_base_url=settings.browser_base_url,
             browser_timeout_ms=settings.browser_timeout_ms,
             answer_timeout_ms=settings.answer_timeout_ms,
+            browser_worker_hard_timeout_seconds=settings.browser_worker_hard_timeout_seconds,
             browser_proxy_server=settings.browser_proxy_server or None,
             browser_proxy_username=settings.browser_proxy_username or None,
             browser_proxy_password=settings.browser_proxy_password or None,
@@ -138,6 +159,10 @@ class AppSettings(BaseSettings):
     )
     browser_timeout_ms: int = Field(default=90_000, validation_alias="BROWSER_TIMEOUT_MS")
     answer_timeout_ms: int = Field(default=45_000, validation_alias="ANSWER_TIMEOUT_MS")
+    browser_worker_hard_timeout_seconds: float | None = Field(
+        default=None,
+        validation_alias="BROWSER_WORKER_HARD_TIMEOUT_SECONDS",
+    )
     max_concurrent_requests: int = Field(
         default=1,
         ge=1,
@@ -222,8 +247,9 @@ class AppSettings(BaseSettings):
         validation_alias="PROXY_AUTO_RECOVERY_TARGET_ACTIVE",
     )
     proxy_auto_recovery_timeout_seconds: int = Field(
-        # Full-pool fast HTTP scans of a few hundred sticky sessions need headroom.
-        default=1_800,
+        # Probe supports --stop-after-active early stop and a fast curl_cffi
+        # prefilter; a full-pool run rarely needs more than a few minutes.
+        default=300,
         ge=60,
         validation_alias="PROXY_AUTO_RECOVERY_TIMEOUT_SECONDS",
     )

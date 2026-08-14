@@ -83,7 +83,7 @@ def test_proxy_auto_recovery_runs_existing_session_probe(tmp_path: Path) -> None
     assert command[command.index("--active-freshness-seconds") + 1] == "43200"
     assert command[command.index("--stop-after-active") + 1] == "1"
     assert kwargs["cwd"] == str(tmp_path)
-    assert kwargs["timeout"] == 1800
+    assert kwargs["timeout"] == 300
     assert recovery.status()["last_success"] is True
 
 

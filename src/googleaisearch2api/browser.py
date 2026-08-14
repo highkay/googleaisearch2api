@@ -10,7 +10,7 @@ from patchright.sync_api import BrowserContext, Page, sync_playwright
 from patchright.sync_api import Error as PatchrightError
 from patchright.sync_api import TimeoutError as PatchrightTimeoutError
 
-from .config import ServiceConfig
+from .config import PATCHRIGHT_RETRY_ATTEMPTS, ServiceConfig
 from .proxy_bridge import (
     LocalSocksProxyBridge,
     build_socks_proxy_target,
@@ -456,7 +456,7 @@ class GoogleAiRunner:
             raise GoogleAiRuntimeError("Prompt is empty.")
 
         with self._lock:
-            for attempt in range(2):
+            for attempt in range(PATCHRIGHT_RETRY_ATTEMPTS):
                 page = None
                 try:
                     context = self._ensure_context_locked(config)
