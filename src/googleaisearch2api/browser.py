@@ -6,9 +6,9 @@ import time
 from textwrap import shorten
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit, urlunparse, urlunsplit
 
+from patchright.sync_api import BrowserContext, Page, sync_playwright
 from patchright.sync_api import Error as PatchrightError
 from patchright.sync_api import TimeoutError as PatchrightTimeoutError
-from patchright.sync_api import sync_playwright
 
 from .config import ServiceConfig
 from .proxy_bridge import (
@@ -208,6 +208,36 @@ EXTRACT_SCRIPT = """
 }
 """
 
+TOKEN_EXTRACT_SCRIPT = """
+() => {
+  try {
+    return {
+      srtst: document.querySelector("[data-srtst]")?.getAttribute("data-srtst") ?? null,
+      garc: document.querySelector("[data-garc]")?.getAttribute("data-garc") ?? null,
+      xsrf_folif_token:
+        document.querySelector("[data-xsrf-folif-token]")?.getAttribute("data-xsrf-folif-token")
+        ?? null,
+      ei: document.querySelector("[data-ei]")?.getAttribute("data-ei") ?? null,
+      stkp: document.querySelector("[data-stkp]")?.getAttribute("data-stkp") ?? null,
+      sca_esv: new URLSearchParams(location.search).get("sca_esv") ?? null,
+      mstk: document.querySelector("[data-mstk]")?.getAttribute("data-mstk") ?? null,
+      location_search: location.search,
+    };
+  } catch (error) {
+    return {
+      srtst: null,
+      garc: null,
+      xsrf_folif_token: null,
+      ei: null,
+      stkp: null,
+      sca_esv: null,
+      mstk: null,
+      location_search: null,
+    };
+  }
+}
+"""
+
 
 class GoogleAiRuntimeError(RuntimeError):
     pass
@@ -392,6 +422,16 @@ def resolve_browser_proxy(config: ServiceConfig) -> dict | None:
         "password": config.browser_proxy_password or embedded_password,
         "bypass": config.browser_proxy_bypass,
     }
+
+
+def harvest_ai_mode_tokens(page: Page, context: BrowserContext) -> dict[str, object]:
+    raw = page.evaluate(TOKEN_EXTRACT_SCRIPT)
+    cookies = {
+        c.get("name"): c.get("value")
+        for c in (context.cookies() or [])
+        if c.get("name") and c.get("value")
+    }
+    return {"tokens": raw or {}, "cookies": cookies}
 
 
 class GoogleAiRunner:

@@ -5,6 +5,7 @@ from googleaisearch2api.browser import (
     GoogleAiUnavailableError,
     clean_answer_text,
     filter_citations,
+    harvest_ai_mode_tokens,
     resolve_browser_proxy,
     resolve_browser_user_agent,
 )
@@ -291,3 +292,59 @@ def test_runner_wraps_authenticated_socks_proxy_with_local_http_bridge() -> None
     assert proxy["bypass"] == "localhost,127.0.0.1"
     assert "username" not in proxy
     assert "password" not in proxy
+
+
+class _FakeTokenPage:
+    def __init__(self, evaluate_result: dict) -> None:
+        self.evaluate_result = evaluate_result
+
+    def evaluate(self, script: str) -> dict:
+        return self.evaluate_result
+
+
+class _FakeTokenContext:
+    def __init__(self, cookies: list[dict]) -> None:
+        self.cookies_value = cookies
+
+    def cookies(self) -> list[dict]:
+        return self.cookies_value
+
+
+def test_harvest_ai_mode_tokens_returns_tokens_and_cookies() -> None:
+    tokens = {
+        "srtst": "srtst-v",
+        "garc": "garc-v",
+        "xsrf_folif_token": "xsrf-v",
+        "ei": "ei-v",
+        "stkp": "stkp-v",
+        "sca_esv": "sca-v",
+        "mstk": "mstk-v",
+        "location_search": "?udm=50",
+    }
+    context = _FakeTokenContext([{"name": "NID", "value": "v"}, {"name": "SIDCC", "value": "w"}])
+
+    result = harvest_ai_mode_tokens(_FakeTokenPage(tokens), context)
+
+    assert result["tokens"]["stkp"] == "stkp-v"
+    assert result["cookies"]["NID"] == "v"
+    assert result["cookies"]["SIDCC"] == "w"
+
+
+def test_harvest_tolerates_missing_attrs() -> None:
+    tokens = {
+        "srtst": None,
+        "garc": None,
+        "xsrf_folif_token": None,
+        "ei": None,
+        "stkp": None,
+        "sca_esv": None,
+        "mstk": None,
+        "location_search": None,
+    }
+
+    result = harvest_ai_mode_tokens(_FakeTokenPage(tokens), _FakeTokenContext([]))
+
+    assert result["tokens"]["stkp"] is None
+    assert result["tokens"]["srtst"] is None
+    assert result["tokens"]["sca_esv"] is None
+    assert result["cookies"] == {}
