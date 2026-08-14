@@ -11,6 +11,7 @@ services:
     ports:
       - "${APP_PORT:-9010}:8000"
     environment:
+      UV_OFFLINE: "1"
       APP_HOST: 0.0.0.0
       APP_PORT: 8000
       APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
