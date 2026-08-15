@@ -111,6 +111,7 @@ uv run googleaisearch2api
 - `GEMINI_WEB_SAPISID`: 可选，Gemini web 会话的 `SAPISID` 值，用于 Gemini web HTTP 引擎请求签名。
 - `GEMINI_FAST_PROBE_TIMEOUT_S`: 冷池时对候选 sticky 会话做 gemini.google.com 快速探测的单次超时（秒）；默认 `8.0`。
 - `GEMINI_MAX_PROBE_SESSIONS`: 冷池时每次请求最多快速探测的候选会话数（用于轮换 IP）；默认 `3`。
+- `GEMINI_WARP_PROXIES`: WARP 出口池（Tier-1 稳定层），逗号分隔的 `socks5h://` URL 列表（必须用 `socks5h` 远端 DNS，`socks5` 会握手失败）；留空 = 禁用。需要容器接入 `warp-plus_default` 外部 Docker 网络（docker-compose 已配好）。示例：`GEMINI_WARP_PROXIES=socks5h://warpplus-us:1080,socks5h://warpplus-ca:1080,...`。选中策略：先轮换探测 WARP 出口，全部不可用才落到 2260 sticky 会话，最后才是 base 单次兜底。
 - `BROWSER_HEADLESS`: 是否无头运行
 - `BROWSER_USER_AGENT`: 可选，覆盖浏览器级 UA；留空时服务会给 headless Chrome 使用普通 Chrome UA
 - `BROWSER_WORKERS`: 常驻浏览器 worker 数

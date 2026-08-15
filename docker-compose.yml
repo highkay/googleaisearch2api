@@ -8,6 +8,9 @@ services:
     pids_limit: ${GOOGLEAISEARCH2API_PIDS_LIMIT:-512}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - warp-plus
     ports:
       - "${APP_PORT:-9010}:8000"
     environment:
@@ -21,6 +24,7 @@ services:
       GEMINI_UPSTREAM_BASE_URL: ${GEMINI_UPSTREAM_BASE_URL:-}
       GEMINI_UPSTREAM_API_KEY: ${GEMINI_UPSTREAM_API_KEY:-}
       GEMINI_UPSTREAM_MODEL: ${GEMINI_UPSTREAM_MODEL:-gemini-3.7-flash}
+      GEMINI_WARP_PROXIES: ${GEMINI_WARP_PROXIES:-}
       API_TOKEN: ${API_TOKEN:?set API_TOKEN in .env or shell before starting compose}
       BROWSER_HEADLESS: ${BROWSER_HEADLESS:-true}
       BROWSER_USER_AGENT: ${BROWSER_USER_AGENT:-}
@@ -74,6 +78,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+networks:
+  warp-plus:
+    external: true
+    name: warp-plus_default
 
 volumes:
   googleaisearch2api-data:
