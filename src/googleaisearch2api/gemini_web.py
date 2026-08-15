@@ -1,15 +1,16 @@
 """Pure-HTTP Gemini web app fallback (reverse-engineered StreamGenerate protocol).
 
-Anonymous (no cookie), search-grounded, with structured citations.  The
-protocol is UNVERIFIED internally (see AGENTS.md): this module is a standalone
-primitive with no app wiring, and the 80-slot inner request is a faithful port
-of the gemini-web2api reference
+Anonymous-or-authenticated StreamGenerate client, search-grounded, with
+structured citations.  The protocol is UNVERIFIED internally (see AGENTS.md):
+this module is a standalone primitive with no app wiring, and the 102-slot
+inner request is a faithful port of the gemini-web2api reference
 (github.com/Sophomoresty/gemini-web2api, commit
 6824ccaaa65768d9a4befc33a417e268f134b252).  Treat the slot layout as unstable.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -18,6 +19,7 @@ from typing import Any
 
 from loguru import logger
 
+from .gemini_web_models import resolve_model
 from .schemas import Citation, GoogleAiResult
 
 GEMINI_STREAM_ENDPOINT = (
@@ -32,6 +34,16 @@ _BL_RE = re.compile(r"boq_assistant-bard-web-server_\d+\.\d+_p\d+")
 _CODE_ARTIFACT_RE = re.compile(
     r"(?s)```(?:python|javascript|text)\?code_(?:reference|stdout)"
     r"&code_event_index=\d+\n.*?```\n?"
+)
+
+_BLOCK_STATUS = {302, 303, 307, 308, 403, 405, 429, 503}
+_BLOCK_MARKERS = (
+    "google.com/sorry",
+    "www.google.com/sorry",
+    "unusual traffic",
+    "recaptcha",
+    "our systems have detected",
+    "sorry/index",
 )
 
 
@@ -52,13 +64,15 @@ def build_stream_generate_url(*, bl: str, hl: str = DEFAULT_HL) -> str:
     return f"{GEMINI_STREAM_ENDPOINT}?bl={bl}&hl={hl}&_reqid={reqid}&rt=c"
 
 
-def build_inner_json(prompt: str) -> list[object]:
-    """Build the 80-slot inner request array (temporary chat, no thinking).
-
-    No model override is set: anonymous requests fall back to the server's
-    Flash-class default, mirroring the reference implementation.
-    """
-    inner: list[object] = [None] * 80
+def build_inner_json(
+    prompt: str,
+    *,
+    model_id: int = 1,
+    think_mode: int = 0,
+    extra_fields: dict[int, object] | None = None,
+) -> list[object]:
+    """Build the 102-slot inner request array (non-temporary chat)."""
+    inner: list[object] = [None] * 102
     inner[0] = [prompt, 0, None, None, None, None, 0]
     inner[1] = ["en"]
     inner[2] = ["", "", "", None, None, None, None, None, None, ""]
@@ -66,23 +80,90 @@ def build_inner_json(prompt: str) -> list[object]:
     inner[7] = 1
     inner[10] = 1
     inner[11] = 0
-    inner[17] = [[0]]
+    inner[17] = [[think_mode]]
     inner[18] = 0
     inner[27] = 1
     inner[30] = [4]
-    inner[41] = [1]  # temporary chat
-    inner[45] = 1
+    inner[41] = [2]  # non-temporary chat
     inner[53] = 0
     inner[59] = str(uuid.uuid4())
     inner[61] = []
     inner[68] = 1
+    inner[79] = model_id
+    if extra_fields:
+        for slot, value in extra_fields.items():
+            inner[slot] = value
     return inner
 
 
-def build_f_req(prompt: str) -> str:
+def build_f_req(
+    prompt: str,
+    *,
+    model_id: int = 1,
+    think_mode: int = 0,
+    extra_fields: dict[int, object] | None = None,
+) -> str:
     """Build the `f.req` form value: `[null, "<inner JSON string>"]`."""
-    outer = [None, json.dumps(build_inner_json(prompt))]
-    return json.dumps(outer)
+    inner = build_inner_json(
+        prompt, model_id=model_id, think_mode=think_mode, extra_fields=extra_fields
+    )
+    return json.dumps([None, json.dumps(inner)])
+
+
+def make_sapisidhash(sapisid: str) -> str:
+    """Build the `SAPISIDHASH <ts>_<sha1>` Authorization value."""
+    ts = int(time.time())
+    digest = hashlib.sha1(f"{ts} {sapisid} https://gemini.google.com".encode()).hexdigest()
+    return f"SAPISIDHASH {ts}_{digest}"
+
+
+def is_block_response(
+    status_code: int, headers: dict[str, str] | None = None, body: bytes | str = b""
+) -> bool:
+    """Heuristic: Google captcha / rate-limit / method-trap response."""
+    if status_code in _BLOCK_STATUS:
+        if status_code not in (302, 303, 307, 308):
+            return True
+        loc = (headers or {}).get("Location") or (headers or {}).get("location") or ""
+        text = loc
+        if body:
+            text += " " + (
+                body.decode("utf-8", "replace")
+                if isinstance(body, (bytes, bytearray))
+                else str(body)
+            )
+        lowered = text.lower()
+        if any(m in lowered for m in _BLOCK_MARKERS) or "sorry" in lowered:
+            return True
+        if "streamgenerate" not in lowered and "gemini.google.com" not in lowered:
+            return True
+        return "google.com" in lowered and "sorry" in lowered
+    if not body:
+        return False
+    sample = body[:4000]
+    text = (
+        sample.decode("utf-8", "replace") if isinstance(sample, (bytes, bytearray)) else str(sample)
+    )
+    return any(m in text.lower() for m in _BLOCK_MARKERS)
+
+
+def _build_headers(cookie: str = "", sapisid: str = "") -> dict[str, str]:
+    """Mandatory StreamGenerate headers; Cookie/Authorization only when present."""
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://gemini.google.com",
+        "Referer": GEMINI_APP_URL,
+        "X-Same-Domain": "1",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+        ),
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    if sapisid:
+        headers["Authorization"] = make_sapisidhash(sapisid)
+    return headers
 
 
 def parse_response_frames(raw: str) -> list[object]:
@@ -198,7 +279,7 @@ def _strip_fragment(url: str) -> str:
 
 
 class GeminiWebClient:
-    """Pure-HTTP Gemini web client (anonymous, no cookie)."""
+    """Pure-HTTP Gemini web client (StreamGenerate protocol)."""
 
     def __init__(self, *, timeout_s: float = 20.0) -> None:
         self.timeout_s = timeout_s
@@ -207,6 +288,9 @@ class GeminiWebClient:
         self,
         prompt: str,
         *,
+        model: str = "gemini-3.7-flash",
+        cookie: str | None = None,
+        sapisid: str | None = None,
         session: Any | None = None,
         proxies: dict[str, str] | None = None,
     ) -> GoogleAiResult:
@@ -215,36 +299,34 @@ class GeminiWebClient:
         except ImportError as exc:
             raise GeminiWebRuntimeError("curl_cffi is required for Gemini web transport") from exc
 
+        _, model_id, think_mode, resolve_error, extra_fields = resolve_model(model)
+        if resolve_error is not None or model_id is None or think_mode is None:
+            raise GeminiWebRuntimeError(resolve_error or f"cannot resolve model {model!r}")
+
         owns_session = session is None
         client = session or curl_requests.Session(impersonate=DEFAULT_IMPERSONATE)
 
         try:
             bl = self._fetch_bl(client, proxies)
             url = build_stream_generate_url(bl=bl)
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-                "Origin": "https://gemini.google.com",
-                "Referer": GEMINI_APP_URL,
-                "X-Same-Domain": "1",
-                "Accept-Language": "en-US,en;q=0.9",
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/146.0.0.0 Safari/537.36"
-                ),
-            }
             response = client.post(
                 url,
-                data={"f.req": build_f_req(prompt)},
-                headers=headers,
+                data={
+                    "f.req": build_f_req(
+                        prompt, model_id=model_id, think_mode=think_mode, extra_fields=extra_fields
+                    )
+                },
+                headers=_build_headers(cookie or "", sapisid or ""),
                 proxies=proxies,
                 timeout=self.timeout_s,
+                allow_redirects=False,
             )
             final_url = str(getattr(response, "url", "") or "")
             status = int(getattr(response, "status_code", 0) or 0)
-            if "/sorry" in final_url or status in {301, 302}:
-                raise GeminiWebBlockedError("Gemini web IP-blocked (redirected to /sorry)")
             text = getattr(response, "text", "") or ""
+            response_headers = getattr(response, "headers", None)
+            if is_block_response(status, response_headers, text) or "/sorry" in final_url:
+                raise GeminiWebBlockedError(f"Gemini web IP-blocked (HTTP {status} -> {final_url})")
             if not text or len(text.strip()) < 10:
                 raise GeminiWebRateLimitedError("Gemini web returned an empty/rate-limited body")
             frames = parse_response_frames(text)

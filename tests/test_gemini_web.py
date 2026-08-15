@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -12,6 +13,7 @@ from googleaisearch2api.gemini_web import (
     GeminiWebRateLimitedError,
     GeminiWebRuntimeError,
     build_f_req,
+    build_inner_json,
     build_stream_generate_url,
     extract_answer_text,
     extract_citations,
@@ -93,13 +95,32 @@ def test_build_stream_generate_url_has_bl_hl_reqid_rt() -> None:
     assert "_reqid=" in url
 
 
+def test_build_inner_json_uses_102_slot_non_temporary_chat() -> None:
+    inner = build_inner_json("hello")
+    assert len(inner) == 102
+    assert inner[41] == [2]
+    assert inner[45] is None
+    assert inner[79] == 1  # gemini-3.7-flash -> FAST mode
+    assert inner[17] == [[0]]
+    assert inner[0] == ["hello", 0, None, None, None, None, 0]
+    assert inner[1] == ["en"]
+
+
+def test_build_inner_json_applies_model_think_and_extra_fields() -> None:
+    inner = build_inner_json("hi", model_id=3, think_mode=2, extra_fields={31: 2, 80: 3})
+    assert inner[79] == 3
+    assert inner[17] == [[2]]
+    assert inner[31] == 2
+    assert inner[80] == 3
+
+
 def test_build_f_req_wraps_inner_json_string() -> None:
     f_req = build_f_req("hello world")
     outer = json.loads(f_req)
     assert outer[0] is None
     inner = json.loads(outer[1])  # outer[1] is a JSON *string*, not a list
     assert isinstance(inner, list)
-    assert len(inner) == 80
+    assert len(inner) == 102
     assert inner[0] == ["hello world", 0, None, None, None, None, 0]
     assert inner[1] == ["en"]
 
@@ -174,4 +195,75 @@ def test_no_frames_raises_runtime_error() -> None:
         ),
     )
     with pytest.raises(GeminiWebRuntimeError):
+        client.run("hi", session=session)
+
+
+def test_resolve_model_maps_names_to_modes() -> None:
+    from googleaisearch2api.gemini_web_models import resolve_model
+
+    name, mode, think, error, extra = resolve_model("gemini-3.7-flash")
+    assert name == "gemini-3.7-flash"
+    assert mode == 1
+    assert think == 0
+    assert error is None
+    assert extra is None
+    assert resolve_model("gemini-3.5-flash-thinking")[1] == 2
+    assert resolve_model("gemini-3.1-pro")[1] == 3
+    name, mode, think, error, extra = resolve_model("gemini-3.7-flash@think=2")
+    assert name == "gemini-3.7-flash"
+    assert think == 2
+    assert error is None
+
+
+def test_resolve_model_falls_back_on_unknown_and_keeps_enhanced_extra() -> None:
+    from googleaisearch2api.gemini_web_models import resolve_model
+
+    name, mode, think, error, extra = resolve_model("totally-unknown-model")
+    assert name == "gemini-3.7-flash"
+    assert mode == 1
+    assert error is None
+    assert extra is None
+    name, mode, think, error, extra = resolve_model("gemini-3.1-pro-enhanced")
+    assert mode == 3
+    assert extra == {31: 2, 80: 3}
+
+
+def test_is_block_response_detects_status_and_markers() -> None:
+    from googleaisearch2api.gemini_web import is_block_response
+
+    assert is_block_response(403, None, b"") is True
+    assert is_block_response(200, None, b"unusual traffic from your computer network") is True
+    assert is_block_response(200, None, b"normal answer") is False
+
+
+def test_make_sapisidhash_format() -> None:
+    from googleaisearch2api.gemini_web import make_sapisidhash
+
+    assert re.fullmatch(r"SAPISIDHASH \d+_[0-9a-f]{40}", make_sapisidhash("abc"))
+
+
+def test_build_headers_adds_auth_fields_only_when_present() -> None:
+    from googleaisearch2api.gemini_web import _build_headers
+
+    headers = _build_headers()
+    assert headers["Content-Type"] == "application/x-www-form-urlencoded"
+    assert headers["Origin"] == "https://gemini.google.com"
+    assert headers["Referer"] == "https://gemini.google.com/app"
+    assert headers["X-Same-Domain"] == "1"
+    assert "User-Agent" in headers
+    assert "Cookie" not in headers
+    assert "Authorization" not in headers
+
+    with_auth = _build_headers(cookie="SID=x", sapisid="abc")
+    assert with_auth["Cookie"] == "SID=x"
+    assert with_auth["Authorization"].startswith("SAPISIDHASH ")
+
+
+def test_run_raises_blocked_on_302_redirect_to_sorry() -> None:
+    client = GeminiWebClient()
+    session = _FakeSession(
+        get_response=_FakeResponse(200, "boq_assistant-bard-web-server_20260716.08_p0"),
+        post_response=_FakeResponse(302, "", url="https://www.google.com/sorry/index"),
+    )
+    with pytest.raises(GeminiWebBlockedError):
         client.run("hi", session=session)
