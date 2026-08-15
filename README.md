@@ -19,7 +19,7 @@
 - `POST /v1/responses`
 - Bearer Token 认证
 - 可配置模型名、代理、语言、超时、worker 数和队列长度
-- 可在 Google AI、Duck.ai 和自动降级模式之间切换
+- 可在 Gemini web、Duck.ai、gemini-upstream 和自动降级模式之间切换
 - SQLite 持久化配置与请求日志
 - 本地 Web Console: `/console`
 
@@ -105,7 +105,10 @@ uv run googleaisearch2api
 - `API_TOKEN`: OpenAI 兼容接口的 Bearer Token
 - Console 使用同一个 `API_TOKEN` 登录；敏感字段默认不会回显到页面里
 - `DEFAULT_MODEL`: 对外暴露的模型名
-- `SEARCH_ENGINE`: 搜索引擎选择，支持 `google`、`gemini`、`duck`、`auto`；`auto` 会优先跑 Google，遇到上游不可用类错误再降级到 Gemini web，最后兜底到 Duck.ai。
+- `SEARCH_ENGINE`: 搜索引擎选择，支持 `gemini | duck | gemini-upstream | auto`，默认 `gemini`（Gemini web HTTP 引擎，走 Gemini web StreamGenerate）；`auto` 会优先跑 Gemini web，遇到上游不可用类错误再降级到 Duck.ai。
+- `GEMINI_WEB_MODEL`: Gemini web HTTP 引擎使用的模型名；默认 `gemini-3.7-flash`。
+- `GEMINI_WEB_COOKIE`: 可选，Gemini web 会话 Cookie（`__Secure-1PSID` 等），用于提升 Gemini web HTTP 引擎的可用性。
+- `GEMINI_WEB_SAPISID`: 可选，Gemini web 会话的 `SAPISID` 值，用于 Gemini web HTTP 引擎请求签名。
 - `BROWSER_HEADLESS`: 是否无头运行
 - `BROWSER_USER_AGENT`: 可选，覆盖浏览器级 UA；留空时服务会给 headless Chrome 使用普通 Chrome UA
 - `BROWSER_WORKERS`: 常驻浏览器 worker 数

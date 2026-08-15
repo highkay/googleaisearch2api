@@ -14,8 +14,9 @@
                 <p class="eyebrow">Google AI Search2API</p>
                 <h1>Browser-backed OpenAI compatibility, with the operator controls exposed.</h1>
                 <p class="hero-copy">
-                    This console reflects the verified runtime shape: the public API is HTTP, but the
-                    execution path is a live Patchright browser session against the selected search engine.
+                    This console reflects the verified runtime shape: the public API is HTTP, and the
+                    default engine is the in-process Gemini HTTP engine (Gemini web StreamGenerate)
+                    with Duck.ai fallback.
                 </p>
             </div>
             <div class="hero-meta">
@@ -123,7 +124,6 @@
                     <label>
                         <span>Search engine</span>
                         <select name="search_engine" required>
-                            <option value="google" {% if config.search_engine == "google" %}selected{% endif %}>Google only</option>
                             <option value="auto" {% if config.search_engine == "auto" %}selected{% endif %}>Auto fallback</option>
                             <option value="duck" {% if config.search_engine == "duck" %}selected{% endif %}>Duck.ai only</option>
                             <option value="gemini" {% if config.search_engine == "gemini" %}selected{% endif %}>Gemini web</option>
