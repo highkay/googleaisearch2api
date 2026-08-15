@@ -3,7 +3,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from googleaisearch2api.config import AppSettings, ServiceConfig, ServiceConfigUpdate
+from googleaisearch2api.config import (
+    AppSettings,
+    ServiceConfig,
+    ServiceConfigUpdate,
+    parse_gemini_warp_proxies,
+)
 
 
 def test_browser_worker_settings_support_current_and_legacy_env_names(tmp_path: Path) -> None:
@@ -218,6 +223,33 @@ def test_pool_wait_timeout_covers_patchright_retry_worst_case() -> None:
     config = ServiceConfig(browser_timeout_ms=90_000, answer_timeout_ms=45_000)
     attempt_ms = (90_000 * 4) + 15_000 + 45_000 + 18_000
     assert config.pool_wait_timeout_ms() >= 2 * attempt_ms
+
+
+def test_parse_gemini_warp_proxies_empty_and_blank() -> None:
+    assert parse_gemini_warp_proxies("") == []
+    assert parse_gemini_warp_proxies("  , , ") == []
+
+
+def test_parse_gemini_warp_proxies_strips_and_splits() -> None:
+    assert parse_gemini_warp_proxies("socks5h://a:1080, socks5h://b:1080") == [
+        "socks5h://a:1080",
+        "socks5h://b:1080",
+    ]
+
+
+def test_parse_gemini_warp_proxies_dedupes_preserving_order() -> None:
+    assert parse_gemini_warp_proxies(
+        "socks5h://a:1080,socks5h://b:1080,socks5h://a:1080"
+    ) == ["socks5h://a:1080", "socks5h://b:1080"]
+
+
+def test_gemini_warp_proxies_default_and_env(tmp_path: Path, monkeypatch) -> None:
+    default_settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert default_settings.gemini_warp_proxies == ""
+
+    monkeypatch.setenv("GEMINI_WARP_PROXIES", "socks5h://a:1080")
+    settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert settings.gemini_warp_proxies == "socks5h://a:1080"
 
 
 def test_browser_worker_hard_timeout_s_defaults_derived() -> None:

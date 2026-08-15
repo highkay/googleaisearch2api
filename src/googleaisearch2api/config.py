@@ -34,6 +34,15 @@ def _normalize_search_engine(value: str) -> str:
     return normalized
 
 
+def parse_gemini_warp_proxies(value: str) -> list[str]:
+    proxies: list[str] = []
+    for item in value.split(","):
+        stripped = item.strip()
+        if stripped and stripped not in proxies:
+            proxies.append(stripped)
+    return proxies
+
+
 class ServiceConfig(BaseModel):
     default_model: str = "google-search"
     search_engine: str = "gemini"
@@ -231,6 +240,7 @@ class AppSettings(BaseSettings):
         ge=1,
         validation_alias="GEMINI_MAX_PROBE_SESSIONS",
     )
+    gemini_warp_proxies: str = Field(default="", validation_alias="GEMINI_WARP_PROXIES")
 
     browser_proxy_server: str = Field(default="", validation_alias="BROWSER_PROXY_SERVER")
     browser_proxy_username: str = Field(default="", validation_alias="BROWSER_PROXY_USERNAME")
