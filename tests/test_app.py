@@ -1063,46 +1063,7 @@ def test_query_auto_retries_sticky_sessions_before_duck_fallback(test_app, monke
     assert [record.status for record in recent] == ["ok", "error", "error", "error"]
 
 
-def test_query_auto_routes_directly_to_duck_when_sticky_pool_is_empty(test_app) -> None:
-    with TestClient(test_app) as client:
-        test_app.state.services.store.update_config(
-            ServiceConfigUpdate(
-                default_model="google-search",
-                search_engine="auto",
-                api_token="secret-token",
-                browser_headless=True,
-                browser_user_agent="",
-                browser_locale="en-US",
-                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
-                browser_timeout_ms=90_000,
-                answer_timeout_ms=45_000,
-                browser_proxy_server="http://192.0.2.1:2260",
-                browser_proxy_username="openai",
-                browser_proxy_password="proxy-pass",
-                browser_proxy_bypass="",
-                resin_sticky_session_enabled=True,
-            )
-        )
-        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
-        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck direct fallback.")
-        response = client.post(
-            "/query",
-            headers=_auth_headers(),
-            json={"model": "google-search", "query": "Question"},
-        )
-        recent = test_app.state.services.store.list_recent_requests(limit=1)
-
-    assert response.status_code == 200
-    assert response.json()["answer"] == "Duck direct fallback."
-    assert google_pool.prompts == []
-    assert len(duck_pool.prompts) == 1
-    assert "Question" in duck_pool.prompts[0]
-    assert "natural language" in duck_pool.prompts[0].lower()
-    assert recent[0].engine == "duck"
-    assert recent[0].status == "ok"
-
-
-def test_query_auto_triggers_recovery_when_sticky_pool_is_empty(test_app) -> None:
+def test_query_auto_runs_gemini_when_sticky_pool_is_empty(test_app, monkeypatch) -> None:
     with TestClient(test_app) as client:
         test_app.state.services.store.update_config(
             ServiceConfigUpdate(
@@ -1124,8 +1085,11 @@ def test_query_auto_triggers_recovery_when_sticky_pool_is_empty(test_app) -> Non
         )
         recovery = FakeProxyAutoRecovery()
         test_app.state.services.proxy_auto_recovery = recovery
-        _install_fake_pool(test_app, answer_text="Google answer.")
-        _install_fake_duck_pool(test_app, answer_text="Duck direct fallback.")
+        _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Gemini with base proxy fallback.",
+        )
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -1133,7 +1097,8 @@ def test_query_auto_triggers_recovery_when_sticky_pool_is_empty(test_app) -> Non
         )
 
     assert response.status_code == 200
-    assert recovery.reasons == ["auto-pool-empty"]
+    assert response.json()["answer"] == "Gemini with base proxy fallback."
+    assert recovery.reasons == []
 
 
 def test_query_auto_falls_back_to_duck_when_gemini_answer_quality_fails(

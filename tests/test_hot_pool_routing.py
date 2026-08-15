@@ -5,16 +5,13 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 from test_app import (
-    FakePool,
     FakeProxyAutoRecovery,
     _auth_headers,
-    _install_fake_duck_pool,
     _install_fake_gemini_client,
 )
 
 from googleaisearch2api.app import create_app
 from googleaisearch2api.config import ServiceConfigUpdate, get_settings
-from googleaisearch2api.schemas import Citation, GoogleAiResult
 
 
 @pytest.fixture
@@ -38,7 +35,7 @@ def test_app(tmp_path, monkeypatch) -> Iterator:
         get_settings.cache_clear()
 
 
-def test_auto_routes_to_duck_while_recovery_holds_gate(test_app) -> None:
+def test_auto_runs_gemini_while_recovery_holds_gate(test_app, monkeypatch) -> None:
     with TestClient(test_app) as client:
         test_app.state.services.store.update_config(
             ServiceConfigUpdate(
@@ -58,26 +55,11 @@ def test_auto_routes_to_duck_while_recovery_holds_gate(test_app) -> None:
                 resin_sticky_session_enabled=True,
             )
         )
-        active = test_app.state.services.proxy_session_store.upsert_proxy_session(
-            proxy_base_username="openai",
-            session_name="user1",
-            proxy_username="openai.user1",
-            status="active",
+        _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Gemini runs despite recovery gate.",
         )
-        test_app.state.services.proxy_session_store.mark_canary_success(active.id)
-        google_pool = FakePool(
-            outcomes=[
-                GoogleAiResult(
-                    answer_text="Should not run Google while recovery holds the gate.",
-                    citations=[Citation(title="Source", url="https://example.com")],
-                    final_url="https://www.google.com/search?udm=50",
-                    page_title="Google",
-                )
-            ]
-        )
-        test_app.state.services.pool.close()
-        test_app.state.services.pool = google_pool
-        duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck while recovering.")
         recovery = FakeProxyAutoRecovery()
         recovery.running = True
         test_app.state.services.proxy_auto_recovery = recovery
@@ -89,12 +71,7 @@ def test_auto_routes_to_duck_while_recovery_holds_gate(test_app) -> None:
         )
 
     assert response.status_code == 200
-    assert response.json()["answer"] == "Duck while recovering."
-    assert google_pool.prompts == []
-    assert len(duck_pool.prompts) == 1
-    # Duck path naturalizes prompts; keep the original ask, drop keyword/SERP shape.
-    assert "Question" in duck_pool.prompts[0]
-    assert "natural language" in duck_pool.prompts[0].lower()
+    assert response.json()["answer"] == "Gemini runs despite recovery gate."
 
 
 def test_gemini_engine_uses_sticky_session_when_enabled(test_app, monkeypatch) -> None:

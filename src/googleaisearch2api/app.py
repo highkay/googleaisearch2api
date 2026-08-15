@@ -1058,20 +1058,6 @@ def _should_try_duck_fallback(exc: HTTPException) -> bool:
     }
 
 
-def _should_route_auto_directly_to_duck(services: Services, config: ServiceConfig) -> bool:
-    # While recovery holds exclusive browser budget, skip Google hot-path entirely.
-    if services.proxy_auto_recovery.is_running() or services.browser_gate.is_exclusive():
-        return True
-    if not config.resin_sticky_session_enabled or services.settings.proxy_allow_fallback_to_base:
-        return False
-    try:
-        base_username = resolve_proxy_base_username(config)
-    except ProxySessionConfigError:
-        return False
-    # Hot pool only counts status=active sessions.
-    return services.proxy_session_store.count_selectable_sessions(base_username) == 0
-
-
 def _trigger_proxy_auto_recovery_if_pool_empty(
     services: Services,
     config: ServiceConfig,
@@ -1156,30 +1142,6 @@ def _run_search_ai(
         )
     if config.search_engine == "gemini-upstream":
         return _run_gemini_upstream_ai(
-            request=request,
-            endpoint=endpoint,
-            prompt=prompt,
-            stream=stream,
-            requested_model=requested_model,
-        )
-
-    if _should_route_auto_directly_to_duck(services, config):
-        if services.proxy_auto_recovery.is_running() or services.browser_gate.is_exclusive():
-            logger.warning(
-                "Proxy auto recovery holds the browser gate; routing auto request "
-                "directly to Duck.ai fallback."
-            )
-        else:
-            logger.warning(
-                "Google sticky hot pool is empty (no active sessions); routing auto "
-                "request directly to Duck.ai fallback."
-            )
-            _trigger_proxy_auto_recovery_if_pool_empty(
-                services,
-                config,
-                reason="auto-pool-empty",
-            )
-        return _run_duck_ai(
             request=request,
             endpoint=endpoint,
             prompt=prompt,
