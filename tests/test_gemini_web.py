@@ -267,3 +267,27 @@ def test_run_raises_blocked_on_302_redirect_to_sorry() -> None:
     )
     with pytest.raises(GeminiWebBlockedError):
         client.run("hi", session=session)
+
+
+def test_resolve_bl_caches_across_calls(monkeypatch) -> None:
+    import googleaisearch2api.gemini_web as gw
+
+    monkeypatch.setattr(gw, "_cached_bl", None)
+    fake_bl = "boq_assistant-bard-web-server_20990101.00_p0"
+    calls: list[str] = []
+
+    class _FakeResp:
+        text = f"window.SNlM0e={fake_bl}"
+
+    class _FakeClient:
+        def get(self, url: str, **kwargs: object) -> _FakeResp:
+            calls.append(url)
+            return _FakeResp()
+
+    client = _FakeClient()
+    bl1 = gw._resolve_bl(client, {"https": "http://x"})
+    bl2 = gw._resolve_bl(client, {"https": "http://x"})
+    assert bl1 == fake_bl
+    assert bl2 == fake_bl
+    assert len(calls) == 1
+    monkeypatch.setattr(gw, "_cached_bl", None)

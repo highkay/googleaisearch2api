@@ -278,6 +278,32 @@ def _strip_fragment(url: str) -> str:
     return url.split("#", 1)[0]
 
 
+_cached_bl: str | None = None
+_BL_FETCH_TIMEOUT_S = 15.0
+
+
+def _resolve_bl(client: Any, proxies: dict[str, str] | None) -> str:
+    global _cached_bl
+    if _cached_bl is not None:
+        return _cached_bl
+    try:
+        response = client.get(
+            GEMINI_APP_URL,
+            proxies=proxies,
+            timeout=_BL_FETCH_TIMEOUT_S,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            },
+        )
+        text = getattr(response, "text", "") or ""
+        match = _BL_RE.search(text)
+        _cached_bl = match.group(0) if match else DEFAULT_BL_FALLBACK
+    except Exception as exc:
+        logger.warning("Gemini web bl fetch failed: {}: {}", type(exc).__name__, exc)
+        _cached_bl = DEFAULT_BL_FALLBACK
+    return _cached_bl
+
+
 class GeminiWebClient:
     """Pure-HTTP Gemini web client (StreamGenerate protocol)."""
 
@@ -307,7 +333,7 @@ class GeminiWebClient:
         client = session or curl_requests.Session(impersonate=DEFAULT_IMPERSONATE)
 
         try:
-            bl = self._fetch_bl(client, proxies)
+            bl = _resolve_bl(client, proxies)
             url = build_stream_generate_url(bl=bl)
             response = client.post(
                 url,
@@ -351,21 +377,3 @@ class GeminiWebClient:
                     client.close()
                 except Exception:
                     pass
-
-    def _fetch_bl(self, client: Any, proxies: dict[str, str] | None) -> str:
-        try:
-            response = client.get(
-                GEMINI_APP_URL,
-                proxies=proxies,
-                timeout=self.timeout_s,
-                headers={
-                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                },
-            )
-            text = getattr(response, "text", "") or ""
-            match = _BL_RE.search(text)
-            if match:
-                return match.group(0)
-        except Exception as exc:
-            logger.warning("Gemini web bl fetch failed: {}: {}", type(exc).__name__, exc)
-        return DEFAULT_BL_FALLBACK
