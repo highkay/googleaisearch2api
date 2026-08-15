@@ -35,6 +35,7 @@ _NO_RESULT_CONDITION_RE = re.compile(
 _SHORT_ANSWER_PROMPT_RE = re.compile(
     r"reply with only|answer with only|only the number|just the number|"
     r"only\s+a\s+number|respond with only|return only the|"
+    r"\b\d+\s*(?:plus|minus|times|divided\s+by|[+*/×÷-])\s*\d+\b|"
     r"只回答|仅回答|只需回答|只要数字|只输出|仅输出|只回",
     re.IGNORECASE,
 )

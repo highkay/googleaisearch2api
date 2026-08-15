@@ -4,7 +4,8 @@ Reads the SQLite store (request logs + proxy session pool) and prints request
 success rate, latency distribution, engine mix, proxy-pool health, and the most
 recent request/error activity. Run inside the container:
 
-    docker exec googleaisearch2api-googleaisearch2api-1 python /app/scripts/monitor.py
+    docker exec googleaisearch2api-googleaisearch2api-1 \
+        /app/.venv/bin/python /app/scripts/monitor.py
 
 or locally with an explicit DB path:
 
