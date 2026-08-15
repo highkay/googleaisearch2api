@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from googleaisearch2api.config import AppSettings, ServiceConfig, ServiceConfigUpdate
 
 
@@ -81,6 +84,32 @@ def test_browser_worker_settings_support_current_and_legacy_env_names(tmp_path: 
 def test_search_engine_accepts_gemini() -> None:
     config = ServiceConfig(search_engine="gemini")
     assert config.search_engine == "gemini"
+
+
+def test_search_engine_rejects_google() -> None:
+    with pytest.raises(ValidationError, match="search_engine must be one of"):
+        ServiceConfig(search_engine="google")
+
+
+def test_search_engine_rejects_invalid_value() -> None:
+    with pytest.raises(ValidationError, match="search_engine must be one of"):
+        ServiceConfig(search_engine="bogus")
+
+
+def test_search_engine_default_is_gemini(tmp_path: Path) -> None:
+    settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert settings.search_engine == "gemini"
+    assert ServiceConfig().search_engine == "gemini"
+    update = ServiceConfigUpdate(
+        default_model="google-search",
+        api_token="secret-token",
+        browser_headless=True,
+        browser_locale="en-US",
+        browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+        browser_timeout_ms=90_000,
+        answer_timeout_ms=45_000,
+    )
+    assert update.search_engine == "gemini"
 
 
 def test_search_engine_accepts_gemini_upstream() -> None:

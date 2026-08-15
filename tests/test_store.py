@@ -1,7 +1,12 @@
 from pathlib import Path
 
 from googleaisearch2api.config import ServiceConfig, ServiceConfigUpdate
-from googleaisearch2api.db import create_db_engine, create_session_factory, create_tables
+from googleaisearch2api.db import (
+    ServiceConfigRow,
+    create_db_engine,
+    create_session_factory,
+    create_tables,
+)
 from googleaisearch2api.schemas import Citation, GoogleAiResult
 from googleaisearch2api.store import ConfigStore
 
@@ -33,6 +38,42 @@ def test_get_config_creates_default_row(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     config = store.get_config()
     assert config.default_model == "google-search"
+
+
+def _persist_raw_search_engine(store: ConfigStore, value: str) -> None:
+    with store._session_factory() as session:
+        row = session.get(ServiceConfigRow, 1)
+        assert row is not None
+        row.search_engine = value
+        session.add(row)
+        session.commit()
+
+
+def test_persisted_legacy_search_engine_google_is_coerced_to_gemini(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    store.get_config()
+    _persist_raw_search_engine(store, "google")
+
+    config = store.get_config()
+    assert config.search_engine == "gemini"
+
+
+def test_persisted_invalid_search_engine_is_coerced_to_gemini(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    store.get_config()
+    _persist_raw_search_engine(store, "bogus")
+
+    config = store.get_config()
+    assert config.search_engine == "gemini"
+
+
+def test_persisted_valid_search_engine_is_kept(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    store.get_config()
+    _persist_raw_search_engine(store, "gemini-upstream")
+
+    config = store.get_config()
+    assert config.search_engine == "gemini-upstream"
 
 
 def test_update_config_and_summary(tmp_path: Path) -> None:

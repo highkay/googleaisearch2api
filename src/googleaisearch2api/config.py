@@ -7,7 +7,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_API_TOKEN = "change-me-google-search"
-SEARCH_ENGINE_OPTIONS = {"google", "duck", "gemini", "gemini-upstream", "auto"}
+SEARCH_ENGINE_OPTIONS = {"gemini", "duck", "gemini-upstream", "auto"}
 
 # GoogleAiRunner.run_prompt retries ONCE on PatchrightError, so the pool wait
 # timeout must cover two worst-case attempts. Constants live here (not in
@@ -27,7 +27,7 @@ def _mask_secret(value: str | None) -> str:
 
 
 def _normalize_search_engine(value: str) -> str:
-    normalized = (value or "google").strip().lower()
+    normalized = (value or "gemini").strip().lower()
     if normalized not in SEARCH_ENGINE_OPTIONS:
         allowed = ", ".join(sorted(SEARCH_ENGINE_OPTIONS))
         raise ValueError(f"search_engine must be one of: {allowed}")
@@ -36,7 +36,7 @@ def _normalize_search_engine(value: str) -> str:
 
 class ServiceConfig(BaseModel):
     default_model: str = "google-search"
-    search_engine: str = "google"
+    search_engine: str = "gemini"
     ai_mode_http_enabled: bool = False
     gemini_upstream_base_url: str | None = None
     gemini_upstream_api_key: str | None = None
@@ -122,7 +122,7 @@ class ServiceConfig(BaseModel):
 
 class ServiceConfigUpdate(BaseModel):
     default_model: str
-    search_engine: str = "google"
+    search_engine: str = "gemini"
     gemini_upstream_base_url: str | None = None
     gemini_upstream_api_key: str | None = None
     gemini_upstream_model: str = "gemini-3.7-flash"
@@ -159,7 +159,7 @@ class AppSettings(BaseSettings):
     app_data_dir: Path = Field(default=Path("data"), validation_alias="APP_DATA_DIR")
 
     default_model: str = Field(default="google-search", validation_alias="DEFAULT_MODEL")
-    search_engine: str = Field(default="google", validation_alias="SEARCH_ENGINE")
+    search_engine: str = Field(default="gemini", validation_alias="SEARCH_ENGINE")
     api_token: str = Field(default=DEFAULT_API_TOKEN, validation_alias="API_TOKEN")
 
     browser_headless: bool = Field(default=True, validation_alias="BROWSER_HEADLESS")
@@ -214,6 +214,13 @@ class AppSettings(BaseSettings):
         default="gemini-3.7-flash",
         validation_alias="GEMINI_UPSTREAM_MODEL",
     )
+    # Anonymous Gemini web auth is env-only: never persisted to the store/console.
+    gemini_web_model: str = Field(
+        default="gemini-3.7-flash",
+        validation_alias="GEMINI_WEB_MODEL",
+    )
+    gemini_web_cookie: str = Field(default="", validation_alias="GEMINI_WEB_COOKIE")
+    gemini_web_sapisid: str = Field(default="", validation_alias="GEMINI_WEB_SAPISID")
 
     browser_proxy_server: str = Field(default="", validation_alias="BROWSER_PROXY_SERVER")
     browser_proxy_username: str = Field(default="", validation_alias="BROWSER_PROXY_USERNAME")

@@ -94,6 +94,8 @@ from .store import ConfigStore
 
 security = HTTPBearer(auto_error=False)
 CONSOLE_SESSION_COOKIE = "googleaisearch2api_console_token"
+GEMINI_RETRY_ATTEMPTS = 3
+GEMINI_RETRY_DELAY_SEC = 2.0
 
 
 @dataclass
@@ -816,71 +818,159 @@ def _run_gemini_ai(
     model_name = _resolve_model(requested_model, config)
     # Gemini web is a conversational NL assistant; reuse the Duck.ai naturalization.
     gemini_prompt = adapt_prompt_for_engine(prompt, engine="gemini")
-    request_id = services.store.start_request(
-        endpoint=endpoint,
-        engine="gemini",
-        model_name=model_name,
-        prompt_preview=gemini_prompt,
-        client_ip=request.client.host if request.client else None,
-        stream=stream,
-        config=config,
-    )
     client = GeminiWebClient(timeout_s=config.answer_timeout_ms / 1000.0)
-    started_at = time.perf_counter()
-    try:
-        proxy_url = build_proxy_url(config)
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        result = client.run(gemini_prompt, proxies=proxies)
-        # Keep JSON-shape normalization against the original caller prompt when needed.
-        result = _normalize_result_for_prompt(prompt, result)
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        quality = assess_search_answer_quality(
-            gemini_prompt,
-            result.answer_text,
-            result.citations,
-        )
-        if not quality.ok:
-            message = f"Gemini web answer failed quality check: {quality.reason}"
-            services.store.finish_request_error(
-                request_id,
-                message,
-                duration_ms,
-                result=result,
+
+    for attempt_index in range(GEMINI_RETRY_ATTEMPTS):
+        selection: ProxySessionSelection | None = None
+        effective_config = config
+        try:
+            selection = services.proxy_selector.select(config, engine="gemini")
+        except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
+            logger.warning(
+                "Gemini web sticky proxy session unavailable; "
+                "continuing with base proxy config: {}",
+                exc,
             )
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
-        services.store.finish_request_success(request_id, result, duration_ms)
-        return config, model_name, request_id, result
-    except HTTPException:
-        raise
-    except GeminiWebBlockedError as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, str(exc), duration_ms)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Gemini web was IP-blocked",
-        ) from exc
-    except GeminiWebRateLimitedError as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, str(exc), duration_ms)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Gemini web is rate limited",
-        ) from exc
-    except GeminiWebRuntimeError as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, str(exc), duration_ms)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Gemini web failed: {exc}",
-        ) from exc
-    except Exception as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        services.store.finish_request_error(request_id, repr(exc), duration_ms)
-        logger.exception("Unhandled Gemini web request failure")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unhandled Gemini web request failure.",
-        ) from exc
+            selection = None
+        if selection is not None:
+            effective_config = selection.config
+
+        request_id = services.store.start_request(
+            endpoint=endpoint,
+            engine="gemini",
+            model_name=model_name,
+            prompt_preview=gemini_prompt,
+            client_ip=request.client.host if request.client else None,
+            stream=stream,
+            config=effective_config,
+            proxy_session_id=selection.session.id if selection else None,
+            proxy_base_username=selection.session.proxy_base_username if selection else None,
+            proxy_username=selection.session.proxy_username if selection else None,
+            proxy_primary_ip=selection.session.primary_ip if selection else None,
+            proxy_ip_vector_hash=selection.session.ip_vector_hash if selection else None,
+            proxy_iplark_score=selection.session.iplark_min_quality_score if selection else None,
+        )
+
+        started_at = time.perf_counter()
+        try:
+            proxy_url = build_proxy_url(effective_config)
+            proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+            result = client.run(
+                gemini_prompt,
+                model=services.settings.gemini_web_model,
+                cookie=services.settings.gemini_web_cookie or None,
+                sapisid=services.settings.gemini_web_sapisid or None,
+                proxies=proxies,
+            )
+            # Keep JSON-shape normalization against the original caller prompt when needed.
+            result = _normalize_result_for_prompt(prompt, result)
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            quality = assess_search_answer_quality(
+                gemini_prompt,
+                result.answer_text,
+                result.citations,
+            )
+            if not quality.ok:
+                message = f"Gemini web answer failed quality check: {quality.reason}"
+                services.store.finish_request_error(
+                    request_id,
+                    message,
+                    duration_ms,
+                    result=result,
+                )
+                _record_proxy_session_error(
+                    services,
+                    selection,
+                    blocked=False,
+                    error_message=message,
+                )
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
+            services.store.finish_request_success(request_id, result, duration_ms)
+            if selection is not None:
+                services.proxy_session_store.finish_request_success(
+                    selection.session.id,
+                    engine="gemini",
+                )
+            return effective_config, model_name, request_id, result
+        except HTTPException:
+            raise
+        except GeminiWebBlockedError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=True,
+                error_message=str(exc),
+            )
+            if attempt_index + 1 >= GEMINI_RETRY_ATTEMPTS:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Gemini web was IP-blocked",
+                ) from exc
+            logger.warning(
+                "Gemini web blocked (attempt {}/{}); retrying after {:.1f}s",
+                attempt_index + 1,
+                GEMINI_RETRY_ATTEMPTS,
+                GEMINI_RETRY_DELAY_SEC,
+            )
+            time.sleep(GEMINI_RETRY_DELAY_SEC)
+        except GeminiWebRateLimitedError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=False,
+                error_message=str(exc),
+            )
+            if attempt_index + 1 >= GEMINI_RETRY_ATTEMPTS:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Gemini web is rate limited",
+                ) from exc
+            logger.warning(
+                "Gemini web rate limited (attempt {}/{}); retrying after {:.1f}s",
+                attempt_index + 1,
+                GEMINI_RETRY_ATTEMPTS,
+                GEMINI_RETRY_DELAY_SEC,
+            )
+            time.sleep(GEMINI_RETRY_DELAY_SEC)
+        except GeminiWebRuntimeError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=False,
+                error_message=str(exc),
+            )
+            if attempt_index + 1 >= GEMINI_RETRY_ATTEMPTS:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Gemini web failed: {exc}",
+                ) from exc
+            logger.warning(
+                "Gemini web failed (attempt {}/{}); retrying after {:.1f}s: {}",
+                attempt_index + 1,
+                GEMINI_RETRY_ATTEMPTS,
+                GEMINI_RETRY_DELAY_SEC,
+                exc,
+            )
+            time.sleep(GEMINI_RETRY_DELAY_SEC)
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, repr(exc), duration_ms)
+            logger.exception("Unhandled Gemini web request failure")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Unhandled Gemini web request failure.",
+            ) from exc
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Gemini web request retry loop exited unexpectedly.",
+    )
 
 
 def _run_gemini_upstream_ai(
@@ -961,14 +1051,6 @@ def _run_gemini_upstream_ai(
 
 
 def _should_try_duck_fallback(exc: HTTPException) -> bool:
-    return exc.status_code in {
-        status.HTTP_502_BAD_GATEWAY,
-        status.HTTP_503_SERVICE_UNAVAILABLE,
-        status.HTTP_504_GATEWAY_TIMEOUT,
-    }
-
-
-def _should_try_gemini_fallback(exc: HTTPException) -> bool:
     return exc.status_code in {
         status.HTTP_502_BAD_GATEWAY,
         status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1080,49 +1162,6 @@ def _run_search_ai(
             stream=stream,
             requested_model=requested_model,
         )
-    if config.search_engine != "auto":
-        return _run_google_ai(
-            request=request,
-            endpoint=endpoint,
-            prompt=prompt,
-            stream=stream,
-            requested_model=requested_model,
-        )
-
-    if config.gemini_upstream_base_url:
-        try:
-            return _run_gemini_upstream_ai(
-                request=request,
-                endpoint=endpoint,
-                prompt=prompt,
-                stream=stream,
-                requested_model=requested_model,
-            )
-        except HTTPException as upstream_exc:
-            if not _should_try_duck_fallback(upstream_exc):
-                raise
-            logger.warning(
-                "Gemini upstream failed with {}; trying Duck.ai fallback: {}",
-                upstream_exc.status_code,
-                upstream_exc.detail,
-            )
-            try:
-                return _run_duck_ai(
-                    request=request,
-                    endpoint=endpoint,
-                    prompt=prompt,
-                    stream=stream,
-                    requested_model=requested_model,
-                )
-            except HTTPException as duck_exc:
-                detail = (
-                    "Gemini upstream and Duck.ai failed. "
-                    f"Gemini upstream: {upstream_exc.detail}; Duck.ai: {duck_exc.detail}"
-                )
-                raise HTTPException(
-                    status_code=duck_exc.status_code,
-                    detail=detail,
-                ) from duck_exc
 
     if _should_route_auto_directly_to_duck(services, config):
         if services.proxy_auto_recovery.is_running() or services.browser_gate.is_exclusive():
@@ -1148,71 +1187,39 @@ def _run_search_ai(
             requested_model=requested_model,
         )
 
-    # Real traffic evidence (2026-07-16): auto mode forced max_sticky_attempts=1, so
-    # with multiple selectable sessions it burned the first session on Google block and
-    # immediately fell through to Duck even though other ready sticky sessions existed.
-    # Reuse the normal sticky retry budget when sticky sessions are enabled.
     try:
-        return _run_google_ai(
+        return _run_gemini_ai(
             request=request,
             endpoint=endpoint,
             prompt=prompt,
             stream=stream,
             requested_model=requested_model,
         )
-    except HTTPException as google_exc:
-        if not _should_try_duck_fallback(google_exc):
+    except HTTPException as gemini_exc:
+        if not _should_try_duck_fallback(gemini_exc):
             raise
         logger.warning(
-            "Google engine failed with {}; trying Gemini web fallback: {}",
-            google_exc.status_code,
-            google_exc.detail,
-        )
-        _trigger_proxy_auto_recovery_if_pool_empty(
-            services,
-            config,
-            reason="google-failed-pool-empty",
+            "Gemini web failed with {}; trying Duck.ai fallback: {}",
+            gemini_exc.status_code,
+            gemini_exc.detail,
         )
         try:
-            return _run_gemini_ai(
+            return _run_duck_ai(
                 request=request,
                 endpoint=endpoint,
                 prompt=prompt,
                 stream=stream,
                 requested_model=requested_model,
             )
-        except HTTPException as gemini_exc:
-            if not _should_try_gemini_fallback(gemini_exc):
-                raise HTTPException(
-                    status_code=gemini_exc.status_code,
-                    detail=(
-                        "Google and Gemini web failed. "
-                        f"Google: {google_exc.detail}; Gemini web: {gemini_exc.detail}"
-                    ),
-                ) from gemini_exc
-            logger.warning(
-                "Gemini web failed with {}; trying Duck.ai fallback: {}",
-                gemini_exc.status_code,
-                gemini_exc.detail,
+        except HTTPException as duck_exc:
+            detail = (
+                "Gemini web and Duck.ai failed. "
+                f"Gemini web: {gemini_exc.detail}; Duck.ai: {duck_exc.detail}"
             )
-            try:
-                return _run_duck_ai(
-                    request=request,
-                    endpoint=endpoint,
-                    prompt=prompt,
-                    stream=stream,
-                    requested_model=requested_model,
-                )
-            except HTTPException as duck_exc:
-                detail = (
-                    "All search engines failed. "
-                    f"Google: {google_exc.detail}; Gemini web: {gemini_exc.detail}; "
-                    f"Duck.ai: {duck_exc.detail}"
-                )
-                raise HTTPException(
-                    status_code=duck_exc.status_code,
-                    detail=detail,
-                ) from duck_exc
+            raise HTTPException(
+                status_code=duck_exc.status_code,
+                detail=detail,
+            ) from duck_exc
 
 
 def _safe_next_target(target: str | None) -> str:

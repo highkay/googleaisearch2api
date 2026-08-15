@@ -19,7 +19,7 @@ class ServiceConfigRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     default_model: Mapped[str] = mapped_column(String(128))
-    search_engine: Mapped[str] = mapped_column(String(32), default="google")
+    search_engine: Mapped[str] = mapped_column(String(32), default="gemini")
     api_token: Mapped[str] = mapped_column(String(512))
     browser_channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
     browser_executable_path: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -181,7 +181,7 @@ def create_tables(engine) -> None:
 
 
 def _ensure_service_config_columns(engine) -> None:
-    _ensure_column(engine, "service_config", "search_engine", "VARCHAR(32) DEFAULT 'google'")
+    _ensure_column(engine, "service_config", "search_engine", "VARCHAR(32) DEFAULT 'gemini'")
     _ensure_column(engine, "service_config", "browser_user_agent", "TEXT")
     _ensure_column(engine, "service_config", "resin_sticky_session_enabled", "BOOLEAN DEFAULT 0")
     _ensure_column(engine, "service_config", "gemini_upstream_base_url", "TEXT")

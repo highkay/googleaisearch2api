@@ -4,7 +4,13 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
-from test_app import FakePool, FakeProxyAutoRecovery, _auth_headers, _install_fake_duck_pool
+from test_app import (
+    FakePool,
+    FakeProxyAutoRecovery,
+    _auth_headers,
+    _install_fake_duck_pool,
+    _install_fake_gemini_client,
+)
 
 from googleaisearch2api.app import create_app
 from googleaisearch2api.config import ServiceConfigUpdate, get_settings
@@ -89,6 +95,51 @@ def test_auto_routes_to_duck_while_recovery_holds_gate(test_app) -> None:
     # Duck path naturalizes prompts; keep the original ask, drop keyword/SERP shape.
     assert "Question" in duck_pool.prompts[0]
     assert "natural language" in duck_pool.prompts[0].lower()
+
+
+def test_gemini_engine_uses_sticky_session_when_enabled(test_app, monkeypatch) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                search_engine="gemini",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        active = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user1",
+            proxy_username="openai.user1",
+            status="active",
+        )
+        test_app.state.services.proxy_session_store.mark_canary_success(active.id)
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Gemini sticky answer.",
+        )
+
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Gemini sticky answer."
+    assert gemini_client.proxies[0] is not None
+    assert "openai.user1" in gemini_client.proxies[0]["http"]
 
 
 def test_healthz_exposes_hot_pool_and_browser_gate(test_app) -> None:

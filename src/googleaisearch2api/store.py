@@ -9,7 +9,7 @@ from loguru import logger
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from .config import ServiceConfig, ServiceConfigUpdate
+from .config import SEARCH_ENGINE_OPTIONS, ServiceConfig, ServiceConfigUpdate
 from .db import RequestLogRow, ServiceConfigRow, utc_now
 from .schemas import Citation, DashboardSummary, GoogleAiResult, RecentRequest
 
@@ -19,6 +19,12 @@ def _coalesce_blank(value: str | None) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _coerce_legacy_search_engine(value: str | None) -> str:
+    if value in SEARCH_ENGINE_OPTIONS:
+        return value
+    return "gemini"
 
 
 _INLINE_CREDENTIALS_PATTERN = re.compile(r"(?i)(https?://)([^:@/\s]+):([^@/\s]+)@")
@@ -95,7 +101,9 @@ class ConfigStore:
     def _row_to_config(self, row: ServiceConfigRow) -> ServiceConfig:
         return ServiceConfig(
             default_model=row.default_model,
-            search_engine=getattr(row, "search_engine", None) or self._defaults.search_engine,
+            search_engine=_coerce_legacy_search_engine(
+                getattr(row, "search_engine", None) or self._defaults.search_engine
+            ),
             api_token=row.api_token,
             browser_headless=row.browser_headless,
             browser_user_agent=row.browser_user_agent,

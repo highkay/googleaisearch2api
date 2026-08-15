@@ -6,7 +6,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from googleaisearch2api.app import create_app
-from googleaisearch2api.browser import GoogleAiBlockedError, GoogleAiUnavailableError
 from googleaisearch2api.config import (
     DEFAULT_API_TOKEN,
     ServiceConfig,
@@ -15,14 +14,18 @@ from googleaisearch2api.config import (
 )
 from googleaisearch2api.duck_ai import DuckAiTimeoutError
 from googleaisearch2api.gemini_upstream import GeminiUpstreamRuntimeError
-from googleaisearch2api.gemini_web import GeminiWebRateLimitedError
+from googleaisearch2api.gemini_web import (
+    GeminiWebBlockedError,
+    GeminiWebRateLimitedError,
+    GeminiWebRuntimeError,
+)
 from googleaisearch2api.schemas import Citation, GoogleAiResult
 
 
 def _build_settings_form(**overrides: str) -> dict[str, str]:
     payload = {
         "default_model": "google-search",
-        "search_engine": "google",
+        "search_engine": "gemini",
         "api_token": "",
         "browser_headless": "on",
         "browser_user_agent": "",
@@ -118,6 +121,9 @@ class FakeGeminiClient:
         self.prompts: list[str] = []
         self.proxies: list[dict[str, str] | None] = []
         self.timeouts: list[float] = []
+        self.models: list[str] = []
+        self.cookies: list[str | None] = []
+        self.sapisids: list[str | None] = []
 
     def __call__(self, *, timeout_s: float = 20.0) -> FakeGeminiClient:
         self.timeouts.append(timeout_s)
@@ -127,10 +133,16 @@ class FakeGeminiClient:
         self,
         prompt: str,
         *,
+        model: str = "gemini-3.7-flash",
+        cookie: str | None = None,
+        sapisid: str | None = None,
         session=None,
         proxies: dict[str, str] | None = None,
     ) -> GoogleAiResult:
         self.prompts.append(prompt)
+        self.models.append(model)
+        self.cookies.append(cookie)
+        self.sapisids.append(sapisid)
         self.proxies.append(proxies)
         if self.outcomes:
             outcome = self.outcomes.pop(0)
@@ -457,9 +469,14 @@ def test_chat_completions_rejects_image_parts(test_app) -> None:
     assert response.status_code == 422
 
 
-def test_query_post_returns_tool_friendly_response_shape(test_app) -> None:
+def test_query_post_returns_tool_friendly_response_shape(test_app, monkeypatch) -> None:
     with TestClient(test_app) as client:
-        pool = _install_fake_pool(test_app, answer_text="Tool friendly answer.")
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Tool friendly answer.",
+        )
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -479,16 +496,13 @@ def test_query_post_returns_tool_friendly_response_shape(test_app) -> None:
     assert payload["answer"] == "Tool friendly answer."
     assert payload["usage"]["total_tokens"] >= payload["usage"]["input_tokens"]
     assert payload["citations"][0]["url"] == "https://example.com"
-    assert pool.prompts == [
-        "System instructions:\n"
-        "Use verified facts only.\n\n"
-        "Conversation context:\n"
-        "ASSISTANT: Previous answer\n\n"
-        "User request:\n"
-        "Question"
-    ]
+    assert google_pool.prompts == []
+    assert len(gemini_client.prompts) == 1
+    assert "natural language" in gemini_client.prompts[0].lower()
+    assert "Use verified facts only." in gemini_client.prompts[0]
+    assert "Question" in gemini_client.prompts[0]
     assert recent[0].endpoint == "/query"
-    assert recent[0].engine == "google"
+    assert recent[0].engine == "gemini"
 
 
 def test_query_gemini_engine_dispatches_to_gemini_client(test_app, monkeypatch) -> None:
@@ -516,8 +530,117 @@ def test_query_gemini_engine_dispatches_to_gemini_client(test_app, monkeypatch) 
     assert duck_pool.prompts == []
     assert len(gemini_client.prompts) == 1
     assert "natural language" in gemini_client.prompts[0].lower()
+    assert gemini_client.models == ["gemini-3.7-flash"]
+    assert gemini_client.cookies == [None]
+    assert gemini_client.sapisids == [None]
     assert gemini_client.proxies == [None]
     assert recent[0].engine == "gemini"
+    assert recent[0].status == "ok"
+
+
+def test_gemini_engine_retries_on_block_then_succeeds(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "gemini")
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Gemini recovered.",
+            outcomes=[GeminiWebBlockedError("Gemini web IP-blocked (test).")],
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Gemini recovered."
+    assert len(gemini_client.prompts) == 2
+    assert len(gemini_client.models) == 2
+    assert [record.engine for record in recent] == ["gemini", "gemini"]
+    assert [record.status for record in recent] == ["ok", "error"]
+
+
+def test_gemini_engine_uses_sticky_proxy_selection(test_app, monkeypatch) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                search_engine="gemini",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        snapshot = test_app.state.services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user1",
+            proxy_username="openai.user1",
+            status="active",
+        )
+        test_app.state.services.proxy_session_store.mark_canary_success(snapshot.id)
+        gemini_client = _install_fake_gemini_client(test_app, monkeypatch)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 200
+    assert gemini_client.proxies[0] is not None
+    assert "openai.user1" in gemini_client.proxies[0]["http"]
+    assert "openai.user1" in gemini_client.proxies[0]["https"]
+    assert recent[0].engine == "gemini"
+    assert recent[0].proxy_username == "openai.user1"
+    assert recent[0].status == "ok"
+
+
+def test_gemini_engine_falls_back_to_base_proxy_when_no_session(test_app, monkeypatch) -> None:
+    with TestClient(test_app) as client:
+        test_app.state.services.store.update_config(
+            ServiceConfigUpdate(
+                default_model="google-search",
+                search_engine="gemini",
+                api_token="secret-token",
+                browser_headless=True,
+                browser_user_agent="",
+                browser_locale="en-US",
+                browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+                browser_timeout_ms=90_000,
+                answer_timeout_ms=45_000,
+                browser_proxy_server="http://192.0.2.1:2260",
+                browser_proxy_username="openai",
+                browser_proxy_password="proxy-pass",
+                browser_proxy_bypass="",
+                resin_sticky_session_enabled=True,
+            )
+        )
+        gemini_client = _install_fake_gemini_client(test_app, monkeypatch)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 200
+    assert gemini_client.proxies[0] is not None
+    assert gemini_client.proxies[0]["http"].startswith("http://openai:")
+    assert ".user" not in gemini_client.proxies[0]["http"]
+    assert recent[0].engine == "gemini"
+    assert recent[0].proxy_username is None
     assert recent[0].status == "ok"
 
 
@@ -554,12 +677,17 @@ def test_query_engine_gemini_upstream_dispatches(test_app, monkeypatch) -> None:
     assert recent[0].status == "ok"
 
 
-def test_query_auto_prefers_gemini_upstream_when_configured(test_app, monkeypatch) -> None:
+def test_query_auto_uses_gemini_in_process_when_upstream_configured(test_app, monkeypatch) -> None:
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
         _set_gemini_upstream_base_url(test_app, monkeypatch, "http://127.0.0.1:8081")
         google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
         duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck answer.")
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Gemini answer.",
+        )
         upstream_client = _install_fake_gemini_upstream_client(
             test_app,
             monkeypatch,
@@ -573,26 +701,36 @@ def test_query_auto_prefers_gemini_upstream_when_configured(test_app, monkeypatc
         recent = test_app.state.services.store.list_recent_requests(limit=1)
 
     assert response.status_code == 200
-    assert response.json()["answer"] == "Gemini upstream answer."
+    assert response.json()["answer"] == "Gemini answer."
     assert google_pool.prompts == []
     assert duck_pool.prompts == []
-    assert len(upstream_client.prompts) == 1
-    assert len(upstream_client.kwargs) == 1
-    assert upstream_client.kwargs[0]["base_url"] == "http://127.0.0.1:8081"
-    assert recent[0].engine == "gemini-upstream"
+    assert len(gemini_client.prompts) == 1
+    assert upstream_client.prompts == []
+    assert upstream_client.kwargs == []
+    assert recent[0].engine == "gemini"
     assert recent[0].status == "ok"
 
 
-def test_query_auto_falls_back_to_duck_when_gemini_upstream_fails(
+def test_query_auto_falls_back_to_duck_when_gemini_fails_despite_upstream_configured(
     test_app,
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
         _set_gemini_upstream_base_url(test_app, monkeypatch, "http://127.0.0.1:8081")
         google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
         duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback.")
-        _install_fake_gemini_upstream_client(
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            outcomes=[
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+            ],
+        )
+        upstream_client = _install_fake_gemini_upstream_client(
             test_app,
             monkeypatch,
             outcomes=[GeminiUpstreamRuntimeError("gateway unavailable (test).")],
@@ -602,18 +740,20 @@ def test_query_auto_falls_back_to_duck_when_gemini_upstream_fails(
             headers=_auth_headers(),
             json={"model": "google-search", "query": "Question"},
         )
-        recent = test_app.state.services.store.list_recent_requests(limit=2)
+        recent = test_app.state.services.store.list_recent_requests(limit=4)
 
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck fallback."
     assert google_pool.prompts == []
+    assert upstream_client.prompts == []
+    assert len(gemini_client.prompts) == 3
     assert len(duck_pool.prompts) == 1
     assert "Question" in duck_pool.prompts[0]
-    assert [record.engine for record in recent] == ["duck", "gemini-upstream"]
-    assert [record.status for record in recent] == ["ok", "error"]
+    assert [record.engine for record in recent] == ["duck", "gemini", "gemini", "gemini"]
+    assert [record.status for record in recent] == ["ok", "error", "error", "error"]
 
 
-def test_query_auto_uses_google_chain_when_upstream_not_configured(
+def test_query_auto_uses_gemini_chain_when_upstream_not_configured(
     test_app,
     monkeypatch,
 ) -> None:
@@ -621,19 +761,27 @@ def test_query_auto_uses_google_chain_when_upstream_not_configured(
         _set_search_engine(test_app, "auto")
         google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
         duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck answer.")
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Gemini answer.",
+        )
         upstream_client = _install_fake_gemini_upstream_client(test_app, monkeypatch)
         response = client.post(
             "/query",
             headers=_auth_headers(),
             json={"model": "google-search", "query": "Question"},
         )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
 
     assert response.status_code == 200
-    assert response.json()["answer"] == "Google answer."
-    assert len(google_pool.prompts) == 1
+    assert response.json()["answer"] == "Gemini answer."
+    assert google_pool.prompts == []
     assert duck_pool.prompts == []
+    assert len(gemini_client.prompts) == 1
     assert upstream_client.kwargs == []
     assert upstream_client.prompts == []
+    assert recent[0].engine == "gemini"
 
 
 def test_query_duck_engine_uses_duck_pool_only(test_app) -> None:
@@ -731,17 +879,22 @@ def test_query_duck_engine_retries_another_sticky_session_after_timeout(test_app
     assert [record.status for record in recent] == ["ok", "error"]
 
 
-def test_query_auto_falls_back_to_duck_when_google_is_unavailable(test_app, monkeypatch) -> None:
+def test_query_auto_falls_back_to_duck_when_gemini_is_rate_limited(
+    test_app,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
-        google_pool = _install_fake_pool(
-            test_app,
-            outcomes=[GoogleAiBlockedError("Google blocked this browser session.")],
-        )
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
         gemini_client = _install_fake_gemini_client(
             test_app,
             monkeypatch,
-            outcomes=[GeminiWebRateLimitedError("Gemini web is rate limited (test).")],
+            outcomes=[
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+            ],
         )
         duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback.")
         response = client.post(
@@ -749,30 +902,32 @@ def test_query_auto_falls_back_to_duck_when_google_is_unavailable(test_app, monk
             headers=_auth_headers(),
             json={"model": "google-search", "query": "Question"},
         )
-        recent = test_app.state.services.store.list_recent_requests(limit=3)
+        recent = test_app.state.services.store.list_recent_requests(limit=4)
 
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck fallback."
-    assert google_pool.prompts == ["User request:\nQuestion"]
-    assert len(gemini_client.prompts) == 1
+    assert google_pool.prompts == []
+    assert len(gemini_client.prompts) == 3
     assert len(duck_pool.prompts) == 1
     assert "Question" in duck_pool.prompts[0]
     assert "natural language" in duck_pool.prompts[0].lower()
-    assert [record.engine for record in recent] == ["duck", "gemini", "google"]
-    assert [record.status for record in recent] == ["ok", "error", "error"]
+    assert [record.engine for record in recent] == ["duck", "gemini", "gemini", "gemini"]
+    assert [record.status for record in recent] == ["ok", "error", "error", "error"]
 
 
-def test_query_auto_falls_back_google_then_gemini_then_duck(test_app, monkeypatch) -> None:
+def test_query_auto_falls_back_to_duck_when_gemini_is_blocked(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
-        google_pool = _install_fake_pool(
-            test_app,
-            outcomes=[GoogleAiBlockedError("Google blocked this browser session.")],
-        )
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
         gemini_client = _install_fake_gemini_client(
             test_app,
             monkeypatch,
-            outcomes=[GeminiWebRateLimitedError("Gemini web is rate limited (test).")],
+            outcomes=[
+                GeminiWebBlockedError("Gemini web IP-blocked (test)."),
+                GeminiWebBlockedError("Gemini web IP-blocked (test)."),
+                GeminiWebBlockedError("Gemini web IP-blocked (test)."),
+            ],
         )
         duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback.")
         response = client.post(
@@ -780,34 +935,36 @@ def test_query_auto_falls_back_google_then_gemini_then_duck(test_app, monkeypatc
             headers=_auth_headers(),
             json={"model": "google-search", "query": "Question"},
         )
-        recent = test_app.state.services.store.list_recent_requests(limit=3)
+        recent = test_app.state.services.store.list_recent_requests(limit=4)
 
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck fallback."
-    assert google_pool.prompts == ["User request:\nQuestion"]
-    assert len(gemini_client.prompts) == 1
+    assert google_pool.prompts == []
+    assert len(gemini_client.prompts) == 3
     assert "natural language" in gemini_client.prompts[0].lower()
     assert len(duck_pool.prompts) == 1
     assert "Question" in duck_pool.prompts[0]
     assert "natural language" in duck_pool.prompts[0].lower()
-    assert [record.engine for record in recent] == ["duck", "gemini", "google"]
-    assert [record.status for record in recent] == ["ok", "error", "error"]
+    assert [record.engine for record in recent] == ["duck", "gemini", "gemini", "gemini"]
+    assert [record.status for record in recent] == ["ok", "error", "error", "error"]
 
 
-def test_query_auto_merges_google_gemini_duck_errors_when_all_fail(
+def test_query_auto_merges_gemini_duck_errors_when_all_fail(
     test_app,
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
-        _install_fake_pool(
-            test_app,
-            outcomes=[GoogleAiBlockedError("Google blocked this browser session.")],
-        )
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
         _install_fake_gemini_client(
             test_app,
             monkeypatch,
-            outcomes=[GeminiWebRateLimitedError("Gemini web is rate limited (test).")],
+            outcomes=[
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+            ],
         )
         _install_fake_duck_pool(
             test_app,
@@ -818,22 +975,21 @@ def test_query_auto_merges_google_gemini_duck_errors_when_all_fail(
             headers=_auth_headers(),
             json={"model": "google-search", "query": "Question"},
         )
-        recent = test_app.state.services.store.list_recent_requests(limit=3)
+        recent = test_app.state.services.store.list_recent_requests(limit=4)
 
     assert response.status_code == 504
     detail = response.json()["detail"]
-    assert "Google" in detail
+    assert "Google" not in detail
     assert "Gemini web" in detail
     assert "Duck.ai" in detail
-    assert [record.engine for record in recent] == ["duck", "gemini", "google"]
-    assert [record.status for record in recent] == ["error", "error", "error"]
+    assert google_pool.prompts == []
+    assert [record.engine for record in recent] == ["duck", "gemini", "gemini", "gemini"]
+    assert [record.status for record in recent] == ["error", "error", "error", "error"]
 
 
 def test_query_auto_retries_sticky_sessions_before_duck_fallback(test_app, monkeypatch) -> None:
-    # Real traffic: auto used to force max_sticky_attempts=1, so a single Google block
-    # skipped remaining ready sticky sessions and fell straight to Duck.
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
     with TestClient(test_app) as client:
-        test_app.state.services.settings.google_ai_blocked_retry_count = 2
         test_app.state.services.store.update_config(
             ServiceConfigUpdate(
                 default_model="google-search",
@@ -873,56 +1029,38 @@ def test_query_auto_retries_sticky_sessions_before_duck_fallback(test_app, monke
         test_app.state.services.proxy_session_store.mark_canary_success(first.id)
         test_app.state.services.proxy_session_store.mark_canary_success(second.id)
         test_app.state.services.proxy_session_store.mark_canary_success(third.id)
-        google_pool = _install_fake_pool(
-            test_app,
-            outcomes=[
-                GoogleAiBlockedError("Google blocked this browser session."),
-                GoogleAiBlockedError("Google blocked this browser session."),
-                GoogleAiBlockedError("Google blocked this browser session."),
-            ],
-        )
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
         gemini_client = _install_fake_gemini_client(
             test_app,
             monkeypatch,
-            outcomes=[GeminiWebRateLimitedError("Gemini web is rate limited (test).")],
+            outcomes=[
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+                GeminiWebRateLimitedError("Gemini web is rate limited (test)."),
+            ],
         )
         duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback.")
-        recovery = FakeProxyAutoRecovery()
-        test_app.state.services.proxy_auto_recovery = recovery
         response = client.post(
             "/query",
             headers=_auth_headers(),
             json={"model": "google-search", "query": "Question"},
         )
-        recent = test_app.state.services.store.list_recent_requests(limit=5)
+        recent = test_app.state.services.store.list_recent_requests(limit=4)
 
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck fallback."
-    assert [config.browser_proxy_username for config in google_pool.configs] == [
-        "openai.user1",
-        "openai.user2",
-        "openai.user3",
-    ]
-    assert len(gemini_client.prompts) == 1
+    assert google_pool.prompts == []
+    assert len(gemini_client.prompts) == 3
+    proxy_urls = [p["http"] for p in gemini_client.proxies]
+    assert len(proxy_urls) == 3
+    assert "openai.user1" in proxy_urls[0]
+    assert "openai.user2" in proxy_urls[1]
+    assert "openai.user3" in proxy_urls[2]
     assert len(duck_pool.prompts) == 1
     assert "Question" in duck_pool.prompts[0]
     assert "natural language" in duck_pool.prompts[0].lower()
-    assert [record.engine for record in recent] == [
-        "duck",
-        "gemini",
-        "google",
-        "google",
-        "google",
-    ]
-    assert [record.status for record in recent] == [
-        "ok",
-        "error",
-        "error",
-        "error",
-        "error",
-    ]
-    assert "google-blocked-pool-below-target" in recovery.reasons
-    assert "google-failed-pool-empty" in recovery.reasons
+    assert [record.engine for record in recent] == ["duck", "gemini", "gemini", "gemini"]
+    assert [record.status for record in recent] == ["ok", "error", "error", "error"]
 
 
 def test_query_auto_routes_directly_to_duck_when_sticky_pool_is_empty(test_app) -> None:
@@ -998,20 +1136,25 @@ def test_query_auto_triggers_recovery_when_sticky_pool_is_empty(test_app) -> Non
     assert recovery.reasons == ["auto-pool-empty"]
 
 
-def test_query_auto_falls_back_to_duck_when_google_answer_quality_fails(
+def test_query_auto_falls_back_to_duck_when_gemini_answer_quality_fails(
     test_app,
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
-        google_pool = _install_fake_pool(
-            test_app,
-            answer_text="You said: User request:\nQuestion",
-        )
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
         gemini_client = _install_fake_gemini_client(
             test_app,
             monkeypatch,
-            outcomes=[GeminiWebRateLimitedError("Gemini web is rate limited (test).")],
+            outcomes=[
+                GoogleAiResult(
+                    answer_text="You said: User request:\nQuestion",
+                    citations=[Citation(title="Gemini source", url="https://example.com")],
+                    final_url="https://gemini.google.com/app",
+                    page_title="Gemini",
+                )
+            ],
         )
         duck_pool = _install_fake_duck_pool(test_app, answer_text="Duck fallback.")
         response = client.post(
@@ -1019,30 +1162,28 @@ def test_query_auto_falls_back_to_duck_when_google_answer_quality_fails(
             headers=_auth_headers(),
             json={"model": "google-search", "query": "Question"},
         )
-        recent = test_app.state.services.store.list_recent_requests(limit=3)
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
 
     assert response.status_code == 200
     assert response.json()["answer"] == "Duck fallback."
-    assert google_pool.prompts == ["User request:\nQuestion"]
+    assert google_pool.prompts == []
     assert len(gemini_client.prompts) == 1
     assert len(duck_pool.prompts) == 1
     assert "Question" in duck_pool.prompts[0]
     assert "natural language" in duck_pool.prompts[0].lower()
-    assert [record.engine for record in recent] == ["duck", "gemini", "google"]
-    assert [record.status for record in recent] == ["ok", "error", "error"]
-    assert "quality check" in (recent[2].error_message or "")
+    assert [record.engine for record in recent] == ["duck", "gemini"]
+    assert [record.status for record in recent] == ["ok", "error"]
+    assert "quality check" in (recent[1].error_message or "")
 
 
-def test_query_auto_falls_back_to_duck_when_google_list_answer_is_too_short(
+def test_query_auto_falls_back_to_duck_when_gemini_answer_is_empty(
     test_app,
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
-        google_pool = _install_fake_pool(
-            test_app,
-            answer_text="台积电 3nm 涨价将推动半导体供应链重估。",
-        )
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
         duck_answer = (
             "1. 中微公司：刻蚀设备受益于先进制程扩产和国产替代。"
             "2. 北方华创：薄膜沉积、刻蚀和清洗设备覆盖关键环节。"
@@ -1053,7 +1194,14 @@ def test_query_auto_falls_back_to_duck_when_google_list_answer_is_too_short(
         gemini_client = _install_fake_gemini_client(
             test_app,
             monkeypatch,
-            outcomes=[GeminiWebRateLimitedError("Gemini web is rate limited (test).")],
+            outcomes=[
+                GoogleAiResult(
+                    answer_text="",
+                    citations=[],
+                    final_url="https://gemini.google.com/app",
+                    page_title="Gemini",
+                )
+            ],
         )
         duck_pool = _install_fake_duck_pool(test_app, answer_text=duck_answer)
         response = client.post(
@@ -1064,25 +1212,24 @@ def test_query_auto_falls_back_to_duck_when_google_list_answer_is_too_short(
                 "query": "台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条",
             },
         )
-        recent = test_app.state.services.store.list_recent_requests(limit=3)
+        recent = test_app.state.services.store.list_recent_requests(limit=2)
 
     assert response.status_code == 200
     assert response.json()["answer"] == duck_answer
-    assert google_pool.prompts == [
-        "User request:\n台积电 3nm 涨价 AI A股 受益股 OR 供应链 OR 半导体 最多返回 5 条"
-    ]
+    assert google_pool.prompts == []
     assert len(gemini_client.prompts) == 1
     assert len(duck_pool.prompts) == 1
     assert "台积电" in duck_pool.prompts[0]
     assert "最多返回 5 条" not in duck_pool.prompts[0]
     assert "请用自然语言完整回答" in duck_pool.prompts[0]
-    assert [record.engine for record in recent] == ["duck", "gemini", "google"]
-    assert [record.status for record in recent] == ["ok", "error", "error"]
-    assert "too short for the requested list" in (recent[2].error_message or "")
+    assert [record.engine for record in recent] == ["duck", "gemini"]
+    assert [record.status for record in recent] == ["ok", "error"]
+    assert "empty answer" in (recent[1].error_message or "")
 
 
 def test_query_simplifies_json_results_prompt_for_natural_language_answer(
     test_app,
+    monkeypatch,
 ) -> None:
     prompt = (
         "只返回一个 JSON 对象，输出格式固定为 "
@@ -1100,8 +1247,13 @@ def test_query_simplifies_json_results_prompt_for_natural_language_answer(
     )
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
-        google_pool = _install_fake_pool(test_app, answer_text=google_answer)
+        google_pool = _install_fake_pool(test_app)
         duck_pool = _install_fake_duck_pool(test_app)
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text=google_answer,
+        )
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -1111,18 +1263,21 @@ def test_query_simplifies_json_results_prompt_for_natural_language_answer(
 
     assert response.status_code == 200
     assert response.json()["answer"] == google_answer
-    assert google_pool.prompts == [
-        "搜索并用自然语言简要回答，列出关键发现、来源和日期；"
-        "如果没有足够直接相关的信息，直接说明未找到：\n"
-        "PingAn 000001.SZ 最新公告 新闻 催化 风险 最多返回 5 条"
-    ]
+    assert google_pool.prompts == []
     assert duck_pool.prompts == []
-    assert [record.engine for record in recent] == ["google"]
+    assert len(gemini_client.prompts) == 1
+    gemini_prompt = gemini_client.prompts[0]
+    assert "PingAn 000001.SZ 最新公告 新闻 催化 风险" in gemini_prompt
+    assert '{"results"' not in gemini_prompt
+    assert "最多返回 5 条" not in gemini_prompt
+    assert "请用自然语言" in gemini_prompt
+    assert [record.engine for record in recent] == ["gemini"]
     assert [record.status for record in recent] == ["ok"]
 
 
 def test_query_auto_naturalizes_empty_json_results_for_simplified_prompt(
     test_app,
+    monkeypatch,
 ) -> None:
     prompt = (
         "只返回一个 JSON 对象，输出格式固定为 "
@@ -1132,8 +1287,13 @@ def test_query_auto_naturalizes_empty_json_results_for_simplified_prompt(
     )
     with TestClient(test_app) as client:
         _set_search_engine(test_app, "auto")
-        google_pool = _install_fake_pool(test_app, answer_text='{"results": []}')
+        google_pool = _install_fake_pool(test_app)
         duck_pool = _install_fake_duck_pool(test_app)
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text='{"results": []}',
+        )
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -1143,17 +1303,14 @@ def test_query_auto_naturalizes_empty_json_results_for_simplified_prompt(
 
     assert response.status_code == 200
     assert "没有找到足够直接相关" in response.json()["answer"]
-    assert google_pool.prompts == [
-        "搜索并用自然语言简要回答，列出关键发现、来源和日期；"
-        "如果没有足够直接相关的信息，直接说明未找到：\n"
-        "PingAn 000001.SZ 最新公告 新闻 催化 风险 最多返回 5 条"
-    ]
+    assert google_pool.prompts == []
     assert duck_pool.prompts == []
-    assert [record.engine for record in recent] == ["google"]
+    assert len(gemini_client.prompts) == 1
+    assert [record.engine for record in recent] == ["gemini"]
     assert [record.status for record in recent] == ["ok"]
 
 
-def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:
+def test_query_uses_active_sticky_proxy_session_when_enabled(test_app, monkeypatch) -> None:
     with TestClient(test_app) as client:
         test_app.state.services.store.update_config(
             ServiceConfigUpdate(
@@ -1184,7 +1341,12 @@ def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:
             source="test",
         )
         test_app.state.services.proxy_session_store.mark_canary_success(snapshot.id)
-        pool = _install_fake_pool(test_app, answer_text="Sticky answer.")
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Sticky answer.",
+        )
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -1193,7 +1355,8 @@ def test_query_uses_active_sticky_proxy_session_when_enabled(test_app) -> None:
         recent = test_app.state.services.store.list_recent_requests(limit=1)
 
     assert response.status_code == 200
-    assert pool.configs[0].browser_proxy_username == "openai.user1"
+    assert google_pool.prompts == []
+    assert "openai.user1" in gemini_client.proxies[0]["http"]
     assert recent[0].resin_sticky_session_enabled is True
     assert recent[0].proxy_base_username == "openai"
     assert recent[0].proxy_username == "openai.user1"
@@ -1264,10 +1427,9 @@ def test_duck_query_can_use_duck_ok_session_in_google_cooldown(test_app) -> None
     assert sessions["openai.user1"].request_success_count == 0
 
 
-def test_query_reselects_sticky_proxy_session_after_google_block(test_app) -> None:
+def test_query_reselects_sticky_proxy_session_after_gemini_block(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
     with TestClient(test_app) as client:
-        test_app.state.services.settings.google_ai_blocked_retry_count = 1
-        test_app.state.services.settings.proxy_auto_recovery_target_active = 2
         test_app.state.services.store.update_config(
             ServiceConfigUpdate(
                 default_model="google-search",
@@ -1297,30 +1459,15 @@ def test_query_reselects_sticky_proxy_session_after_google_block(test_app) -> No
             proxy_username="openai.user2",
             status="active",
         )
-        test_app.state.services.proxy_session_store.update_egress(
-            proxy_session_id=first.id,
-            ips=["203.0.113.10"],
-            source="test",
-        )
-        test_app.state.services.proxy_session_store.update_egress(
-            proxy_session_id=second.id,
-            ips=["203.0.113.20"],
-            source="test",
-        )
         test_app.state.services.proxy_session_store.mark_canary_success(first.id)
         test_app.state.services.proxy_session_store.mark_canary_success(second.id)
-        blocked_error = GoogleAiBlockedError(
-            "Google blocked the session while opening query page: "
-            "our systems have detected unusual traffic from your computer network. "
-            "ip address: 2606:c700:1:47:9e6b:ff:fe5e:b6f5"
-        )
-        pool = _install_fake_pool(
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        gemini_client = _install_fake_gemini_client(
             test_app,
+            monkeypatch,
             answer_text="Recovered answer.",
-            outcomes=[blocked_error],
+            outcomes=[GeminiWebBlockedError("Gemini web IP-blocked (test).")],
         )
-        recovery = FakeProxyAutoRecovery()
-        test_app.state.services.proxy_auto_recovery = recovery
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -1328,40 +1475,33 @@ def test_query_reselects_sticky_proxy_session_after_google_block(test_app) -> No
         )
         recent = test_app.state.services.store.list_recent_requests(limit=2)
         sessions = {
-            snapshot.proxy_username: snapshot
-            for snapshot in test_app.state.services.proxy_session_store.list_proxy_sessions(
-                limit=10
-            )
+            item.proxy_username: item
+            for item in test_app.state.services.proxy_session_store.list_proxy_sessions(limit=10)
         }
 
     assert response.status_code == 200
     assert response.json()["answer"] == "Recovered answer."
-    assert [config.browser_proxy_username for config in pool.configs] == [
-        "openai.user1",
-        "openai.user2",
-    ]
-    assert pool.blocked_retry_counts == [0, 0]
-    assert pool.reset_calls == 0
+    assert google_pool.prompts == []
+    proxy_urls = [p["http"] for p in gemini_client.proxies]
+    assert len(proxy_urls) == 2
+    assert "openai.user1" in proxy_urls[0]
+    assert "openai.user2" in proxy_urls[1]
 
     requests_by_proxy = {record.proxy_username: record for record in recent}
     assert requests_by_proxy["openai.user1"].status == "error"
-    assert requests_by_proxy["openai.user1"].google_block_ips == [
-        "2606:c700:1:47:9e6b:ff:fe5e:b6f5"
-    ]
     assert requests_by_proxy["openai.user2"].status == "ok"
     assert sessions["openai.user1"].status == "cooldown"
     assert sessions["openai.user1"].request_block_count == 1
     assert sessions["openai.user2"].status == "active"
     assert sessions["openai.user2"].request_success_count == 1
-    assert recovery.reasons == ["google-blocked-pool-below-target"]
 
 
-def test_query_reselects_sticky_proxy_session_after_google_non_answer_page(
+def test_query_reselects_sticky_proxy_session_after_gemini_runtime_error(
     test_app,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
     with TestClient(test_app) as client:
-        test_app.state.services.settings.google_ai_blocked_retry_count = 1
-        test_app.state.services.settings.proxy_auto_recovery_target_active = 2
         test_app.state.services.store.update_config(
             ServiceConfigUpdate(
                 default_model="google-search",
@@ -1393,17 +1533,13 @@ def test_query_reselects_sticky_proxy_session_after_google_non_answer_page(
         )
         test_app.state.services.proxy_session_store.mark_canary_success(first.id)
         test_app.state.services.proxy_session_store.mark_canary_success(second.id)
-        pool = _install_fake_pool(
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        gemini_client = _install_fake_gemini_client(
             test_app,
+            monkeypatch,
             answer_text="Recovered answer.",
-            outcomes=[
-                GoogleAiUnavailableError(
-                    "Google AI Mode is not available for this browser session."
-                )
-            ],
+            outcomes=[GeminiWebRuntimeError("Gemini web failed (test).")],
         )
-        recovery = FakeProxyAutoRecovery()
-        test_app.state.services.proxy_auto_recovery = recovery
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -1411,29 +1547,29 @@ def test_query_reselects_sticky_proxy_session_after_google_non_answer_page(
         )
         recent = test_app.state.services.store.list_recent_requests(limit=2)
         sessions = {
-            snapshot.proxy_username: snapshot
-            for snapshot in test_app.state.services.proxy_session_store.list_proxy_sessions(
-                limit=10
-            )
+            item.proxy_username: item
+            for item in test_app.state.services.proxy_session_store.list_proxy_sessions(limit=10)
         }
 
     assert response.status_code == 200
     assert response.json()["answer"] == "Recovered answer."
-    assert [config.browser_proxy_username for config in pool.configs] == [
-        "openai.user1",
-        "openai.user2",
-    ]
-    assert pool.reset_calls == 0
+    assert google_pool.prompts == []
+    proxy_urls = [p["http"] for p in gemini_client.proxies]
+    assert len(proxy_urls) == 2
+    assert "openai.user1" in proxy_urls[0]
+    assert "openai.user2" in proxy_urls[1]
     requests_by_proxy = {record.proxy_username: record for record in recent}
     assert requests_by_proxy["openai.user1"].status == "error"
     assert requests_by_proxy["openai.user2"].status == "ok"
-    assert sessions["openai.user1"].status == "cooldown"
+    assert sessions["openai.user1"].status == "active"
     assert sessions["openai.user1"].request_error_count == 1
     assert sessions["openai.user2"].request_success_count == 1
-    assert recovery.reasons == ["google-unavailable-pool-below-target"]
 
 
-def test_query_fails_fast_when_sticky_enabled_without_active_session(test_app) -> None:
+def test_query_default_engine_falls_back_to_base_proxy_without_active_session(
+    test_app,
+    monkeypatch,
+) -> None:
     with TestClient(test_app) as client:
         test_app.state.services.store.update_config(
             ServiceConfigUpdate(
@@ -1452,7 +1588,12 @@ def test_query_fails_fast_when_sticky_enabled_without_active_session(test_app) -
                 resin_sticky_session_enabled=True,
             )
         )
-        pool = _install_fake_pool(test_app)
+        google_pool = _install_fake_pool(test_app)
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Base proxy answer.",
+        )
         response = client.post(
             "/query",
             headers=_auth_headers(),
@@ -1460,16 +1601,24 @@ def test_query_fails_fast_when_sticky_enabled_without_active_session(test_app) -
         )
         recent = test_app.state.services.store.list_recent_requests(limit=1)
 
-    assert response.status_code == 503
-    assert "No active sticky proxy session" in response.json()["detail"]
-    assert pool.prompts == []
-    assert recent[0].status == "error"
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Base proxy answer."
+    assert google_pool.prompts == []
+    assert gemini_client.proxies[0] is not None
+    assert ".user" not in gemini_client.proxies[0]["http"]
+    assert recent[0].status == "ok"
     assert recent[0].resin_sticky_session_enabled is True
+    assert recent[0].proxy_username is None
 
 
-def test_query_get_returns_tool_friendly_response_shape(test_app) -> None:
+def test_query_get_returns_tool_friendly_response_shape(test_app, monkeypatch) -> None:
     with TestClient(test_app) as client:
-        pool = _install_fake_pool(test_app, answer_text="GET answer.")
+        google_pool = _install_fake_pool(test_app, answer_text="Google answer.")
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="GET answer.",
+        )
         response = client.get(
             "/query",
             headers=_auth_headers(),
@@ -1485,7 +1634,9 @@ def test_query_get_returns_tool_friendly_response_shape(test_app) -> None:
     assert payload["answer"] == "GET answer."
     assert "citations" not in payload
     assert "google_ai" not in payload
-    assert pool.prompts == ["User request:\nQuestion"]
+    assert google_pool.prompts == []
+    assert len(gemini_client.prompts) == 1
+    assert "Question" in gemini_client.prompts[0]
 
 
 def test_query_get_rejects_blank_query_without_calling_pool(test_app) -> None:
@@ -1501,9 +1652,14 @@ def test_query_get_rejects_blank_query_without_calling_pool(test_app) -> None:
     assert pool.prompts == []
 
 
-def test_query_stream_returns_simple_sse_events(test_app) -> None:
+def test_query_stream_returns_simple_sse_events(test_app, monkeypatch) -> None:
     with TestClient(test_app) as client:
-        _install_fake_pool(test_app, answer_text="Streaming answer.")
+        _install_fake_pool(test_app, answer_text="Google answer.")
+        _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            answer_text="Streaming answer.",
+        )
         response = client.post(
             "/query",
             headers=_auth_headers(),
