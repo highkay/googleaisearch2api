@@ -14,6 +14,7 @@ from googleaisearch2api.config import (
 )
 from googleaisearch2api.duck_ai import DuckAiTimeoutError
 from googleaisearch2api.fast_proxy_probe import FastProxyProbeResult
+from googleaisearch2api.gemini_proxy_pool import GeminiWarpPool
 from googleaisearch2api.gemini_upstream import GeminiUpstreamRuntimeError
 from googleaisearch2api.gemini_web import (
     GeminiWebBlockedError,
@@ -322,6 +323,8 @@ def test_app(tmp_path, monkeypatch) -> Iterator:
     # Isolate auto routing from any developer-configured local gateway.
     monkeypatch.setenv("GEMINI_UPSTREAM_BASE_URL", "")
     monkeypatch.setenv("GEMINI_UPSTREAM_API_KEY", "")
+    # Isolate the WARP exit pool from any developer-configured proxies.
+    monkeypatch.setenv("GEMINI_WARP_PROXIES", "")
     get_settings.cache_clear()
     app = create_app()
     try:
@@ -834,6 +837,126 @@ def test_gemini_engine_uses_active_session_without_probe(test_app, monkeypatch) 
     assert len(gemini_client.prompts) == 1
     assert gemini_client.proxies[0] is not None
     assert "openai.user1" in gemini_client.proxies[0]["http"]
+
+
+def _install_fake_warp_probe(monkeypatch, ok_by_server: dict[str, bool]) -> None:
+    def fake_probe(config, *, timeout_s: float = 8.0):
+        return FastProxyProbeResult(ok=ok_by_server.get(config.browser_proxy_server, False))
+
+    monkeypatch.setattr("googleaisearch2api.app.probe_gemini_http_fast", fake_probe)
+
+
+def test_gemini_engine_uses_warp_exit_when_configured(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+    with TestClient(test_app) as client:
+        test_app.state.services.gemini_warp_pool = GeminiWarpPool(["socks5h://warpplus-us:1080"])
+        _set_search_engine(test_app, "gemini")
+        _install_fake_warp_probe(monkeypatch, {"socks5h://warpplus-us:1080": True})
+        gemini_client = _install_fake_gemini_client(test_app, monkeypatch)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        recent = test_app.state.services.store.list_recent_requests(limit=1)
+
+    assert response.status_code == 200
+    assert len(gemini_client.prompts) == 1
+    assert gemini_client.proxies[0] == {
+        "http": "socks5h://warpplus-us:1080",
+        "https": "socks5h://warpplus-us:1080",
+    }
+    assert recent[0].engine == "gemini"
+    assert recent[0].proxy_username is None
+    assert recent[0].status == "ok"
+
+
+def test_gemini_engine_warp_all_fail_falls_back_to_candidates(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+    with TestClient(test_app) as client:
+        test_app.state.services.gemini_warp_pool = GeminiWarpPool(["socks5h://warp-dead:1080"])
+        _enable_sticky_gemini_proxy(test_app)
+        _add_proxy_session(test_app, session_name="user1", status="cooldown")
+        _add_proxy_session(test_app, session_name="user2", status="cooldown")
+        _install_fake_warp_probe(monkeypatch, {"http://192.0.2.1:2260": True})
+        gemini_client = _install_fake_gemini_client(test_app, monkeypatch)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert len(gemini_client.prompts) == 1
+    assert gemini_client.proxies[0] is not None
+    assert "openai.user1" in gemini_client.proxies[0]["http"]
+    assert "warp-dead" not in gemini_client.proxies[0]["http"]
+
+
+def test_gemini_engine_warp_blocked_rotates_exit(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+    with TestClient(test_app) as client:
+        test_app.state.services.gemini_warp_pool = GeminiWarpPool(
+            ["socks5h://warp-a:1080", "socks5h://warp-b:1080"]
+        )
+        _set_search_engine(test_app, "gemini")
+        _install_fake_warp_probe(
+            monkeypatch,
+            {
+                "socks5h://warp-a:1080": True,
+                "socks5h://warp-b:1080": True,
+            },
+        )
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            outcomes=[GeminiWebBlockedError("Gemini web IP-blocked (test).")],
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert len(gemini_client.prompts) == 2
+    assert gemini_client.proxies[0] == {
+        "http": "socks5h://warp-a:1080",
+        "https": "socks5h://warp-a:1080",
+    }
+    assert gemini_client.proxies[1] == {
+        "http": "socks5h://warp-b:1080",
+        "https": "socks5h://warp-b:1080",
+    }
+
+
+def test_create_services_builds_warp_pool_from_env(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_HOST", "127.0.0.1")
+    monkeypatch.setenv("API_TOKEN", "secret-token")
+    monkeypatch.setenv("BROWSER_WORKERS", "1")
+    monkeypatch.setenv("REQUEST_QUEUE_SIZE", "1")
+    monkeypatch.setenv("PROXY_AUTO_RECOVERY_ENABLED", "false")
+    monkeypatch.setenv("PROXY_AUTO_RECOVERY_RUN_ON_STARTUP", "false")
+    monkeypatch.setenv("BROWSER_PROXY_SERVER", "")
+    monkeypatch.setenv("BROWSER_PROXY_USERNAME", "")
+    monkeypatch.setenv("BROWSER_PROXY_PASSWORD", "")
+    monkeypatch.setenv("RESIN_STICKY_SESSION_ENABLED", "false")
+    monkeypatch.setenv("GEMINI_UPSTREAM_BASE_URL", "")
+    monkeypatch.setenv("GEMINI_UPSTREAM_API_KEY", "")
+    monkeypatch.setenv(
+        "GEMINI_WARP_PROXIES",
+        "socks5h://warp-a:1080, socks5h://warp-b:1080, socks5h://warp-a:1080",
+    )
+    get_settings.cache_clear()
+    app = create_app()
+    try:
+        with TestClient(app):
+            services = app.state.services
+            assert services.gemini_warp_pool is not None
+            assert services.gemini_warp_pool.size == 2
+    finally:
+        get_settings.cache_clear()
 
 
 def test_query_engine_gemini_upstream_dispatches(test_app, monkeypatch) -> None:

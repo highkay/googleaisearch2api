@@ -33,10 +33,12 @@ from .config import (
     ServiceConfig,
     ServiceConfigUpdate,
     get_settings,
+    parse_gemini_warp_proxies,
 )
 from .db import create_db_engine, create_session_factory, create_tables
 from .duck_ai import DuckAiRateLimitedError, DuckAiRunner, DuckAiRuntimeError, DuckAiTimeoutError
 from .fast_proxy_probe import build_proxy_url, probe_gemini_http_fast
+from .gemini_proxy_pool import GeminiWarpPool
 from .gemini_upstream import GeminiUpstreamClient, GeminiUpstreamRuntimeError
 from .gemini_web import (
     GeminiWebBlockedError,
@@ -98,6 +100,7 @@ CONSOLE_SESSION_COOKIE = "googleaisearch2api_console_token"
 GEMINI_RETRY_ATTEMPTS = 3
 GEMINI_RETRY_DELAY_SEC = 2.0
 GEMINI_PROBE_FAIL_COOLDOWN_HOURS = 1
+GEMINI_WARP_MAX_PROBES = 3
 
 
 @dataclass
@@ -111,6 +114,7 @@ class Services:
     proxy_selector: ProxySessionSelector
     proxy_auto_recovery: ProxyAutoRecovery
     browser_gate: BrowserResourceGate
+    gemini_warp_pool: GeminiWarpPool | None = None
 
 
 def _normalize_result_for_prompt(prompt: str, result: GoogleAiResult) -> GoogleAiResult:
@@ -207,6 +211,7 @@ def create_services(settings: AppSettings) -> Services:
         runner_factory=DuckAiRunner,
         blocked_retry_count=0,
     )
+    warp_proxies = parse_gemini_warp_proxies(settings.gemini_warp_proxies)
     return Services(
         settings=settings,
         store=store,
@@ -217,6 +222,7 @@ def create_services(settings: AppSettings) -> Services:
         proxy_selector=proxy_selector,
         proxy_auto_recovery=proxy_auto_recovery,
         browser_gate=browser_gate,
+        gemini_warp_pool=GeminiWarpPool(warp_proxies) if warp_proxies else None,
     )
 
 
@@ -807,30 +813,71 @@ def _run_duck_ai(
         ) from exc
 
 
+@dataclass(frozen=True, slots=True)
+class GeminiProxyChoice:
+    config: ServiceConfig
+    session: ProxySessionSelection | None = None
+    warp_url: str | None = None
+
+    @property
+    def is_base(self) -> bool:
+        return self.session is None and self.warp_url is None
+
+
 def _select_gemini_session(
     services: Services,
     config: ServiceConfig,
     tried: set[int],
-) -> ProxySessionSelection | None:
-    """Pick a sticky session for gemini: hot pool directly, cold pool via fast probe.
+) -> GeminiProxyChoice:
+    """Pick an egress for gemini: WARP exit pool, then sticky sessions, then base.
 
-    Hot-pool (active) sessions are used without probing. When the hot pool is
-    empty, cold candidates are fast-probed against gemini.google.com in order;
-    the first candidate that passes is used, failing candidates are cooled down,
-    and already-tried session ids are skipped so request failures rotate IP.
-    Returns None when no session is usable (caller falls back to base config).
+    WARP exits (Tier-1) are probed first in round-robin order; a healthy exit
+    wins immediately. When no WARP exit is usable the 2260 sticky pool takes
+    over: hot-pool (active) sessions are used without probing, cold candidates
+    are fast-probed against gemini.google.com in order, and already-tried
+    session ids are skipped so request failures rotate IP. Returns a base
+    choice (session=None, warp_url=None) when no egress is usable.
     """
+    warp_pool = services.gemini_warp_pool
+    if warp_pool is not None:
+
+        def probe_warp(url: str) -> bool:
+            warp_config = config.model_copy(
+                update={"browser_proxy_server": url},
+                deep=True,
+            )
+            return probe_gemini_http_fast(
+                warp_config,
+                timeout_s=services.settings.gemini_fast_probe_timeout_s,
+            ).ok
+
+        warp_url = warp_pool.pick_healthy(
+            probe_warp,
+            max_tries=min(GEMINI_WARP_MAX_PROBES, warp_pool.size),
+        )
+        if warp_url is not None:
+            return GeminiProxyChoice(
+                config=config.model_copy(
+                    update={"browser_proxy_server": warp_url},
+                    deep=True,
+                ),
+                warp_url=warp_url,
+            )
+
     if not config.resin_sticky_session_enabled:
-        return None
+        return GeminiProxyChoice(config=config)
     try:
         base_username = resolve_proxy_base_username(config)
     except ProxySessionConfigError as exc:
         logger.warning("Gemini web sticky session base username unavailable: {}", exc)
-        return None
+        return GeminiProxyChoice(config=config)
     active = services.proxy_session_store.select_active_session(base_username)
     if active is not None and active.id not in tried:
-        return ProxySessionSelection(
-            session=active,
+        return GeminiProxyChoice(
+            session=ProxySessionSelection(
+                session=active,
+                config=build_proxy_config_for_session(config, active.proxy_username),
+            ),
             config=build_proxy_config_for_session(config, active.proxy_username),
         )
     candidates = services.proxy_session_store.list_gemini_candidates(
@@ -846,8 +893,11 @@ def _select_gemini_session(
         )
         if probe.ok:
             services.proxy_session_store.mark_selected(candidate.id)
-            return ProxySessionSelection(
-                session=candidate,
+            return GeminiProxyChoice(
+                session=ProxySessionSelection(
+                    session=candidate,
+                    config=build_proxy_config_for_session(config, candidate.proxy_username),
+                ),
                 config=build_proxy_config_for_session(config, candidate.proxy_username),
             )
         services.proxy_session_store.mark_session_cooldown(
@@ -855,7 +905,7 @@ def _select_gemini_session(
             reason="gemini fast probe failed",
             hours=GEMINI_PROBE_FAIL_COOLDOWN_HOURS,
         )
-    return None
+    return GeminiProxyChoice(config=config)
 
 
 def _run_gemini_ai(
@@ -876,12 +926,14 @@ def _run_gemini_ai(
     tried: set[int] = set()
     base_attempted = False
     for attempt_index in range(GEMINI_RETRY_ATTEMPTS):
-        selection = _select_gemini_session(services, config, tried)
-        effective_config = config
-        if selection is not None:
-            effective_config = selection.config
-        elif config.resin_sticky_session_enabled:
-            # Cold pool exhausted: allow exactly ONE base-config attempt.
+        choice = _select_gemini_session(services, config, tried)
+        selection = choice.session
+        effective_config = choice.config
+        warp_url = choice.warp_url
+        if choice.is_base and (
+            config.resin_sticky_session_enabled or services.gemini_warp_pool is not None
+        ):
+            # WARP and sticky pools exhausted: allow exactly ONE base-config attempt.
             base_attempted = True
 
         request_id = services.store.start_request(
@@ -946,6 +998,8 @@ def _run_gemini_ai(
         except GeminiWebBlockedError as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             services.store.finish_request_error(request_id, str(exc), duration_ms)
+            if warp_url is not None and services.gemini_warp_pool is not None:
+                services.gemini_warp_pool.record_failure(warp_url)
             _record_proxy_session_error(
                 services,
                 selection,
@@ -974,6 +1028,8 @@ def _run_gemini_ai(
         except GeminiWebRateLimitedError as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             services.store.finish_request_error(request_id, str(exc), duration_ms)
+            if warp_url is not None and services.gemini_warp_pool is not None:
+                services.gemini_warp_pool.record_failure(warp_url)
             _record_proxy_session_error(
                 services,
                 selection,
@@ -1002,6 +1058,8 @@ def _run_gemini_ai(
         except GeminiWebRuntimeError as exc:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             services.store.finish_request_error(request_id, str(exc), duration_ms)
+            if warp_url is not None and services.gemini_warp_pool is not None:
+                services.gemini_warp_pool.record_failure(warp_url)
             _record_proxy_session_error(
                 services,
                 selection,
