@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from googleaisearch2api.config import ServiceConfig
 from googleaisearch2api.fast_proxy_probe import (
+    GEMINI_PROBE_URL,
     build_proxy_url,
+    probe_gemini_http_fast,
     probe_proxy_http_fast,
 )
 
@@ -140,3 +142,63 @@ def test_probe_proxy_http_fast_still_rejects_sorry_interstitial() -> None:
 
     assert result.ok is False
     assert result.google_blocked is True
+
+
+def test_probe_gemini_http_fast_accepts_clean_gemini_homepage() -> None:
+    session = _FakeSession(
+        {
+            GEMINI_PROBE_URL: _FakeResponse(
+                200, "<html><body>Gemini homepage</body></html>"
+            ),
+        }
+    )
+    config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
+    result = probe_gemini_http_fast(config, session=session)
+
+    assert result.ok is True
+    assert result.reason is None
+    assert result.ips == []
+    assert result.primary_ip is None
+    assert result.raw["gemini"]["status"] == 200
+
+
+def test_probe_gemini_http_fast_rejects_block_marker() -> None:
+    session = _FakeSession(
+        {
+            GEMINI_PROBE_URL: _FakeResponse(
+                200,
+                "Our systems have detected unusual traffic from your computer network.",
+            ),
+        }
+    )
+    config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
+    result = probe_gemini_http_fast(config, session=session)
+
+    assert result.ok is False
+    assert result.reason == "gemini probe blocked (status=200)"
+
+
+def test_probe_gemini_http_fast_rejects_403_status() -> None:
+    session = _FakeSession({GEMINI_PROBE_URL: _FakeResponse(403, "")})
+    config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
+    result = probe_gemini_http_fast(config, session=session)
+
+    assert result.ok is False
+    assert result.reason == "gemini probe blocked (status=403)"
+
+
+def test_probe_gemini_http_fast_ok_false_when_unconfigured() -> None:
+    config = ServiceConfig()
+    result = probe_gemini_http_fast(config)
+
+    assert result.ok is False
+    assert result.reason == "proxy is not configured"
+
+
+def test_probe_gemini_http_fast_fails_on_exception() -> None:
+    session = _FakeSession({GEMINI_PROBE_URL: RuntimeError("boom")})
+    config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
+    result = probe_gemini_http_fast(config, session=session)
+
+    assert result.ok is False
+    assert result.reason == "fast gemini probe failed: RuntimeError"
