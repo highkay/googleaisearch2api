@@ -36,6 +36,11 @@ _SHORT_ANSWER_PROMPT_RE = re.compile(
     r"reply with only|answer with only|only the number|just the number|"
     r"only\s+a\s+number|respond with only|return only the|"
     r"\b\d+\s*(?:plus|minus|times|divided\s+by|[+*/×÷-])\s*\d+\b|"
+    r"\b(?:what|which)\s+(?:is|was|are)\s+(?:the\s+)?"
+    r"(?:capital|name|year|date|number|answer|meaning|population|height|distance)\b|"
+    r"\bwho\s+(?:is|was|are|were)\b|"
+    r"\bwhen\s+(?:was|did|is|does)\b|"
+    r"\bhow\s+(?:many|much|old|tall|far)\b|"
     r"只回答|仅回答|只需回答|只要数字|只输出|仅输出|只回",
     re.IGNORECASE,
 )

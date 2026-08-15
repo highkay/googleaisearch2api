@@ -56,6 +56,12 @@ def test_accepts_short_answer_for_arithmetic_question() -> None:
     assert quality.ok is True
 
 
+def test_accepts_short_answer_for_factual_question() -> None:
+    quality = assess_google_answer_quality("What is the capital of France?", "Paris")
+
+    assert quality.ok is True
+
+
 def test_rejects_follow_up_prompt_tail() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
