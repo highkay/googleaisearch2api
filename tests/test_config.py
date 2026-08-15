@@ -168,6 +168,30 @@ def test_service_config_update_accepts_gemini_upstream_fields() -> None:
     assert defaults.gemini_upstream_model == "gemini-3.7-flash"
 
 
+def test_gemini_fast_probe_knobs_default_and_env(tmp_path: Path, monkeypatch) -> None:
+    default_settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert default_settings.gemini_fast_probe_timeout_s == 8.0
+    assert default_settings.gemini_max_probe_sessions == 3
+
+    monkeypatch.setenv("GEMINI_FAST_PROBE_TIMEOUT_S", "15.5")
+    monkeypatch.setenv("GEMINI_MAX_PROBE_SESSIONS", "5")
+    settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert settings.gemini_fast_probe_timeout_s == 15.5
+    assert settings.gemini_max_probe_sessions == 5
+
+    config = ServiceConfig.from_settings(settings)
+    assert not hasattr(config, "gemini_fast_probe_timeout_s")
+    assert not hasattr(config, "gemini_max_probe_sessions")
+
+    monkeypatch.setenv("GEMINI_FAST_PROBE_TIMEOUT_S", "0")
+    with pytest.raises(ValidationError):
+        AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    monkeypatch.setenv("GEMINI_FAST_PROBE_TIMEOUT_S", "15.5")
+    monkeypatch.setenv("GEMINI_MAX_PROBE_SESSIONS", "0")
+    with pytest.raises(ValidationError):
+        AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+
+
 def test_ai_mode_http_enabled_defaults_false(tmp_path: Path) -> None:
     assert ServiceConfig().ai_mode_http_enabled is False
     default_settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)

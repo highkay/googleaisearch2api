@@ -221,6 +221,16 @@ class AppSettings(BaseSettings):
     )
     gemini_web_cookie: str = Field(default="", validation_alias="GEMINI_WEB_COOKIE")
     gemini_web_sapisid: str = Field(default="", validation_alias="GEMINI_WEB_SAPISID")
+    gemini_fast_probe_timeout_s: float = Field(
+        default=8.0,
+        gt=0,
+        validation_alias="GEMINI_FAST_PROBE_TIMEOUT_S",
+    )
+    gemini_max_probe_sessions: int = Field(
+        default=3,
+        ge=1,
+        validation_alias="GEMINI_MAX_PROBE_SESSIONS",
+    )
 
     browser_proxy_server: str = Field(default="", validation_alias="BROWSER_PROXY_SERVER")
     browser_proxy_username: str = Field(default="", validation_alias="BROWSER_PROXY_USERNAME")
