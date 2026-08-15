@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from googleaisearch2api.config import ServiceConfig
 from googleaisearch2api.fast_proxy_probe import (
-    GEMINI_PROBE_URL,
     build_proxy_url,
     probe_gemini_http_fast,
     probe_proxy_http_fast,
 )
+from googleaisearch2api.gemini_web import (
+    GeminiWebBlockedError,
+    GeminiWebRateLimitedError,
+    GeminiWebRuntimeError,
+)
+from googleaisearch2api.schemas import GoogleAiResult
 
 
 class _FakeResponse:
@@ -144,47 +149,55 @@ def test_probe_proxy_http_fast_still_rejects_sorry_interstitial() -> None:
     assert result.google_blocked is True
 
 
-def test_probe_gemini_http_fast_accepts_clean_gemini_homepage() -> None:
-    session = _FakeSession(
-        {
-            GEMINI_PROBE_URL: _FakeResponse(
-                200, "<html><body>Gemini homepage</body></html>"
-            ),
-        }
+def _install_fake_gemini_probe(monkeypatch, outcome: GoogleAiResult | Exception) -> None:
+    class _FakeGeminiClient:
+        def __init__(self, timeout_s: float) -> None:
+            self.timeout_s = timeout_s
+
+        def run(self, prompt: str, **kwargs: object) -> GoogleAiResult:
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    monkeypatch.setattr(
+        "googleaisearch2api.fast_proxy_probe.GeminiWebClient", _FakeGeminiClient
+    )
+
+
+def test_probe_gemini_http_fast_accepts_valid_request(monkeypatch) -> None:
+    _install_fake_gemini_probe(
+        monkeypatch,
+        GoogleAiResult(
+            answer_text="pong",
+            citations=[],
+            final_url="https://gemini.google.com/app",
+            page_title="",
+        ),
     )
     config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
-    result = probe_gemini_http_fast(config, session=session)
+    result = probe_gemini_http_fast(config)
 
     assert result.ok is True
     assert result.reason is None
-    assert result.ips == []
-    assert result.primary_ip is None
-    assert result.raw["gemini"]["status"] == 200
 
 
-def test_probe_gemini_http_fast_rejects_block_marker() -> None:
-    session = _FakeSession(
-        {
-            GEMINI_PROBE_URL: _FakeResponse(
-                200,
-                "Our systems have detected unusual traffic from your computer network.",
-            ),
-        }
-    )
+def test_probe_gemini_http_fast_rejects_block(monkeypatch) -> None:
+    _install_fake_gemini_probe(monkeypatch, GeminiWebBlockedError("blocked"))
     config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
-    result = probe_gemini_http_fast(config, session=session)
+    result = probe_gemini_http_fast(config)
 
     assert result.ok is False
-    assert result.reason == "gemini probe blocked (status=200)"
+    assert result.google_blocked is True
+    assert "blocked" in result.reason
 
 
-def test_probe_gemini_http_fast_rejects_403_status() -> None:
-    session = _FakeSession({GEMINI_PROBE_URL: _FakeResponse(403, "")})
+def test_probe_gemini_http_fast_rejects_rate_limited(monkeypatch) -> None:
+    _install_fake_gemini_probe(monkeypatch, GeminiWebRateLimitedError("rate limited"))
     config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
-    result = probe_gemini_http_fast(config, session=session)
+    result = probe_gemini_http_fast(config)
 
     assert result.ok is False
-    assert result.reason == "gemini probe blocked (status=403)"
+    assert "rate limited" in result.reason
 
 
 def test_probe_gemini_http_fast_ok_false_when_unconfigured() -> None:
@@ -195,10 +208,10 @@ def test_probe_gemini_http_fast_ok_false_when_unconfigured() -> None:
     assert result.reason == "proxy is not configured"
 
 
-def test_probe_gemini_http_fast_fails_on_exception() -> None:
-    session = _FakeSession({GEMINI_PROBE_URL: RuntimeError("boom")})
+def test_probe_gemini_http_fast_rejects_runtime_error(monkeypatch) -> None:
+    _install_fake_gemini_probe(monkeypatch, GeminiWebRuntimeError("timeout"))
     config = ServiceConfig(browser_proxy_server="http://Default:x@127.0.0.1:2260")
-    result = probe_gemini_http_fast(config, session=session)
+    result = probe_gemini_http_fast(config)
 
     assert result.ok is False
-    assert result.reason == "fast gemini probe failed: RuntimeError"
+    assert "timeout" in result.reason

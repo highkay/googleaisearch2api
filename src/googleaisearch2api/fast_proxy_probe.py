@@ -7,6 +7,12 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from .browser import resolve_browser_proxy
 from .config import ServiceConfig
+from .gemini_web import (
+    GeminiWebBlockedError,
+    GeminiWebClient,
+    GeminiWebRateLimitedError,
+    GeminiWebRuntimeError,
+)
 from .proxy_sessions import normalize_ip_vector
 
 EGRESS_ENDPOINTS = (
@@ -14,7 +20,6 @@ EGRESS_ENDPOINTS = (
     "https://api64.ipify.org?format=json",
 )
 GOOGLE_AI_PROBE_URL = "https://www.google.com/search?udm=50&aep=11&hl=en&q=ping"
-GEMINI_PROBE_URL = "https://gemini.google.com/"
 DEFAULT_IMPERSONATE = "chrome131"
 DEFAULT_TIMEOUT_S = 8.0
 
@@ -233,55 +238,32 @@ def probe_gemini_http_fast(
     config: ServiceConfig,
     *,
     timeout_s: float = DEFAULT_TIMEOUT_S,
-    impersonate: str = DEFAULT_IMPERSONATE,
-    session: Any | None = None,
 ) -> FastProxyProbeResult:
-    """Cheap L0 probe: single GET to gemini.google.com via curl_cffi.
+    """Cheap L0 probe: a lightweight StreamGenerate request via GeminiWebClient.
 
-    No egress IP leg — the Gemini homepage GET alone decides the verdict.
+    A tiny-prompt StreamGenerate POST proves the sticky exit can actually
+    complete a Gemini web request — the homepage GET alone is too weak a signal
+    for flaky exits that answer GET but hang on the POST.
     """
     proxy_url = build_proxy_url(config)
     if not proxy_url:
         return FastProxyProbeResult(ok=False, reason="proxy is not configured")
 
-    client, owns_session = _probe_client(impersonate, session)
-
-    raw: dict[str, Any] = {"proxy_scheme": urlsplit(proxy_url).scheme}
     proxies = {"http": proxy_url, "https": proxy_url}
-
+    client = GeminiWebClient(timeout_s=timeout_s)
     try:
-        response = client.get(
-            GEMINI_PROBE_URL,
-            proxies=proxies,
-            timeout=timeout_s,
-            allow_redirects=True,
-        )
-        status = int(response.status_code)
-        body = response.text or ""
-        raw["gemini"] = {
-            "status": status,
-            "final_url": str(getattr(response, "url", "") or "")[:300],
-            "body_excerpt": body[:400],
-        }
-        blocked = status in {401, 403, 429, 503} or _body_looks_blocked(body)
-        ok = not blocked
-        return FastProxyProbeResult(
-            ok=ok,
-            reason=(f"gemini probe blocked (status={status})" if blocked else None),
-            ips=[],
-            primary_ip=None,
-            raw=raw,
-        )
-    except Exception as exc:
-        raw["gemini"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+        result = client.run("ping", proxies=proxies)
+    except GeminiWebBlockedError as exc:
         return FastProxyProbeResult(
             ok=False,
-            reason=f"fast gemini probe failed: {type(exc).__name__}",
-            raw=raw,
+            reason=f"gemini probe blocked: {exc}",
+            google_blocked=True,
         )
-    finally:
-        if owns_session:
-            try:
-                client.close()
-            except Exception:
-                pass
+    except GeminiWebRateLimitedError as exc:
+        return FastProxyProbeResult(ok=False, reason=f"gemini probe rate limited: {exc}")
+    except GeminiWebRuntimeError as exc:
+        return FastProxyProbeResult(ok=False, reason=f"gemini probe failed: {exc}")
+    return FastProxyProbeResult(
+        ok=True,
+        raw={"answer_preview": result.answer_text[:200]},
+    )
