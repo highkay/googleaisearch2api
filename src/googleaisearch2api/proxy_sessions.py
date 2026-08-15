@@ -998,6 +998,42 @@ class ProxySessionStore:
             rows = session.scalars(statement).all()
             return [ProxySessionSnapshot.from_row(row) for row in rows]
 
+    def list_gemini_candidates(
+        self,
+        proxy_base_username: str,
+        *,
+        limit: int = 3,
+    ) -> list[ProxySessionSnapshot]:
+        # Relaxed read-only query for fast-probing when the hot pool is empty:
+        # any non-retired, non-duplicate session (including cooldown) is a
+        # candidate, ranked least-blocked / least-errored / least-recently-selected.
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(ProxySessionRow)
+                .where(ProxySessionRow.proxy_base_username == proxy_base_username)
+                .where(ProxySessionRow.status != STATUS_RETIRED)
+                .where(ProxySessionRow.duplicate_of_session_id.is_(None))
+                .order_by(
+                    ProxySessionRow.request_block_count.asc(),
+                    ProxySessionRow.request_error_count.asc(),
+                    ProxySessionRow.last_selected_at.asc().nullsfirst(),
+                    ProxySessionRow.id.asc(),
+                )
+                .limit(limit)
+            ).all()
+            return [ProxySessionSnapshot.from_row(row) for row in rows]
+
+    def mark_selected(self, proxy_session_id: int) -> None:
+        now = utc_now()
+        with self._session_factory() as session:
+            row = session.get(ProxySessionRow, proxy_session_id)
+            if row is None:
+                return
+            row.last_selected_at = now
+            row.updated_at = now
+            session.add(row)
+            session.commit()
+
 
 class ProxySessionSelector:
     def __init__(self, store: ProxySessionStore, *, allow_fallback_to_base: bool = False):

@@ -789,3 +789,137 @@ def test_upsert_preserves_existing_status_unless_explicitly_changed(tmp_path: Pa
     )
 
     assert snapshot.status == STATUS_COOLDOWN
+
+
+def test_list_gemini_candidates_orders_by_block_then_error_then_selection(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    clean = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    selected = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user2",
+        proxy_username="openai.user2",
+        status=STATUS_ACTIVE,
+    )
+    errored = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user3",
+        proxy_username="openai.user3",
+    )
+    blocked = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user4",
+        proxy_username="openai.user4",
+    )
+    store.select_active_session("openai")
+    store.finish_request_error(errored.id, blocked=False, error_message="boom")
+    store.finish_request_error(errored.id, blocked=False, error_message="boom")
+    store.finish_request_error(blocked.id, blocked=True, error_message="blocked")
+
+    candidates = store.list_gemini_candidates("openai", limit=10)
+
+    assert [candidate.id for candidate in candidates] == [
+        clean.id,
+        selected.id,
+        errored.id,
+        blocked.id,
+    ]
+
+
+def test_list_gemini_candidates_excludes_retired_and_duplicates(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    first = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    second = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user2",
+        proxy_username="openai.user2",
+    )
+    store.update_egress(
+        proxy_session_id=first.id,
+        ips=["203.0.113.10"],
+        source="test",
+    )
+    store.update_egress(
+        proxy_session_id=second.id,
+        ips=["203.0.113.10"],
+        source="test",
+    )
+    store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user3",
+        proxy_username="openai.user3",
+        status=STATUS_RETIRED,
+    )
+    healthy = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user4",
+        proxy_username="openai.user4",
+    )
+
+    candidates = store.list_gemini_candidates("openai", limit=10)
+
+    assert [candidate.id for candidate in candidates] == [first.id, healthy.id]
+
+
+def test_list_gemini_candidates_respects_limit(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    for index in range(1, 6):
+        store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name=f"user{index}",
+            proxy_username=f"openai.user{index}",
+        )
+    store.upsert_proxy_session(
+        proxy_base_username="other",
+        session_name="user1",
+        proxy_username="other.user1",
+    )
+
+    candidates = store.list_gemini_candidates("openai", limit=3)
+
+    assert [candidate.proxy_username for candidate in candidates] == [
+        "openai.user1",
+        "openai.user2",
+        "openai.user3",
+    ]
+
+
+def test_mark_selected_moves_session_to_back_of_candidate_order(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    first = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user1",
+        proxy_username="openai.user1",
+    )
+    second = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user2",
+        proxy_username="openai.user2",
+    )
+    third = store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name="user3",
+        proxy_username="openai.user3",
+    )
+
+    assert [candidate.id for candidate in store.list_gemini_candidates("openai", limit=10)] == [
+        first.id,
+        second.id,
+        third.id,
+    ]
+
+    store.mark_selected(first.id)
+
+    candidates = store.list_gemini_candidates("openai", limit=10)
+
+    assert [candidate.id for candidate in candidates] == [second.id, third.id, first.id]
+    assert candidates[2].last_selected_at is not None
