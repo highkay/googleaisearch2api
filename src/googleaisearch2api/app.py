@@ -36,7 +36,7 @@ from .config import (
 )
 from .db import create_db_engine, create_session_factory, create_tables
 from .duck_ai import DuckAiRateLimitedError, DuckAiRunner, DuckAiRuntimeError, DuckAiTimeoutError
-from .fast_proxy_probe import build_proxy_url
+from .fast_proxy_probe import build_proxy_url, probe_gemini_http_fast
 from .gemini_upstream import GeminiUpstreamClient, GeminiUpstreamRuntimeError
 from .gemini_web import (
     GeminiWebBlockedError,
@@ -74,6 +74,7 @@ from .proxy_sessions import (
     ProxySessionSelector,
     ProxySessionStore,
     ProxySessionUnavailableError,
+    build_proxy_config_for_session,
     google_block_has_ip_mismatch,
     parse_google_block_ips,
     resolve_proxy_base_username,
@@ -96,6 +97,7 @@ security = HTTPBearer(auto_error=False)
 CONSOLE_SESSION_COOKIE = "googleaisearch2api_console_token"
 GEMINI_RETRY_ATTEMPTS = 3
 GEMINI_RETRY_DELAY_SEC = 2.0
+GEMINI_PROBE_FAIL_COOLDOWN_HOURS = 1
 
 
 @dataclass
@@ -805,6 +807,57 @@ def _run_duck_ai(
         ) from exc
 
 
+def _select_gemini_session(
+    services: Services,
+    config: ServiceConfig,
+    tried: set[int],
+) -> ProxySessionSelection | None:
+    """Pick a sticky session for gemini: hot pool directly, cold pool via fast probe.
+
+    Hot-pool (active) sessions are used without probing. When the hot pool is
+    empty, cold candidates are fast-probed against gemini.google.com in order;
+    the first candidate that passes is used, failing candidates are cooled down,
+    and already-tried session ids are skipped so request failures rotate IP.
+    Returns None when no session is usable (caller falls back to base config).
+    """
+    if not config.resin_sticky_session_enabled:
+        return None
+    try:
+        base_username = resolve_proxy_base_username(config)
+    except ProxySessionConfigError as exc:
+        logger.warning("Gemini web sticky session base username unavailable: {}", exc)
+        return None
+    active = services.proxy_session_store.select_active_session(base_username)
+    if active is not None and active.id not in tried:
+        return ProxySessionSelection(
+            session=active,
+            config=build_proxy_config_for_session(config, active.proxy_username),
+        )
+    candidates = services.proxy_session_store.list_gemini_candidates(
+        base_username,
+        limit=services.settings.gemini_max_probe_sessions,
+    )
+    for candidate in candidates:
+        if candidate.id in tried:
+            continue
+        probe = probe_gemini_http_fast(
+            build_proxy_config_for_session(config, candidate.proxy_username),
+            timeout_s=services.settings.gemini_fast_probe_timeout_s,
+        )
+        if probe.ok:
+            services.proxy_session_store.mark_selected(candidate.id)
+            return ProxySessionSelection(
+                session=candidate,
+                config=build_proxy_config_for_session(config, candidate.proxy_username),
+            )
+        services.proxy_session_store.mark_session_cooldown(
+            candidate.id,
+            reason="gemini fast probe failed",
+            hours=GEMINI_PROBE_FAIL_COOLDOWN_HOURS,
+        )
+    return None
+
+
 def _run_gemini_ai(
     *,
     request: Request,
@@ -820,20 +873,16 @@ def _run_gemini_ai(
     gemini_prompt = adapt_prompt_for_engine(prompt, engine="gemini")
     client = GeminiWebClient(timeout_s=config.answer_timeout_ms / 1000.0)
 
+    tried: set[int] = set()
+    base_attempted = False
     for attempt_index in range(GEMINI_RETRY_ATTEMPTS):
-        selection: ProxySessionSelection | None = None
+        selection = _select_gemini_session(services, config, tried)
         effective_config = config
-        try:
-            selection = services.proxy_selector.select(config, engine="gemini")
-        except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
-            logger.warning(
-                "Gemini web sticky proxy session unavailable; "
-                "continuing with base proxy config: {}",
-                exc,
-            )
-            selection = None
         if selection is not None:
             effective_config = selection.config
+        elif config.resin_sticky_session_enabled:
+            # Cold pool exhausted: allow exactly ONE base-config attempt.
+            base_attempted = True
 
         request_id = services.store.start_request(
             endpoint=endpoint,
@@ -903,6 +952,13 @@ def _run_gemini_ai(
                 blocked=True,
                 error_message=str(exc),
             )
+            if selection is not None:
+                tried.add(selection.session.id)
+            if base_attempted:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Gemini web was IP-blocked",
+                ) from exc
             if attempt_index + 1 >= GEMINI_RETRY_ATTEMPTS:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
@@ -924,6 +980,13 @@ def _run_gemini_ai(
                 blocked=False,
                 error_message=str(exc),
             )
+            if selection is not None:
+                tried.add(selection.session.id)
+            if base_attempted:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Gemini web is rate limited",
+                ) from exc
             if attempt_index + 1 >= GEMINI_RETRY_ATTEMPTS:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -945,6 +1008,13 @@ def _run_gemini_ai(
                 blocked=False,
                 error_message=str(exc),
             )
+            if selection is not None:
+                tried.add(selection.session.id)
+            if base_attempted:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Gemini web failed: {exc}",
+                ) from exc
             if attempt_index + 1 >= GEMINI_RETRY_ATTEMPTS:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,

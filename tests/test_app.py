@@ -13,6 +13,7 @@ from googleaisearch2api.config import (
     get_settings,
 )
 from googleaisearch2api.duck_ai import DuckAiTimeoutError
+from googleaisearch2api.fast_proxy_probe import FastProxyProbeResult
 from googleaisearch2api.gemini_upstream import GeminiUpstreamRuntimeError
 from googleaisearch2api.gemini_web import (
     GeminiWebBlockedError,
@@ -166,6 +167,44 @@ def _install_fake_gemini_client(
     fake = FakeGeminiClient(answer_text=answer_text, outcomes=outcomes)
     monkeypatch.setattr("googleaisearch2api.app.GeminiWebClient", fake)
     return fake
+
+
+def _enable_sticky_gemini_proxy(test_app) -> None:
+    test_app.state.services.store.update_config(
+        ServiceConfigUpdate(
+            default_model="google-search",
+            search_engine="gemini",
+            api_token="secret-token",
+            browser_headless=True,
+            browser_user_agent="",
+            browser_locale="en-US",
+            browser_base_url="https://www.google.com/search?udm=50&aep=11&hl=en",
+            browser_timeout_ms=90_000,
+            answer_timeout_ms=45_000,
+            browser_proxy_server="http://192.0.2.1:2260",
+            browser_proxy_username="openai",
+            browser_proxy_password="proxy-pass",
+            browser_proxy_bypass="",
+            resin_sticky_session_enabled=True,
+        )
+    )
+
+
+def _add_proxy_session(test_app, *, session_name: str, status: str) -> int:
+    snapshot = test_app.state.services.proxy_session_store.upsert_proxy_session(
+        proxy_base_username="openai",
+        session_name=session_name,
+        proxy_username=f"openai.{session_name}",
+        status=status,
+    )
+    return snapshot.id
+
+
+def _install_fake_gemini_probe(monkeypatch, ok_by_username: dict[str, bool]) -> None:
+    def fake_probe(config, *, timeout_s: float = 8.0, impersonate: str = "chrome131", session=None):
+        return FastProxyProbeResult(ok=ok_by_username.get(config.browser_proxy_username, False))
+
+    monkeypatch.setattr("googleaisearch2api.app.probe_gemini_http_fast", fake_probe)
 
 
 class FakeGeminiUpstreamClient:
@@ -642,6 +681,159 @@ def test_gemini_engine_falls_back_to_base_proxy_when_no_session(test_app, monkey
     assert recent[0].engine == "gemini"
     assert recent[0].proxy_username is None
     assert recent[0].status == "ok"
+
+
+def test_gemini_engine_probes_cold_candidate_when_hot_pool_empty(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+    with TestClient(test_app) as client:
+        _enable_sticky_gemini_proxy(test_app)
+        _add_proxy_session(test_app, session_name="user1", status="cooldown")
+        _add_proxy_session(test_app, session_name="user2", status="cooldown")
+        _install_fake_gemini_probe(
+            monkeypatch, {"openai.user1": True, "openai.user2": False}
+        )
+        gemini_client = _install_fake_gemini_client(test_app, monkeypatch)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert len(gemini_client.prompts) == 1
+    assert gemini_client.proxies[0] is not None
+    assert "openai.user1" in gemini_client.proxies[0]["http"]
+
+
+def test_gemini_engine_rotates_to_next_candidate_on_block(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+    with TestClient(test_app) as client:
+        _enable_sticky_gemini_proxy(test_app)
+        _add_proxy_session(test_app, session_name="user1", status="cooldown")
+        _add_proxy_session(test_app, session_name="user2", status="cooldown")
+        _install_fake_gemini_probe(monkeypatch, {"openai.user1": True, "openai.user2": True})
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            outcomes=[GeminiWebBlockedError("Gemini web IP-blocked (test).")],
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert len(gemini_client.prompts) == 2
+    assert gemini_client.proxies[0] is not None
+    assert "openai.user1" in gemini_client.proxies[0]["http"]
+    assert gemini_client.proxies[1] is not None
+    assert "openai.user2" in gemini_client.proxies[1]["http"]
+
+
+def test_gemini_engine_skips_probe_failed_candidates(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+    with TestClient(test_app) as client:
+        _enable_sticky_gemini_proxy(test_app)
+        _add_proxy_session(test_app, session_name="user1", status="cooldown")
+        _add_proxy_session(test_app, session_name="user2", status="cooldown")
+        _install_fake_gemini_probe(
+            monkeypatch, {"openai.user1": False, "openai.user2": True}
+        )
+        gemini_client = _install_fake_gemini_client(test_app, monkeypatch)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+        sessions = test_app.state.services.proxy_session_store.list_proxy_sessions(
+            proxy_base_username="openai"
+        )
+
+    assert response.status_code == 200
+    assert len(gemini_client.prompts) == 1
+    assert gemini_client.proxies[0] is not None
+    assert "openai.user2" in gemini_client.proxies[0]["http"]
+    for proxies in gemini_client.proxies:
+        assert proxies is not None
+        assert ".user1" not in proxies["http"]
+    user1 = next(s for s in sessions if s.proxy_username == "openai.user1")
+    assert user1.status == "cooldown"
+    assert user1.retire_reason == "gemini fast probe failed"
+
+
+def test_gemini_engine_falls_back_to_base_single_attempt_when_all_probes_fail(
+    test_app, monkeypatch
+) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+    with TestClient(test_app) as client:
+        _enable_sticky_gemini_proxy(test_app)
+        _add_proxy_session(test_app, session_name="user1", status="cooldown")
+        _add_proxy_session(test_app, session_name="user2", status="cooldown")
+        _install_fake_gemini_probe(
+            monkeypatch, {"openai.user1": False, "openai.user2": False}
+        )
+        gemini_client = _install_fake_gemini_client(test_app, monkeypatch)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert len(gemini_client.prompts) == 1
+    assert gemini_client.proxies[0] is not None
+    assert gemini_client.proxies[0]["http"].startswith("http://openai:")
+    assert ".user" not in gemini_client.proxies[0]["http"]
+
+
+def test_gemini_engine_base_fallback_does_not_hammer_on_error(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+    with TestClient(test_app) as client:
+        _enable_sticky_gemini_proxy(test_app)
+        _add_proxy_session(test_app, session_name="user1", status="cooldown")
+        _add_proxy_session(test_app, session_name="user2", status="cooldown")
+        _install_fake_gemini_probe(
+            monkeypatch, {"openai.user1": False, "openai.user2": False}
+        )
+        gemini_client = _install_fake_gemini_client(
+            test_app,
+            monkeypatch,
+            outcomes=[GeminiWebBlockedError("Gemini web IP-blocked (test).")],
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 502
+    assert len(gemini_client.prompts) == 1
+
+
+def test_gemini_engine_uses_active_session_without_probe(test_app, monkeypatch) -> None:
+    monkeypatch.setattr("googleaisearch2api.app.GEMINI_RETRY_DELAY_SEC", 0.0)
+
+    def exploding_probe(*args, **kwargs):
+        msg = "Hot-pool sessions must be used directly, never probed."
+        raise AssertionError(msg)
+
+    with TestClient(test_app) as client:
+        _enable_sticky_gemini_proxy(test_app)
+        session_id = _add_proxy_session(test_app, session_name="user1", status="active")
+        test_app.state.services.proxy_session_store.mark_canary_success(session_id)
+        monkeypatch.setattr("googleaisearch2api.app.probe_gemini_http_fast", exploding_probe)
+        gemini_client = _install_fake_gemini_client(test_app, monkeypatch)
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert len(gemini_client.prompts) == 1
+    assert gemini_client.proxies[0] is not None
+    assert "openai.user1" in gemini_client.proxies[0]["http"]
 
 
 def test_query_engine_gemini_upstream_dispatches(test_app, monkeypatch) -> None:
