@@ -8,6 +8,10 @@ _QUESTION_LABEL_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_ARITHMETIC_EXPRESSION_RE = re.compile(
+    r"\b\d+\s*(?:plus|minus|times|divided\s+by|[+*/×÷-])\s*\d+\b",
+    re.IGNORECASE,
+)
 _SITE_OPERATOR_RE = re.compile(r"(?i)\bsite:\S+")
 _HARD_DATE_WINDOW_RE = re.compile(
     r"(?is)(?:时间范围必须限制在|时间范围优先|时间范围)[^。；;\n]{0,120}"
@@ -77,10 +81,11 @@ def adapt_prompt_for_gemini_web(prompt: str) -> str:
     Gemini web answers simple facts from memory (no search, no citations),
     which the quality gate rejects as "short answer has no usable citations".
     An explicit search instruction nudges the model into its search grounding
-    so answers carry sources even for factual questions.
+    so answers carry sources even for factual questions. Pure arithmetic is
+    skipped — searching a math expression only wastes a Gemini search request.
     """
     base = adapt_prompt_for_engine(prompt, engine="gemini")
-    if not base.strip():
+    if not base.strip() or _ARITHMETIC_EXPRESSION_RE.search(base):
         return base
     if _CJK_RE.search(base):
         return f"{base}\n\n请先联网搜索最新信息，再基于搜索结果回答，并附上来源名称与链接。"

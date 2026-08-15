@@ -97,3 +97,10 @@ def test_adapt_prompt_for_gemini_web_forces_search_cjk() -> None:
 
     assert "请先联网搜索最新信息" in out
     assert "法国的首都是哪里" in out
+
+
+def test_adapt_prompt_for_gemini_web_skips_arithmetic() -> None:
+    out = adapt_prompt_for_gemini_web("What is 19 plus 23?")
+
+    assert "Search the web" not in out
+    assert "19 plus 23" in out
