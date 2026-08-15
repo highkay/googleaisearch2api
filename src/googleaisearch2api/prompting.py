@@ -71,6 +71,25 @@ def adapt_prompt_for_gemini_upstream(prompt: str) -> str:
     return f"{base}\n\nCite each key fact with an inline markdown source link [Title](URL)."
 
 
+def adapt_prompt_for_gemini_web(prompt: str) -> str:
+    """Force native web-search grounding for the in-process Gemini web engine.
+
+    Gemini web answers simple facts from memory (no search, no citations),
+    which the quality gate rejects as "short answer has no usable citations".
+    An explicit search instruction nudges the model into its search grounding
+    so answers carry sources even for factual questions.
+    """
+    base = adapt_prompt_for_engine(prompt, engine="gemini")
+    if not base.strip():
+        return base
+    if _CJK_RE.search(base):
+        return f"{base}\n\n请先联网搜索最新信息，再基于搜索结果回答，并附上来源名称与链接。"
+    return (
+        f"{base}\n\nSearch the web for the latest information first, then answer "
+        "based on the search results and include source names and links."
+    )
+
+
 def _naturalize_for_duck(prompt: str) -> str:
     stripped = prompt.strip()
     if not stripped:

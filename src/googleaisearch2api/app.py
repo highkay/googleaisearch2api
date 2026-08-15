@@ -67,6 +67,7 @@ from .pool import (
 from .prompting import (
     adapt_prompt_for_engine,
     adapt_prompt_for_gemini_upstream,
+    adapt_prompt_for_gemini_web,
     simplify_search_prompt,
 )
 from .proxy_recovery import ProxyAutoRecovery
@@ -920,7 +921,7 @@ def _run_gemini_ai(
     config = services.store.get_config()
     model_name = _resolve_model(requested_model, config)
     # Gemini web is a conversational NL assistant; reuse the Duck.ai naturalization.
-    gemini_prompt = adapt_prompt_for_engine(prompt, engine="gemini")
+    gemini_prompt = adapt_prompt_for_gemini_web(prompt)
     client = GeminiWebClient(timeout_s=config.answer_timeout_ms / 1000.0)
 
     tried: set[int] = set()

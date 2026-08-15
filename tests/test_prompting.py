@@ -1,6 +1,7 @@
 from googleaisearch2api.prompting import (
     adapt_prompt_for_engine,
     adapt_prompt_for_gemini_upstream,
+    adapt_prompt_for_gemini_web,
     simplify_search_prompt,
 )
 
@@ -81,3 +82,18 @@ def test_adapt_prompt_for_gemini_upstream_requests_inline_links() -> None:
     out = adapt_prompt_for_gemini_upstream("What is X?")
     assert "markdown source link [Title](URL)" in out
     assert "What is X?" in out
+
+
+def test_adapt_prompt_for_gemini_web_forces_search_english() -> None:
+    out = adapt_prompt_for_gemini_web("What is the capital of France?")
+
+    assert "Search the web for the latest information" in out
+    assert "capital of France" in out
+    assert "natural language" in out
+
+
+def test_adapt_prompt_for_gemini_web_forces_search_cjk() -> None:
+    out = adapt_prompt_for_gemini_web("法国的首都是哪里？")
+
+    assert "请先联网搜索最新信息" in out
+    assert "法国的首都是哪里" in out
