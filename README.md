@@ -1,14 +1,14 @@
 # Google AI Search2API
 
-`googleaisearch2api` 把 Google AI 搜索页面上的真实浏览器交互包装成一个 OpenAI 兼容 API，并提供一个本地 Web Console 用来查看配置、请求统计和实时探针结果。
+`googleaisearch2api` 把 Gemini web 的 StreamGenerate 协议包装成一个 OpenAI 兼容的搜索 API（进程内纯 HTTP 引擎，无需浏览器），并提供本地 Web Console 查看配置、请求统计和实时探针结果。Duck.ai 浏览器引擎作为自动降级兜底。
 
 ## 运行时事实
 
-- 当前已验证稳定入口是 `https://www.google.com/search?udm=50&aep=11...`，不是 `https://google.com/ai`。
-- 运行时浏览器策略已经收敛为单一 `patchright + chrome`。
-- Docker 使用 Playwright 官方镜像内置 Chromium，并把它映射到 Patchright 的 `chrome` channel 兼容路径。
+- 主引擎是进程内 Gemini web HTTP 引擎（`gemini_web.py`，102 槽 StreamGenerate payload），请求时自动注入强制搜索指令，答案自带 grounding 引用。
+- 代理选择是两层融合池：WARP 出口（Tier-1 稳定层，`GEMINI_WARP_PROXIES` 逗号分隔的 `socks5h://` URL，必须远端 DNS）→ 2260 sticky 会话（Tier-2 容量层）→ base 单次兜底。每层都先快速探测（真实 StreamGenerate POST）再选用，失败自动冷却轮换。
+- Gemini web 的构建版本号（BL）会被缓存复用，避免每次请求都抓取；失败时回退到已知可用的默认 BL。
+- Duck.ai 兜底仍走 `patchright + chrome` 浏览器（Playwright 官方镜像 Chromium，映射到 Patchright `chrome` channel）；原 Google AI Mode 浏览器抓取代码保留休眠，不再参与任何请求路由。
 - 单进程并发通过常驻 browser worker 池实现；每个 worker 独占自己的 browser/context。
-- 纯 `httpx` 直接请求同一 AI 搜索 URL 只能拿到 `enablejs` 壳页，不能把 Google AI 当成稳定公开 HTTP API。
 
 ## 功能
 
@@ -213,11 +213,13 @@ curl http://127.0.0.1:8000/v1/responses \
 
 ## 已知边界
 
-- 这是浏览器自动化方案，不是 Google 官方公开 API。
-- Google 页面结构可能变化；如果选择器或页面行为失效，先运行 `scripts/probe_google_ai.py` 重新取证，再改提取逻辑。
+- Gemini web 引擎走的是逆向的 StreamGenerate 协议（102 槽 payload），不是 Google 官方公开 API；协议可能变化，槽位布局以 `gemini_web.py` 与上游 gemini-web2api 为参考，改动前需先重新取证。
+- 强制搜索指令会让 Gemini 对事实类问题也走搜索 grounding（返回引用）；纯算术问题会自动跳过该指令。
+- WARP 出口必须用 `socks5h://`（远端 DNS），`socks5://` 会 SOCKS 握手失败。
 - 当前 streaming 是在拿到完整答案后按 OpenAI SSE 形状回放，不是 Google 原生流式协议透传。
-- 代理支持已经接入浏览器启动参数，但代理能否连通取决于你自己的代理服务。
+- 代理能否连通取决于你自己的代理服务（WARP 出口需容器接入 `warp-plus_default` 网络，2260 sticky 为 HTTP 代理）。
 - 目前只支持文本输入。`tools`、图片/文件输入、`tool`/`function` 一类消息角色会返回 `422`，而不是静默降级。
+- 原 Google AI Mode 浏览器抓取（`browser.py`、`pool.py`、`proxy_recovery.py`、`scripts/probe_google_ai.py`）保留但休眠，不再参与请求路由。
 
 ## 友情链接
 
