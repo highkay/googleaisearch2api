@@ -47,6 +47,8 @@ docker compose up -d
 
 **开发发布闭环**（必读）：[docs/dev-release.md](docs/dev-release.md)
 
+**WARP 出口稳定性**（运维必读）：[docs/warp-stability.md](docs/warp-stability.md) —— 外部 warp-plus 舰队容器死亡根因、症状→诊断表、真实隧道健康检查配方与身份持久化。加固 overlay 见 `docker-compose.warpplus-hardened.yml`。
+
 ```bash
 uv run pytest -q
 git push origin main
@@ -116,10 +118,10 @@ uv run googleaisearch2api
 - `BROWSER_USER_AGENT`: 可选，覆盖浏览器级 UA；留空时服务会给 headless Chrome 使用普通 Chrome UA
 - `BROWSER_WORKERS`: 常驻浏览器 worker 数
 - `REQUEST_QUEUE_SIZE`: 内存等待队列容量；满了以后返回 `429`
-- `REQUEST_LOG_MAX_ROWS`: SQLite 里最多保留多少条最近请求日志；默认 200
+- `REQUEST_LOG_MAX_ROWS`: SQLite 里最多保留多少条最近请求日志；默认 2000
 - `GOOGLE_AI_BLOCKED_RETRY_COUNT`: Google 返回机器人/abuse block 页面时，回收当前 browser session 后重试的次数；默认 0。只有在代理会轮换到新出口 IP 时才建议调高；同一出口网络被 Google block 时，立即重试通常会提高失败率。
-- `DUCK_AI_WORKERS`: Duck.ai 独立浏览器 worker 数；默认 1。实测 Duck.ai 对并发 burst 更敏感，不建议直接拉高。
-- `DUCK_AI_QUEUE_SIZE`: Duck.ai 队列长度；默认 2。
+- `DUCK_AI_WORKERS`: Duck.ai 独立浏览器 worker 数；默认 4。实测 Duck.ai 对并发 burst 更敏感，如需调高请先小步验证。
+- `DUCK_AI_QUEUE_SIZE`: Duck.ai 队列长度；默认 8。
 - `DUCK_AI_COOLDOWN_SECONDS`: Duck.ai 返回限流时的本地熔断冷却时间；默认 120。
 - `AI_MODE_HTTP_ENABLED`: 是否启用 Google AI Mode 混合 HTTP 快路径（浏览器铸 folif token + curl_cffi 查询）；默认 `false`，未验证协议，需先用 `scripts/probe_ai_mode_tokens.py` 测 token TTL 后再开启。
 - `PROXY_AUTO_RECOVERY_ENABLED`: 启用 sticky session 自动恢复；恢复任务默认只做少量 Google canary，不跑 egress/IPLark，以避免恢复过程本身放大浏览器资源占用。

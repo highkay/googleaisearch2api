@@ -1,0 +1,142 @@
+# illustrative - real fleet's compose lives outside this repo; values (ports
+# 1081-1106, names warpplus-*) map the live fleet.
+#
+# 这份文件不是可以直接 `docker compose up` 的生产配置，而是把"外部 warp-plus 舰队"
+# 的推荐加固要求固化下来的参考清单：真实舰队的 compose 定义在本仓库之外（由
+# 运维侧单独维护）。这里列出的服务名/端口描述的是现网已经在跑的容器：
+#
+#   warpplus-de:1081   warpplus-gb:1082   warpplus-ca:1083
+#   warpplus-scan-dk:1091   warpplus-scan-fi:1094
+#   warpplus-scan-no:1102   warpplus-scan-rs:1106
+#
+# 命名习惯：compose 项目名 warp-plus，服务名如 de/gb/ca/scan-dk，实际容器名变为
+# warpplus-de-warpplus（端口是宿主机映射，容器内部 SOCKS 一律监听 1080）。
+# 加固要点（详见 docs/warp-stability.md）：
+#   1. healthcheck 用"真实隧道探测"（socks5h 走 127.0.0.1:1080 -> Cloudflare 连通性接口），
+#      而不是只看端口有没有在 listen —— 僵尸容器端口开着但隧道已死的场景靠它兜底。
+#   2. restart: unless-stopped —— 崩溃自动拉起，但保留手动 stop 的权利。
+#   3. mem_limit: 512m —— 单容器内存护栏，防 OOM(137) 拖垮宿主机（含 2×64KB/连接缓冲）。
+#   4. 身份持久化：--cache-dir /warp-cache + 命名卷 —— x25519 identity 不随容器重建丢失，
+#      避免反复 Register/UpdateAccount 撞 WARP+ license 设备数上限（~5 台）。
+#   5. 联网：容器接入 warp-plus_default 外部网络并注册别名（warpplus-de 等），
+#      主 API 容器内的 GEMINI_WARP_PROXIES=socks5h://warpplus-de:1080,... 才能按名字连通。
+#
+# 校验：docker compose -f docker-compose.warpplus-hardened.yml config --quiet
+# 运维侧可以把这个文件当作 diff 基准，套用/对照各自的真实舰队 compose。
+
+x-warp-common: &warp-common
+  # 镜像以官方社区镜像为例；真实舰队的镜像/版本可能不同。
+  image: ${WARP_PLUS_IMAGE:-ghcr.io/adipranata/warp-plus:latest}
+  init: true
+  restart: unless-stopped
+  mem_limit: 512m
+  # 容器内 SOCKS 统一监听 1080；端口/别名是每个服务自己的事。license 由舰队在
+  # 运行时注入（-P / WARP_PLUS_LICENSE 环境变量），这里不写死。
+  command: ["/usr/bin/warp-plus", "--bind", "0.0.0.0:1080", "--cache-dir", "/warp-cache"]
+  healthcheck:
+    # 真实隧道探测：curl 走自身 SOCKS(127.0.0.1:1080, socks5h 远端 DNS) 打 Cloudflare
+    # 连通性接口。失败 = 隧道不可用（不只是端口没开），触发重启。
+    test: ["CMD", "curl", "-fsS", "-x", "socks5h://127.0.0.1:1080", "https://connectivity.cloudflareclient.com/cdn-cgi/trace"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 30s
+
+services:
+  de:
+    <<: *warp-common
+    container_name: warpplus-de-warpplus
+    ports:
+      - "1081:1080"
+    networks:
+      warp-plus_default:
+        aliases: [warpplus-de]
+    volumes:
+      - warp-ident-de:/warp-cache
+
+  gb:
+    <<: *warp-common
+    container_name: warpplus-gb-warpplus
+    ports:
+      - "1082:1080"
+    networks:
+      warp-plus_default:
+        aliases: [warpplus-gb]
+    volumes:
+      - warp-ident-gb:/warp-cache
+
+  ca:
+    <<: *warp-common
+    container_name: warpplus-ca-warpplus
+    ports:
+      - "1083:1080"
+    networks:
+      warp-plus_default:
+        aliases: [warpplus-ca]
+    volumes:
+      - warp-ident-ca:/warp-cache
+
+  # scan-* 变体追加 --scan（一次性 1 分钟 UDP 端点扫描）。scan 模式在网络抖动/
+  # 中国大陆直连场景下有启动风险（见 docs/warp-stability.md），已在外的 scan 容器
+  # 建议继续跑；新起 scan 容器先在受控网络验证。
+  scan-dk:
+    <<: *warp-common
+    container_name: warpplus-scan-dk-warpplus
+    command: ["/usr/bin/warp-plus", "--bind", "0.0.0.0:1080", "--cache-dir", "/warp-cache", "--scan"]
+    ports:
+      - "1091:1080"
+    networks:
+      warp-plus_default:
+        aliases: [warpplus-scan-dk]
+    volumes:
+      - warp-ident-scan-dk:/warp-cache
+
+  scan-fi:
+    <<: *warp-common
+    container_name: warpplus-scan-fi-warpplus
+    command: ["/usr/bin/warp-plus", "--bind", "0.0.0.0:1080", "--cache-dir", "/warp-cache", "--scan"]
+    ports:
+      - "1094:1080"
+    networks:
+      warp-plus_default:
+        aliases: [warpplus-scan-fi]
+    volumes:
+      - warp-ident-scan-fi:/warp-cache
+
+  scan-no:
+    <<: *warp-common
+    container_name: warpplus-scan-no-warpplus
+    command: ["/usr/bin/warp-plus", "--bind", "0.0.0.0:1080", "--cache-dir", "/warp-cache", "--scan"]
+    ports:
+      - "1102:1080"
+    networks:
+      warp-plus_default:
+        aliases: [warpplus-scan-no]
+    volumes:
+      - warp-ident-scan-no:/warp-cache
+
+  scan-rs:
+    <<: *warp-common
+    container_name: warpplus-scan-rs-warpplus
+    command: ["/usr/bin/warp-plus", "--bind", "0.0.0.0:1080", "--cache-dir", "/warp-cache", "--scan"]
+    ports:
+      - "1106:1080"
+    networks:
+      warp-plus_default:
+        aliases: [warpplus-scan-rs]
+    volumes:
+      - warp-ident-scan-rs:/warp-cache
+
+networks:
+  warp-plus_default:
+    external: true
+    name: warp-plus_default
+
+volumes:
+  warp-ident-de:
+  warp-ident-gb:
+  warp-ident-ca:
+  warp-ident-scan-dk:
+  warp-ident-scan-fi:
+  warp-ident-scan-no:
+  warp-ident-scan-rs:
