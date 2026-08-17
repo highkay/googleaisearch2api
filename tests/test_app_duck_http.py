@@ -330,3 +330,51 @@ def test_duck_warp_pool_uses_extended_cooldown(tmp_path, monkeypatch) -> None:
             services.pool.close()
             services.duck_pool.close()
     get_settings.cache_clear()
+
+
+def test_run_duck_http_promotes_cold_pool_candidate_via_fast_probe(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_HOST", "127.0.0.1")
+    monkeypatch.setenv("API_TOKEN", "secret-token")
+    monkeypatch.setenv("BROWSER_WORKERS", "1")
+    monkeypatch.setenv("REQUEST_QUEUE_SIZE", "1")
+    monkeypatch.setenv("PROXY_AUTO_RECOVERY_ENABLED", "false")
+    monkeypatch.setenv("PROXY_AUTO_RECOVERY_RUN_ON_STARTUP", "false")
+    monkeypatch.setenv("GEMINI_WARP_PROXIES", "")
+    monkeypatch.setenv("ANSWER_TIMEOUT_MS", "45000")
+    monkeypatch.setenv("RESIN_STICKY_SESSION_ENABLED", "true")
+    monkeypatch.setenv("BROWSER_PROXY_SERVER", "http://192.0.2.1:2260")
+    monkeypatch.setenv("BROWSER_PROXY_USERNAME", "openai")
+    monkeypatch.setenv("BROWSER_PROXY_PASSWORD", "proxy-pass")
+    monkeypatch.setenv("DUCK_ENGINE", "http")
+    get_settings.cache_clear()
+    app = create_app()
+    with TestClient(app) as client:
+        services = app.state.services
+        _set_search_engine(app, "duck")
+        services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user1",
+            proxy_username="openai.user1",
+            status="cooldown",
+        )
+        services.proxy_session_store.upsert_proxy_session(
+            proxy_base_username="openai",
+            session_name="user2",
+            proxy_username="openai.user2",
+            status="cooldown",
+        )
+
+        def fake_probe(config, *, timeout_s: float = 8.0):
+            return FastProxyProbeResult(ok=config.browser_proxy_username == "openai.user2")
+
+        monkeypatch.setattr("googleaisearch2api.app.probe_duck_http_fast", fake_probe)
+        duck_client = _install_fake_duck_http_client(monkeypatch, answer_text="Duck ok.")
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 200
+    assert "openai.user2" in duck_client.proxies[0]["http"]

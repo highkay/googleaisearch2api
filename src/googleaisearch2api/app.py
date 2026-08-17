@@ -1174,13 +1174,45 @@ def _select_duck_session(
     if not config.resin_sticky_session_enabled:
         return GeminiProxyChoice(config=config)
     try:
+        base_username = resolve_proxy_base_username(config)
+    except ProxySessionConfigError as exc:
+        logger.warning("Duck.ai sticky session base username unavailable: {}", exc)
+        return GeminiProxyChoice(config=config)
+    try:
         selection = services.proxy_selector.select(config, engine="duck")
     except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
         logger.warning("Duck.ai sticky session selection unavailable: {}", exc)
-        return GeminiProxyChoice(config=config)
-    if selection is None:
-        return GeminiProxyChoice(config=config)
-    return GeminiProxyChoice(config=selection.config, session=selection)
+        selection = None
+    if selection is not None:
+        return GeminiProxyChoice(config=selection.config, session=selection)
+    # Cold-pool fast-probing (mirrors _select_gemini_session Tier-2): the 2260
+    # sticky fleet has hundreds of exits and no hot pool most of the time, so
+    # verify candidates with a real duck /status probe and promote the first
+    # healthy one; failures cool down to avoid re-probing dead exits.
+    candidates = services.proxy_session_store.list_gemini_candidates(
+        base_username,
+        limit=services.settings.gemini_max_probe_sessions,
+    )
+    for candidate in candidates:
+        probe = probe_duck_http_fast(
+            build_proxy_config_for_session(config, candidate.proxy_username),
+            timeout_s=services.settings.gemini_fast_probe_timeout_s,
+        )
+        if probe.ok:
+            services.proxy_session_store.mark_selected(candidate.id)
+            session_config = build_proxy_config_for_session(
+                config, candidate.proxy_username
+            )
+            return GeminiProxyChoice(
+                session=ProxySessionSelection(session=candidate, config=session_config),
+                config=session_config,
+            )
+        services.proxy_session_store.mark_session_cooldown(
+            candidate.id,
+            reason="duck fast probe failed",
+            hours=GEMINI_PROBE_FAIL_COOLDOWN_HOURS,
+        )
+    return GeminiProxyChoice(config=config)
 
 
 def _run_duck_http(
