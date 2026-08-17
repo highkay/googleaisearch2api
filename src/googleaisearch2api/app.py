@@ -114,6 +114,9 @@ GEMINI_PROBE_FAIL_COOLDOWN_HOURS = 1
 GEMINI_WARP_MAX_PROBES = 3
 DUCK_RETRY_ATTEMPTS = 3
 DUCK_RETRY_DELAY_SEC = 2.0
+# Duck.ai 418s are frequency-driven per egress: cool rejected exits much longer
+# than Gemini's 300s default so bursts stop wasting solves on flagged IPs.
+DUCK_WARP_COOLDOWN_SEC = 1800.0
 
 
 @dataclass
@@ -240,7 +243,11 @@ def create_services(settings: AppSettings) -> Services:
         proxy_auto_recovery=proxy_auto_recovery,
         browser_gate=browser_gate,
         gemini_warp_pool=GeminiWarpPool(warp_proxies) if warp_proxies else None,
-        duck_warp_pool=GeminiWarpPool(duck_warp_proxies) if duck_warp_proxies else None,
+        duck_warp_pool=(
+            GeminiWarpPool(duck_warp_proxies, cooldown_sec=DUCK_WARP_COOLDOWN_SEC)
+            if duck_warp_proxies
+            else None
+        ),
     )
 
 

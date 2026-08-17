@@ -38,6 +38,9 @@ def test_app(tmp_path, monkeypatch) -> Iterator:
     monkeypatch.setenv("GEMINI_UPSTREAM_BASE_URL", "")
     monkeypatch.setenv("GEMINI_UPSTREAM_API_KEY", "")
     monkeypatch.setenv("GEMINI_WARP_PROXIES", "")
+    # Pin tests against the historical default; the production .env may set a
+    # different value and BaseSettings reads the repo-root .env.
+    monkeypatch.setenv("ANSWER_TIMEOUT_MS", "45000")
     # This suite owns the browserless duck HTTP path; the browser path suite
     # (test_app.py) pins DUCK_ENGINE=browser.
     monkeypatch.setenv("DUCK_ENGINE", "http")
@@ -302,3 +305,28 @@ def test_duck_http_engine_rotates_sticky_session_on_block(test_app, monkeypatch)
     assert len(duck_client.prompts) == 2
     assert "openai.user1" in duck_client.proxies[0]["http"]
     assert "openai.user2" in duck_client.proxies[1]["http"]
+
+
+def test_duck_warp_pool_uses_extended_cooldown(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_HOST", "127.0.0.1")
+    monkeypatch.setenv("API_TOKEN", "secret-token")
+    monkeypatch.setenv("BROWSER_WORKERS", "1")
+    monkeypatch.setenv("REQUEST_QUEUE_SIZE", "1")
+    monkeypatch.setenv("PROXY_AUTO_RECOVERY_ENABLED", "false")
+    monkeypatch.setenv("PROXY_AUTO_RECOVERY_RUN_ON_STARTUP", "false")
+    monkeypatch.setenv("GEMINI_WARP_PROXIES", "socks5h://warpplus-us:1080,socks5h://warpplus-gb:1080")
+    monkeypatch.setenv("DUCK_WARP_PROXIES", "")
+    get_settings.cache_clear()
+    app = create_app()
+    with TestClient(app):
+        services = app.state.services
+        try:
+            assert services.duck_warp_pool is not None
+            assert services.gemini_warp_pool is not None
+            assert services.duck_warp_pool._cooldown_sec == 1800.0
+            assert services.gemini_warp_pool._cooldown_sec == 300.0
+        finally:
+            services.pool.close()
+            services.duck_pool.close()
+    get_settings.cache_clear()
