@@ -322,6 +322,7 @@ _SEARCH_RESULTS_TAIL_MARKERS = {
 class AnswerQuality:
     ok: bool
     reason: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 def _normalize(value: str) -> str:
@@ -997,10 +998,13 @@ def assess_search_answer_quality(
     prompt: str,
     answer: str,
     citations: Sequence[object] | None = None,
+    *,
+    strict: bool = False,
 ) -> AnswerQuality:
     prompt_text = _normalize(prompt)
     answer_text = _normalize(answer)
     raw_answer = answer.strip()
+    warnings: list[str] = []
     if not answer_text:
         return AnswerQuality(False, "empty answer")
 
@@ -1031,7 +1035,9 @@ def assess_search_answer_quality(
         return AnswerQuality(False, "answer appears truncated")
 
     if _standalone_source_label_count(raw_answer) >= 2:
-        return AnswerQuality(False, "answer contains standalone source labels")
+        if strict:
+            return AnswerQuality(False, "answer contains standalone source labels")
+        warnings.append("answer contains standalone source labels")
 
     if _standalone_hostname_count(raw_answer) >= 2:
         return AnswerQuality(False, "answer contains standalone hostnames")
@@ -1057,7 +1063,9 @@ def assess_search_answer_quality(
         return AnswerQuality(False, "answer contains non-specific URLs")
 
     if _contains_duplicate_raw_url(raw_answer):
-        return AnswerQuality(False, "answer contains duplicate URLs")
+        if strict:
+            return AnswerQuality(False, "answer contains duplicate URLs")
+        warnings.append("answer contains duplicate URLs")
 
     if _contains_malformed_stock_code(prompt_text, raw_answer):
         return AnswerQuality(False, "answer contains malformed stock code")
@@ -1079,12 +1087,14 @@ def assess_search_answer_quality(
     ):
         return AnswerQuality(False, "short answer has no usable citations")
 
-    return AnswerQuality(True)
+    return AnswerQuality(True, warnings=tuple(warnings))
 
 
 def assess_google_answer_quality(
     prompt: str,
     answer: str,
     citations: Sequence[object] | None = None,
+    *,
+    strict: bool = False,
 ) -> AnswerQuality:
-    return assess_search_answer_quality(prompt, answer, citations)
+    return assess_search_answer_quality(prompt, answer, citations, strict=strict)

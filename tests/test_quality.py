@@ -73,20 +73,42 @@ def test_rejects_follow_up_prompt_tail() -> None:
     assert quality.reason == "answer contains a follow-up prompt tail"
 
 
-def test_rejects_multiple_standalone_source_labels() -> None:
+def test_warns_on_multiple_standalone_source_labels() -> None:
+    # Keep body >120 chars: later multi-item short-answer check would mask the warning path.
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
         """
 台积电 3nm 涨价将推动 A 股半导体供应链重估。
-1. 半导体设备：中微公司、北方华创受益于扩产。
+1. 半导体设备：中微公司、北方华创受益于扩产，订单可见度持续提升。
 财联社
-2. 先进封装：长电科技、通富微电受益于 AI 芯片封测需求。
+2. 先进封装：长电科技、通富微电受益于 AI 芯片封测需求，产能利用率接近满载。
 东方财富
+3. 材料环节：沪硅产业、南大光电的晶圆与光刻材料需求有望同步增长，供应链景气度向上。
 """,
+    )
+
+    assert quality.ok is True
+    assert quality.reason is None
+    assert quality.warnings == ("answer contains standalone source labels",)
+
+
+def test_rejects_multiple_standalone_source_labels_when_strict() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+台积电 3nm 涨价将推动 A 股半导体供应链重估。
+1. 半导体设备：中微公司、北方华创受益于扩产，订单可见度持续提升。
+财联社
+2. 先进封装：长电科技、通富微电受益于 AI 芯片封测需求，产能利用率接近满载。
+东方财富
+3. 材料环节：沪硅产业、南大光电的晶圆与光刻材料需求有望同步增长，供应链景气度向上。
+""",
+        strict=True,
     )
 
     assert quality.ok is False
     assert quality.reason == "answer contains standalone source labels"
+    assert quality.warnings == ()
 
 
 def test_rejects_raw_answer_with_search_results_tail() -> None:
@@ -123,7 +145,7 @@ stcn.com
     assert quality.reason == "answer contains standalone hostnames"
 
 
-def test_rejects_raw_answer_with_duplicate_urls() -> None:
+def test_warns_on_raw_answer_with_duplicate_urls() -> None:
     quality = assess_google_answer_quality(
         "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
         """
@@ -140,8 +162,32 @@ def test_rejects_raw_answer_with_duplicate_urls() -> None:
 """,
     )
 
+    assert quality.ok is True
+    assert quality.reason is None
+    assert quality.warnings == ("answer contains duplicate URLs",)
+
+
+def test_rejects_raw_answer_with_duplicate_urls_when_strict() -> None:
+    quality = assess_google_answer_quality(
+        "台积电 3nm 涨价 AI A股 受益股 最多返回 5 条",
+        """
+标题：台积电，突传重磅！
+来源：证券时报网
+日期：2024-07-07
+链接：https://www.stcn.com/article/detail/1250957.html
+为什么相关：报道说明 3nm 产能紧张与涨价预期。
+标题：AI推动下半导体涨价潮
+来源：证券时报网
+日期：2024-07-07
+链接：https://www.stcn.com/article/detail/1250957.html
+为什么相关：同一个网页被拆成重复结果。
+""",
+        strict=True,
+    )
+
     assert quality.ok is False
     assert quality.reason == "answer contains duplicate URLs"
+    assert quality.warnings == ()
 
 
 def test_normalize_answer_for_prompt_deduplicates_markdown_result_blocks() -> None:
