@@ -15,6 +15,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "sqlalchemy>=2.0.41",
     "uvicorn>=0.35.0",
+    "wasmtime>=47.0.1",
 ]
 
 [project.optional-dependencies]
