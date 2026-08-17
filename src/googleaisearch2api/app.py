@@ -1133,7 +1133,6 @@ def _run_gemini_ai(
 def _select_duck_session(
     services: Services,
     config: ServiceConfig,
-    tried: set[int],
 ) -> GeminiProxyChoice:
     """Pick an egress for the Duck.ai HTTP engine: WARP exits, then one sticky
     duck session, then base. Unlike gemini there is no cold-pool probe rotation:
@@ -1192,10 +1191,9 @@ def _run_duck_http(
     duck_prompt = adapt_prompt_for_engine(prompt, engine="duck")
     client = DuckHttpClient(timeout_s=config.answer_timeout_ms / 1000.0)
 
-    tried: set[int] = set()
     base_attempted = False
     for attempt_index in range(DUCK_RETRY_ATTEMPTS):
-        choice = _select_duck_session(services, config, tried)
+        choice = _select_duck_session(services, config)
         selection = choice.session
         effective_config = choice.config
         warp_url = choice.warp_url
@@ -1289,8 +1287,6 @@ def _run_duck_http(
                 blocked=True,
                 error_message=str(exc),
             )
-            if selection is not None:
-                tried.add(selection.session.id)
             if base_attempted:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
@@ -1319,8 +1315,6 @@ def _run_duck_http(
                 blocked=False,
                 error_message=str(exc),
             )
-            if selection is not None:
-                tried.add(selection.session.id)
             if base_attempted:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,

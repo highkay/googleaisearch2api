@@ -277,16 +277,3 @@ def eval_js(code: str, *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> str:
             return rt.eval_js(code)
         finally:
             rt.deadline = previous
-
-
-def sha256_hex(data: str) -> str:
-    """Hex sha-256 of ``data``, computed inside WebCrypto in the wasm instance."""
-    with _lock:
-        rt = _get_runtime()
-        code = (
-            "(async function(){ var d = await crypto.subtle.digest('SHA-256', "
-            f"new TextEncoder().encode({wasmrt_boot.js_string_literal(data)})); "
-            "return Array.from(new Uint8Array(d)).map(function(b){ "
-            "return b.toString(16).padStart(2, '0'); }).join(''); })()"
-        )
-        return rt.eval_js(code)
