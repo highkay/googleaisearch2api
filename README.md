@@ -52,8 +52,9 @@ docker compose up -d
 ```bash
 uv run pytest -q
 git push origin main
-# 等 Actions success 后：
-./scripts/update_from_ghcr.sh sha-$(git rev-parse --short=7 HEAD)
+# 等 Actions success 后（本机走 sparkcr 镜源）：
+#   .env: GOOGLEAISEARCH2API_IMAGE=ghcr.sparkcr.cn/highkay/googleaisearch2api:sha-$(git rev-parse --short=7 HEAD)
+#   docker compose pull && docker compose up -d --force-recreate
 ```
 
 ## 启动后验证
@@ -234,5 +235,5 @@ uv run pytest
 uv run ruff check .
 uv run ruff format .
 uv run python scripts/probe_google_ai.py --prompt "What changed in OpenAI Responses API?"
-./scripts/update_from_ghcr.sh
+# 发布：.env 改 IMAGE sha → docker compose pull && docker compose up -d --force-recreate（见 docs/dev-release.md）
 ```

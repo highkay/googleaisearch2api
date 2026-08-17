@@ -27,7 +27,7 @@
 标准闭环见 `docs/dev-release.md`：
 
 ```text
-pytest → commit/push main → 等 Actions 推 GHCR → ./scripts/update_from_ghcr.sh sha-<7位>
+pytest → commit/push main → 等 Actions 推 GHCR → .env 改 GOOGLEAISEARCH2API_IMAGE=<sha>（sparkcr 镜源）→ docker compose pull && up -d --force-recreate
 ```
 
 不要默认提交 `.env`、`.env.backup*`、`.deploy-backups/`。

@@ -99,42 +99,25 @@ for r in json.load(sys.stdin)["workflow_runs"][:3]:
 
 ---
 
-## 3. 本地更新 GHCR 镜像（推荐脚本）
+## 3. 本地更新 GHCR 镜像（compose 直改）
+
+不走发布脚本，直接改 `.env` 钉死本次 commit 的 sha，再用 compose 拉取重建（本机可用 `ghcr.sparkcr.cn` 镜源，直连 `ghcr.io` 慢）：
 
 ```bash
-# 生产更稳：钉死本次 commit 的 sha
-./scripts/update_from_ghcr.sh sha-<7位>
-
-# 或跟踪 latest（每次 main 都会动）
-./scripts/update_from_ghcr.sh latest
+# 生产更稳：钉死本次 commit 的 sha（改 .env）
+GOOGLEAISEARCH2API_IMAGE=ghcr.sparkcr.cn/highkay/googleaisearch2api:sha-<7位>
+GOOGLEAISEARCH2API_PULL_POLICY=always
 ```
 
-脚本会：
-
-1. 设置 `GOOGLEAISEARCH2API_IMAGE` / `PULL_POLICY=always`
-2. `docker compose pull`
-3. `docker compose up -d --force-recreate`
-4. 轮询 `/healthz` 直到 `ok=true`
-5. 若 shell 有 `API_TOKEN`，可选跑 `scripts/smoke_api.py`
-
-### 手工等价步骤
+然后：
 
 ```bash
-export GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:sha-<7位>
-export GOOGLEAISEARCH2API_PULL_POLICY=always
 docker compose pull
 docker compose up -d --force-recreate
 curl -fsS http://127.0.0.1:${APP_PORT:-9010}/healthz | python3 -m json.tool
 ```
 
-建议同步写入 `.env`（数据卷不受影响）：
-
-```env
-GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:sha-<7位>
-GOOGLEAISEARCH2API_PULL_POLICY=never
-```
-
-`PULL_POLICY=never` 适合镜像已 pull 到本地后，避免 GHCR 偶发网络抖动导致 recreate 失败；下次升级前再改为 `always` 或直接用脚本。
+healthz `ok=true` 后把 `.env` 里的 `GOOGLEAISEARCH2API_PULL_POLICY` 改回 `never`（镜像已 pull 到本地，避免 GHCR 偶发网络抖动导致 recreate 失败）；下次升级前再改为 `always`。
 
 若包为 private：
 
@@ -180,11 +163,8 @@ curl -sS http://127.0.0.1:9010/v1/chat/completions \
 ## 5. 回滚
 
 ```bash
-# 回上一已知好的 sha
-./scripts/update_from_ghcr.sh sha-<old>
-
-# 或改 .env 后
-# GOOGLEAISEARCH2API_IMAGE=ghcr.io/highkay/googleaisearch2api:sha-<old>
+# 改 .env 回上一已知好的 sha
+# GOOGLEAISEARCH2API_IMAGE=ghcr.sparkcr.cn/highkay/googleaisearch2api:sha-<old>
 # GOOGLEAISEARCH2API_PULL_POLICY=always
 docker compose pull && docker compose up -d --force-recreate
 ```
@@ -217,7 +197,8 @@ SHA=$(git rev-parse --short=7 HEAD)
 echo "waiting for GHCR sha-$SHA ..."
 
 # --- 等 Action success 后本地更新 ---
-./scripts/update_from_ghcr.sh "sha-$SHA"
+# .env: GOOGLEAISEARCH2API_IMAGE=ghcr.sparkcr.cn/highkay/googleaisearch2api:sha-$SHA（PULL_POLICY=always）
+docker compose pull && docker compose up -d --force-recreate
 
 # --- 验收 ---
 curl -fsS http://127.0.0.1:9010/healthz | python3 -m json.tool
