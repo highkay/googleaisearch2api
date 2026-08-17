@@ -159,38 +159,30 @@ docker exec <ctr> sha256sum /warp-cache/*   # 前后一致 = 卷挂载生效
 
 如果每次重建 cache 目录都重新生成（新文件、启动日志再次出现 Register/UpdateAccount）→ 检查 `--cache-dir /warp-cache` 与卷挂载点是否真的对上（常见错误：卷挂到了别的路径，进程实际写的是容器可写层）。
 
-## 5. 巡检脚本 scripts/warp_health.py
+## 5. 巡检与自愈(部署在舰队宿主)
 
-舰队侧的健康巡检脚本，对每个容器做宿主机级真实隧道探测（等价于 §3 的 curl，但在宿主机上以 `-x socks5h://127.0.0.1:<端口>` 打 Cloudflare 连通性接口），并汇总：
+真实的巡检/自愈体系运行在舰队宿主机 `/home/admin/warp-plus/`(由 cron 驱动,不随本仓库发布),三个组件分工单一、互不重复:
 
-- 每个容器的 端口→curl 结果（区分「端口通但隧道死」的僵尸）；
-- 需要 `restart` / unhealthy 时长超阈值的容器列表。
+- **`check_warpplus_proxy.sh`(cron,每 5 分钟,唯一的"行动者")**:真实隧道探测(Cloudflare `cdn-cgi/trace` 的 loc 校验 + Google `generate_204` + Grok/ChatGPT 状态码),带连续失败阈值(`FAIL_THRESHOLD`)、重启宽限(`RESTART_GRACE_SEC`)、单轮重启预算、`flock` 重叠锁和全局故障暂停(global-outage)。只有它做 `docker restart/start`。
+- **`monitor_warpplus.sh`(常驻,事件流)**:每 5 分钟输出 SUMMARY(容器总数、失败 streak 服务数、宽限中实例、核心出口抽检),并把 checker 日志的关键行转成可观测事件(供 Grok 侧消费)。
+- **`warp_health.py`(供 monitor 调用,只读诊断)**:纯 stdlib,只做 `docker inspect` 分类——容器状态、重启次数、OOM 标记、容器级 healthcheck 是否配置、WARP identity 卷(`/cache`)是否持久挂载——每个容器输出一行 `DIAG <name> state=… restarts=… oom=… healthcheck=… identity=… status=ok|restart_loop|stopped`。**只诊断、不重启、不重复网络探测**,monitor 的 summary 周期会把它逐行转发进事件流。
 
-用法（在舰队宿主机上执行）：
+对接方式(已在宿主落地):`monitor_warpplus.sh` 的 `print_summary()` 末尾执行 `python3 /home/admin/warp-plus/scripts/warp_health.py` 并逐行转发。restart 决策仍完全归 checker 的防抖逻辑,诊断信息只用于"为什么重启/为什么不重启"的事后归因(grok 事件带上 OOM/restart_loop 标签)。
 
-```bash
-python scripts/warp_health.py              # 扫默认端口清单
-python scripts/warp_health.py --ports 1081,1082,1083
-python scripts/warp_health.py --json       # 机器可读输出，供监控对接
-```
+自愈闭环因此只有两层,无需仓库内再维护一套巡检脚本(避免与宿主 cron 重复探测或状态漂移):
 
-> `scripts/warp_health.py` 属于外部舰队侧的工具，运行在 warp-plus 宿主上，不在本 API 仓库内。本仓库只提供 §3 的探针配方作为它接入同一判定标准。
-
-自愈闭环建议（healthcheck 只负责「标出来」，拉起由下面任一承担）：
-
-- **最快**：巡检脚本扫描到 `unhealthy` 即 `docker restart <ctr>`；僵尸容器 30s 内被拉回。
-- **更自动**：宿主跑 `willfarrell/autoheal` 之类的 sidecar，对 `unhealthy*` 容器自动重启（它监听 docker events，基于 healthcheck 状态）。
-- **兜底**：崩溃型（exit 1）本来就会被 `restart: unless-stopped` 拉起，僵尸型才需要上面两层。
+- 崩溃型(exit≠0)由 compose `restart: always` 拉起(宿主现网配置);
+- 僵尸型(进程活着但隧道死)由 checker 的连续失败阈值触发 `docker restart`。
 
 ## 6. 内存与 license 护栏（加固要点）
 
 - **mem_limit: 512m**：单容器护栏（覆盖 2×64KB/连接的缓冲），防一个容器 OOM 拖垮共享宿主、连锁放倒一批出口。仍持续 OOM 就先限并行连接数，而不是无限加内存。
-- **restart: unless-stopped**：崩溃/僵尸自动拉起，但保留手动 `stop` 的能力（别用 `always`，避免想停停不下来）。
+- **restart 策略**：宿主现网用 `restart: always`（停机可直接拉满一支舰队）；overlay 参考给的是 `unless-stopped`（保留手动 `stop` 能力、避免误拉）。两种都可用，按停机恢复习惯选一种即可，别在两套 compose 里混用。
 - **license 设备上限 ~5**：7+ 台共享同一 WARP+ license 一定有一批 Register 失败。要么按设备数切分 license，要么砍掉冗余容器；新增出口前先查余量。
 
 ## 7. 加固 overlay 参考
 
-`docker-compose.warpplus-hardened.yml`（本仓库根目录）把以上 §3/§4/§6 固化成一份「illustrative - real fleet's compose lives outside this repo」的对照清单，映射现网 7 个容器（端口 1081–1106、名称 warpplus-*）。真实舰队 compose 在仓库之外，用它做 diff 基准逐项核对即可：
+`docker-compose.warpplus-hardened.yml`（本仓库根目录）把以上 §3/§4/§6 固化成一份「illustrative - real fleet's compose lives outside this repo」的对照清单，抽样映射现网 14 个容器中的 7 个（端口 1081–1106、名称 warpplus-*；完整清单与真实配置以宿主 `/home/admin/warp-plus/docker-compose.yml` 为准）。用它做 diff 基准逐项核对即可：
 
 ```bash
 docker compose -f docker-compose.warpplus-hardened.yml config --quiet   # 校验语法
@@ -211,4 +203,10 @@ docker compose -f docker-compose.warpplus-hardened.yml config --quiet   # 校验
 
 ```bash
 watch -n 60 'docker ps --format "{{.Names}}\t{{.Status}}"'
+```
+
+一条命令拿全部分类诊断（OOM/重启循环/身份卷，宿主部署）：
+
+```bash
+python3 /home/admin/warp-plus/scripts/warp_health.py
 ```
