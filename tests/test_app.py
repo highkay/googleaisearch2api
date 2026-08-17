@@ -21,6 +21,7 @@ from googleaisearch2api.gemini_web import (
     GeminiWebRateLimitedError,
     GeminiWebRuntimeError,
 )
+from googleaisearch2api.pool import BrowserPoolSaturatedError
 from googleaisearch2api.schemas import Citation, GoogleAiResult
 
 
@@ -325,6 +326,9 @@ def test_app(tmp_path, monkeypatch) -> Iterator:
     monkeypatch.setenv("GEMINI_UPSTREAM_API_KEY", "")
     # Isolate the WARP exit pool from any developer-configured proxies.
     monkeypatch.setenv("GEMINI_WARP_PROXIES", "")
+    # Existing tests in this module exercise the Duck.ai BROWSER path; the new
+    # browserless HTTP path has its own suite (test_app_duck_http.py).
+    monkeypatch.setenv("DUCK_ENGINE", "browser")
     get_settings.cache_clear()
     app = create_app()
     try:
@@ -1119,6 +1123,22 @@ def test_query_duck_engine_uses_duck_pool_only(test_app) -> None:
     assert "natural language" in duck_pool.prompts[0].lower()
     assert duck_pool.blocked_retry_counts == [0]
     assert recent[0].engine == "duck"
+
+
+def test_query_duck_engine_saturation_returns_503(test_app) -> None:
+    with TestClient(test_app) as client:
+        _set_search_engine(test_app, "duck")
+        _install_fake_duck_pool(
+            test_app,
+            outcomes=[BrowserPoolSaturatedError("Browser pool is saturated.")],
+        )
+        response = client.post(
+            "/query",
+            headers=_auth_headers(),
+            json={"model": "google-search", "query": "Question"},
+        )
+
+    assert response.status_code == 503
 
 
 def test_query_duck_engine_resets_duck_pool_after_timeout(test_app) -> None:

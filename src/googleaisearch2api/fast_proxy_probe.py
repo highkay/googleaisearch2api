@@ -20,6 +20,8 @@ EGRESS_ENDPOINTS = (
     "https://api64.ipify.org?format=json",
 )
 GOOGLE_AI_PROBE_URL = "https://www.google.com/search?udm=50&aep=11&hl=en&q=ping"
+DUCK_PROBE_URL = "https://duck.ai/duckchat/v1/status"
+DUCK_PROBE_CHALLENGE_HEADER = "x-vqd-hash-1"
 DEFAULT_IMPERSONATE = "chrome131"
 DEFAULT_TIMEOUT_S = 8.0
 
@@ -267,3 +269,76 @@ def probe_gemini_http_fast(
         ok=True,
         raw={"answer_preview": result.answer_text[:200]},
     )
+
+
+def probe_duck_http_fast(
+    config: ServiceConfig,
+    *,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> FastProxyProbeResult:
+    """Status-only Duck.ai L0 screen: GET /duckchat/v1/status and expect the
+    x-vqd-hash-1 challenge header. Solves nothing and never chats, so a
+    candidate exit is screened without burning the ~640ms solver budget.
+    """
+    proxy_url = build_proxy_url(config)
+    if not proxy_url:
+        return FastProxyProbeResult(ok=False, reason="proxy is not configured")
+
+    client, owns_session = _probe_client(DEFAULT_IMPERSONATE, None)
+    raw: dict[str, Any] = {"proxy_scheme": urlsplit(proxy_url).scheme}
+    proxies = {"http": proxy_url, "https": proxy_url}
+    try:
+        try:
+            response = client.get(
+                DUCK_PROBE_URL,
+                headers={"x-vqd-accept": "1"},
+                proxies=proxies,
+                timeout=timeout_s,
+            )
+        except Exception as exc:
+            return FastProxyProbeResult(
+                ok=False,
+                reason=f"duck probe failed: {type(exc).__name__}",
+                raw=raw,
+            )
+
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        response_headers = getattr(response, "headers", None) or {}
+        challenge = next(
+            (
+                value
+                for key, value in response_headers.items()
+                if key.lower() == DUCK_PROBE_CHALLENGE_HEADER
+            ),
+            None,
+        )
+        raw["duck_status"] = {"status": status_code, "challenge": bool(challenge)}
+        if status_code == 429:
+            return FastProxyProbeResult(ok=False, reason="duck probe rate limited", raw=raw)
+        if status_code != 200:
+            return FastProxyProbeResult(
+                ok=False,
+                reason=f"duck probe failed (status={status_code})",
+                raw=raw,
+            )
+        if not challenge:
+            return FastProxyProbeResult(ok=False, reason="duck probe: challenge missing", raw=raw)
+
+        # Best-effort egress IP for the caller's debug payload only; it never gates ok-ness.
+        try:
+            egress = client.get(
+                EGRESS_ENDPOINTS[0],
+                proxies=proxies,
+                timeout=timeout_s,
+                allow_redirects=True,
+            )
+            raw["egress_ip"] = _extract_ip(getattr(egress, "text", ""))
+        except Exception as exc:
+            raw["egress_ip_error"] = f"{type(exc).__name__}"[:120]
+        return FastProxyProbeResult(ok=True, raw=raw)
+    finally:
+        if owns_session:
+            try:
+                client.close()
+            except Exception:
+                pass

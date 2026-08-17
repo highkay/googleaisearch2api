@@ -86,6 +86,17 @@ def test_browser_worker_settings_support_current_and_legacy_env_names(tmp_path: 
     assert default_settings.proxy_auto_recovery_canary_repeats == 1
 
 
+def test_duck_ai_workers_and_queue_defaults(tmp_path: Path) -> None:
+    settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert settings.duck_ai_workers == 4
+    assert settings.duck_ai_queue_size == 8
+
+
+def test_request_log_max_rows_default(tmp_path: Path) -> None:
+    settings = AppSettings(_env_file=None, APP_DATA_DIR=tmp_path)
+    assert settings.request_log_max_rows == 2000
+
+
 def test_search_engine_accepts_gemini() -> None:
     config = ServiceConfig(search_engine="gemini")
     assert config.search_engine == "gemini"

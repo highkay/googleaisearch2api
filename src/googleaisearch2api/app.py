@@ -37,7 +37,17 @@ from .config import (
 )
 from .db import create_db_engine, create_session_factory, create_tables
 from .duck_ai import DuckAiRateLimitedError, DuckAiRunner, DuckAiRuntimeError, DuckAiTimeoutError
-from .fast_proxy_probe import build_proxy_url, probe_gemini_http_fast
+from .duck_http import (
+    DuckHttpBlockedError,
+    DuckHttpClient,
+    DuckHttpRateLimitedError,
+    DuckHttpRuntimeError,
+)
+from .fast_proxy_probe import (
+    build_proxy_url,
+    probe_duck_http_fast,
+    probe_gemini_http_fast,
+)
 from .gemini_proxy_pool import GeminiWarpPool
 from .gemini_upstream import GeminiUpstreamClient, GeminiUpstreamRuntimeError
 from .gemini_web import (
@@ -102,6 +112,8 @@ GEMINI_RETRY_ATTEMPTS = 3
 GEMINI_RETRY_DELAY_SEC = 2.0
 GEMINI_PROBE_FAIL_COOLDOWN_HOURS = 1
 GEMINI_WARP_MAX_PROBES = 3
+DUCK_RETRY_ATTEMPTS = 3
+DUCK_RETRY_DELAY_SEC = 2.0
 
 
 @dataclass
@@ -116,6 +128,7 @@ class Services:
     proxy_auto_recovery: ProxyAutoRecovery
     browser_gate: BrowserResourceGate
     gemini_warp_pool: GeminiWarpPool | None = None
+    duck_warp_pool: GeminiWarpPool | None = None
 
 
 def _normalize_result_for_prompt(prompt: str, result: GoogleAiResult) -> GoogleAiResult:
@@ -213,6 +226,9 @@ def create_services(settings: AppSettings) -> Services:
         blocked_retry_count=0,
     )
     warp_proxies = parse_gemini_warp_proxies(settings.gemini_warp_proxies)
+    duck_warp_proxies = parse_gemini_warp_proxies(
+        settings.duck_warp_proxies or settings.gemini_warp_proxies
+    )
     return Services(
         settings=settings,
         store=store,
@@ -224,6 +240,7 @@ def create_services(settings: AppSettings) -> Services:
         proxy_auto_recovery=proxy_auto_recovery,
         browser_gate=browser_gate,
         gemini_warp_pool=GeminiWarpPool(warp_proxies) if warp_proxies else None,
+        duck_warp_pool=GeminiWarpPool(duck_warp_proxies) if duck_warp_proxies else None,
     )
 
 
@@ -577,6 +594,14 @@ def _run_duck_ai(
     max_attempts: int | None = None,
 ) -> tuple[ServiceConfig, str, str, object]:
     services = get_services(request)
+    if services.settings.duck_engine == "http":
+        return _run_duck_http(
+            request=request,
+            endpoint=endpoint,
+            prompt=prompt,
+            stream=stream,
+            requested_model=requested_model,
+        )
     config = services.store.get_config()
     model_name = _resolve_model(requested_model, config)
     # Duck is a conversational NL assistant; rewrite keyword/SERP-shaped prompts.
@@ -684,10 +709,13 @@ def _run_duck_ai(
     except HTTPException:
         raise
     except BrowserPoolSaturatedError as exc:
+        # Duck.ai is the availability floor: when its (browser-only) pool is
+        # saturated, report backend-at-capacity (503), not client throttling
+        # (429), so callers see a retryable upstream state.
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         services.store.finish_request_error(request_id, str(exc), duration_ms)
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
     except BrowserPoolClosedError as exc:
@@ -1099,6 +1127,230 @@ def _run_gemini_ai(
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Gemini web request retry loop exited unexpectedly.",
+    )
+
+
+def _select_duck_session(
+    services: Services,
+    config: ServiceConfig,
+    tried: set[int],
+) -> GeminiProxyChoice:
+    """Pick an egress for the Duck.ai HTTP engine: WARP exits, then one sticky
+    duck session, then base. Unlike gemini there is no cold-pool probe rotation:
+    the sticky select() already rotates among duck-canary-ok sessions.
+    """
+    duck_pool = services.duck_warp_pool
+    if duck_pool is not None:
+
+        def probe_warp(url: str) -> bool:
+            warp_config = config.model_copy(
+                update={"browser_proxy_server": url},
+                deep=True,
+            )
+            return probe_duck_http_fast(
+                warp_config,
+                timeout_s=services.settings.gemini_fast_probe_timeout_s,
+            ).ok
+
+        warp_url = duck_pool.pick_healthy(
+            probe_warp,
+            max_tries=min(GEMINI_WARP_MAX_PROBES, duck_pool.size),
+        )
+        if warp_url is not None:
+            return GeminiProxyChoice(
+                config=config.model_copy(
+                    update={"browser_proxy_server": warp_url},
+                    deep=True,
+                ),
+                warp_url=warp_url,
+            )
+
+    if not config.resin_sticky_session_enabled:
+        return GeminiProxyChoice(config=config)
+    try:
+        selection = services.proxy_selector.select(config, engine="duck")
+    except (ProxySessionConfigError, ProxySessionUnavailableError) as exc:
+        logger.warning("Duck.ai sticky session selection unavailable: {}", exc)
+        return GeminiProxyChoice(config=config)
+    if selection is None:
+        return GeminiProxyChoice(config=config)
+    return GeminiProxyChoice(config=selection.config, session=selection)
+
+
+def _run_duck_http(
+    *,
+    request: Request,
+    endpoint: str,
+    prompt: str,
+    stream: bool,
+    requested_model: str | None,
+) -> tuple[ServiceConfig, str, str, object]:
+    services = get_services(request)
+    config = services.store.get_config()
+    model_name = _resolve_model(requested_model, config)
+    # Duck is a conversational NL assistant; rewrite keyword/SERP-shaped prompts.
+    duck_prompt = adapt_prompt_for_engine(prompt, engine="duck")
+    client = DuckHttpClient(timeout_s=config.answer_timeout_ms / 1000.0)
+
+    tried: set[int] = set()
+    base_attempted = False
+    for attempt_index in range(DUCK_RETRY_ATTEMPTS):
+        choice = _select_duck_session(services, config, tried)
+        selection = choice.session
+        effective_config = choice.config
+        warp_url = choice.warp_url
+        if choice.is_base and (
+            config.resin_sticky_session_enabled or services.duck_warp_pool is not None
+        ):
+            # WARP and sticky pools exhausted: allow exactly ONE base-config attempt.
+            base_attempted = True
+
+        request_id = services.store.start_request(
+            endpoint=endpoint,
+            engine="duck",
+            model_name=model_name,
+            prompt_preview=duck_prompt,
+            client_ip=request.client.host if request.client else None,
+            stream=stream,
+            config=effective_config,
+            proxy_session_id=selection.session.id if selection else None,
+            proxy_base_username=selection.session.proxy_base_username if selection else None,
+            proxy_username=selection.session.proxy_username if selection else None,
+            proxy_primary_ip=selection.session.primary_ip if selection else None,
+            proxy_ip_vector_hash=selection.session.ip_vector_hash if selection else None,
+            proxy_iplark_score=selection.session.iplark_min_quality_score if selection else None,
+        )
+
+        started_at = time.perf_counter()
+        try:
+            proxy_url = build_proxy_url(effective_config)
+            proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+            result = client.run(
+                duck_prompt,
+                proxies=proxies,
+            )
+            # Keep JSON-shape normalization against the original caller prompt when needed.
+            result = _normalize_result_for_prompt(prompt, result)
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            quality = assess_search_answer_quality(
+                duck_prompt,
+                result.answer_text,
+                result.citations,
+            )
+            if not quality.ok:
+                message = f"Duck.ai answer failed quality check: {quality.reason}"
+                services.store.finish_request_error(
+                    request_id,
+                    message,
+                    duration_ms,
+                    result=result,
+                )
+                _record_proxy_session_error(
+                    services,
+                    selection,
+                    blocked=False,
+                    error_message=message,
+                )
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message)
+            services.store.finish_request_success(request_id, result, duration_ms)
+            services.duck_circuit.record_success()
+            if selection is not None:
+                services.proxy_session_store.finish_request_success(
+                    selection.session.id,
+                    engine="duck",
+                )
+            return effective_config, model_name, request_id, result
+        except HTTPException:
+            raise
+        except DuckHttpRateLimitedError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.duck_circuit.record_rate_limited()
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            if warp_url is not None and services.duck_warp_pool is not None:
+                services.duck_warp_pool.record_failure(warp_url)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=False,
+                error_message=str(exc),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Duck.ai rate limited",
+            ) from exc
+        except DuckHttpBlockedError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            if warp_url is not None and services.duck_warp_pool is not None:
+                services.duck_warp_pool.record_failure(warp_url)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=True,
+                error_message=str(exc),
+            )
+            if selection is not None:
+                tried.add(selection.session.id)
+            if base_attempted:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Duck.ai challenge rejected",
+                ) from exc
+            if attempt_index + 1 >= DUCK_RETRY_ATTEMPTS:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Duck.ai challenge rejected",
+                ) from exc
+            logger.warning(
+                "Duck.ai HTTP challenge rejected (attempt {}/{}); retrying after {:.1f}s",
+                attempt_index + 1,
+                DUCK_RETRY_ATTEMPTS,
+                DUCK_RETRY_DELAY_SEC,
+            )
+            time.sleep(DUCK_RETRY_DELAY_SEC)
+        except DuckHttpRuntimeError as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, str(exc), duration_ms)
+            if warp_url is not None and services.duck_warp_pool is not None:
+                services.duck_warp_pool.record_failure(warp_url)
+            _record_proxy_session_error(
+                services,
+                selection,
+                blocked=False,
+                error_message=str(exc),
+            )
+            if selection is not None:
+                tried.add(selection.session.id)
+            if base_attempted:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Duck.ai http failed: {exc}",
+                ) from exc
+            if attempt_index + 1 >= DUCK_RETRY_ATTEMPTS:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Duck.ai http failed: {exc}",
+                ) from exc
+            logger.warning(
+                "Duck.ai HTTP failed (attempt {}/{}); retrying after {:.1f}s: {}",
+                attempt_index + 1,
+                DUCK_RETRY_ATTEMPTS,
+                DUCK_RETRY_DELAY_SEC,
+                exc,
+            )
+            time.sleep(DUCK_RETRY_DELAY_SEC)
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            services.store.finish_request_error(request_id, repr(exc), duration_ms)
+            logger.exception("Unhandled Duck.ai HTTP request failure")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Unhandled Duck.ai HTTP request failure.",
+            ) from exc
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Duck.ai HTTP request retry loop exited unexpectedly.",
     )
 
 

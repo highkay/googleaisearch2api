@@ -190,14 +190,14 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("BROWSER_WORKERS", "MAX_CONCURRENT_REQUESTS"),
     )
     request_queue_size: int = Field(default=8, ge=1, validation_alias="REQUEST_QUEUE_SIZE")
-    request_log_max_rows: int = Field(default=200, ge=10, validation_alias="REQUEST_LOG_MAX_ROWS")
+    request_log_max_rows: int = Field(default=2000, ge=10, validation_alias="REQUEST_LOG_MAX_ROWS")
     google_ai_blocked_retry_count: int = Field(
         default=0,
         ge=0,
         validation_alias=AliasChoices("GOOGLE_AI_BLOCKED_RETRY_COUNT", "GOOGLE_BLOCKED_RETRIES"),
     )
-    duck_ai_workers: int = Field(default=1, ge=1, validation_alias="DUCK_AI_WORKERS")
-    duck_ai_queue_size: int = Field(default=2, ge=1, validation_alias="DUCK_AI_QUEUE_SIZE")
+    duck_ai_workers: int = Field(default=4, ge=1, validation_alias="DUCK_AI_WORKERS")
+    duck_ai_queue_size: int = Field(default=8, ge=1, validation_alias="DUCK_AI_QUEUE_SIZE")
     duck_ai_cooldown_seconds: int = Field(
         default=120,
         ge=0,
@@ -241,6 +241,8 @@ class AppSettings(BaseSettings):
         validation_alias="GEMINI_MAX_PROBE_SESSIONS",
     )
     gemini_warp_proxies: str = Field(default="", validation_alias="GEMINI_WARP_PROXIES")
+    duck_engine: str = Field(default="http", validation_alias="DUCK_ENGINE")
+    duck_warp_proxies: str = Field(default="", validation_alias="DUCK_WARP_PROXIES")
 
     browser_proxy_server: str = Field(default="", validation_alias="BROWSER_PROXY_SERVER")
     browser_proxy_username: str = Field(default="", validation_alias="BROWSER_PROXY_USERNAME")
